@@ -1,0 +1,163 @@
+# 未来函数 / 数据泄露 / 时间对齐 专项审计
+
+> 对应《初始化指令》Step 17。
+> 审计对象：`a_share_quant` 第一阶段代码 + 合成数据冒烟回测（EXP-20260919-162830-2358）。
+> **重要前缀**：本轮审计在**合成随机游走数据**上完成。合成数据不含公司行动、不含真实节假日、
+> 不含真实退市清算，因此只能证明"框架的时间轴处理正确"，**不能证明真实数据下不存在隐患**。
+> 接入真实数据后必须重跑本清单。
+
+---
+
+## 一、结论速览
+
+| 类别 | 结论 |
+|---|---|
+| t 日信号 → t+1 开盘成交（时间对齐） | ✅ 机制正确，有测试锁定 |
+| 因子/策略读取未来日期 | ✅ 机制正确，有测试锁定 |
+| 财务数据按公告日可见 | ✅ 机制正确，有测试锁定 |
+| 股票池 point-in-time（防幸存者偏差） | ✅ 机制正确，有测试锁定 |
+| T+1 / 涨跌停 / 停牌 / 整手 | ✅ 约束生效（本轮 49 笔被拦截） |
+| **数据源层面的幸存者偏差** | ⚠️ **本轮发现缺陷，已修复**（见 §3 风险 #7） |
+| **行业暴露归因的前视偏差** | ⚠️ **本轮发现隐患，已修正**（见 §3 风险 #8） |
+
+**本次审计新增/修改的代码**：`data/validation.py::check_survivorship_bias`、
+`metrics/performance.py::{industry_exposure, cost_contribution}`、`scripts/run_baseline_backtest.py`（行业源优先级），
+以及 9 项对应测试。
+
+---
+
+## 二、已验证为"无未来函数"的路径
+
+每一条都由**机制保证 + 专门的破坏性测试**双重锁定。所谓破坏性测试，是指故意篡改/构造未来数据，
+断言历史信号不得改变——而不是字面上的"看起来没出错"。
+
+| 环节 | 机制 | 锁定测试（文件::函数） |
+|---|---|---|
+| 因子只读到 t | `Factor.compute_as_of` 先把输入截断到 `trade_date <= as_of` | `test_no_lookahead::test_factor_values_unchanged_when_future_mutated`（篡改 t 后全部数据 ×10，t 时刻因子值必须不变） |
+| 因子 as_of 与全量一致 | 同上 | `test_no_lookahead::test_compute_as_of_equals_full_compute_on_that_date` |
+| 策略视野限于 as_of | 引擎只传 `bars[trade_date <= d]` | `test_no_lookahead::test_engine_never_passes_future_bars_to_strategy`（记录策略每次看到的最大日期，断言 <= as_of） |
+| 成交价不早于信号 | 目标权重在信号日 **收盘** 生成，保存在 `pending_weights`，下一个交易日循环才撮合；成交价取**成交日** `open` | `test_no_lookahead::test_execution_uses_next_day_open_not_signal_day_close`（周五出信号，必须按周一开盘成交） |
+| 股票池不受未来状态影响 | `latest_known(status, as_of)` 向后取最后一个已知状态 | `test_no_lookahead::test_universe_unaffected_by_future_status_changes` |
+| 股票池不受未来退市影响 | `delist_date > as_of` 视为当时仍可投资 | `test_no_lookahead::test_universe_unaffected_by_future_delist_dates` |
+| 财务按公告日 | `latest_known(..., date_col="announce_date")` | `test_no_lookahead::test_latest_known_excludes_unannounced_fundamentals`（同一报告期多次修正，必须取当时已公告的那条） |
+| 复权价不混入成交 | `PriceUsagePolicy` 区分 signal/execution/constraint 列 | README「数据模型」表 + `test_costs`/`test_backtest` 均使用原始价撮合 |
+
+运行 75 项测试确认：
+
+```
+pytest tests/  ->  75 passed
+```
+
+---
+
+## 三、审计发现的问题与残余风险
+
+按严重程度排序。**这些都是本轮"检查"的真正产出，不是套话。**
+
+### 风险 #1（中）因子实现层的"自造未来"无法被框架静态阻止
+
+`compute_as_of` 只能保证**输入**不含未来行，无法阻止因子内部自己制造未来——
+例如 `shift(-1)`、`rolling(center=True)`、或对整个面板做跨时间标准化。
+当前 3 个示例因子（`Momentum / Volatility / AvgAmount`）均已用篡改测试覆盖，但新因子必须自行补测试。
+
+- **缓解措施（已落地）**：README「如何新增因子」第 5 条把补篡改测试列为强制流程。
+- **待办（本阶段不做）**：在 `compute_as_of` 增加 debug 模式的"未来扰动不变性"运行时自检——
+  在每次 `compute` 时自动构造一次未来扰动对比。成本较高，等因子数量真正增长后再做。
+- **易混淆点**：同一截面 t 内的横截面标准化（z-score across symbols）**不是**未来函数，允许；
+  跨时间窗的标准化才是。
+
+### 风险 #2（低，非未来函数）仓位规模用 t 日权益、成交用 t+1 开盘价
+
+目标股数 = `weight × t日收盘权益 ÷ t+1开盘价`（`generate_orders` 用 `prev_equity`）。
+隔夜跳空会导致实际权重偏离目标权重。
+
+这是**标准的保守做法**：定仓依据的是 t 日已知信息，成交用 t+1 的真实开盘价，没有未来信息。
+反过来才危险——用 t+1 开盘权益定仓等于假设自己能预知开盘后的组合状态。已在 README 限制清单说明。
+
+### 风险 #3（低）回测区间最后一个信号日不会被成交
+
+`rebalance_dates` 选取"每期最后一个交易日"作为信号日。若该日期就是回测区间的最后一天，
+其目标权重没有 t+1 可执行，因此被丢弃。
+
+这是**正确行为**（不用未来数据），但后果是：`turnover` 与 `costs` 的最后一次记录可能缺失一期。
+分析时不要用"记录条数 == 信号日数量"去做断言。
+
+### 风险 #4（低，语义）`turnover` / `costs` 的索引是成交日，不是信号日
+
+两个序列 keyed by **t+1（成交日）**。与信号日序列做时间序列对齐时会错位一格。
+`cost_contribution` 已提供 `avg_cost_per_rebalance` 规避按条口径的混淆。
+
+### 风险 #5（中）停牌 / 退市期间持仓按最后已知收盘价估值
+
+引擎用 `last_prices` 缓存收盘价，停牌或缺日时不更新，仓位始终按最后已知价估值。
+
+- 不是未来函数（用的是过去的价格）；
+- 但会**平滑掉停牌期间的真实风险**，且不建模退市清算 —— 倾向于让净值曲线显得比真实更稳。
+- README 限制清单 #3 已列。接入真实数据后需补：退市整理期处理、或清算价值的显式假设。
+
+### 风险 #6（低）退市日之前仍视为可投资
+
+`exclude_delisted` 判定为 `delist_date > as_of`。方向上"不使用未来信息"是对的。
+但真实场景中已发布退市风险警示的股票不应买入 —— 届时须基于**当时已公告**的警示数据剔除，
+属于额外数据依赖，本阶段不引入。
+
+### 风险 #7（高，数据层）【本轮发现并修复】数据源层面的幸存者偏差无法察觉
+
+这是本轮审计中**最严重**的一项。
+
+`universe/builder.py` 能在历史时点正确剔除未来退市股 —— 但这个能力有个**前提**：
+数据源必须真的提供了这些退市股及其 `delist_date`。
+如果数据源只提供"当前仍在上市"的证券，回测结果会被**系统性高估**，
+而股票池逻辑本身完全无法察觉，测试也测不出来。
+
+**修复（已实现）**：新增 `data/validation.py::check_survivorship_bias`，并已接入 `validate_dataset`，
+任何回测运行都会自动执行。两类告警：
+
+1. `instruments` 中 `delist_date` 全为空 → 整个样本可能没有任何退市股；
+2. 某些证券行情在数据末端之前就消失，但 `delist_date` 为空 → 股票池会把它们当成可投资证券。
+
+刻意设计为 **warning 而非 exception**：缺少退市股在个别合法数据集中确实存在，
+但不能让它静默通过 —— 必须由使用者看到并确认。
+
+对应测试 5 项：`test_survivorship_sentinel_*`（含"正确标记时不告警"、"末端结束不算消失"两个反例）。
+合成数据中包含 2 只标记了退市日的股票，因此本轮运行未触发告警 —— 哨兵按预期工作。
+
+### 风险 #8（中）【本轮发现并修正】行业暴露归因的前视偏差
+
+实施行业暴露指标时引入：最初直接从 `instruments.industry` 取静态分类。
+若某公司的行业分类在样本期内发生过变更，用"最新分类"回溯历史会让**归因**带上未来信息
+（不影响收益率计算，但归因结论会失真）。
+
+**修正**：`industry_exposure` 同时支持
+`DataFrame[trade_date, symbol, industry]`（逐日快照，按 `merge_asof` 向后取值）
+与 `Series[symbol -> industry]`（静态）。`run_baseline_backtest.py` 改为**优先**取 `bars.industry`，
+退回静态分类时会在 stdout 显式打印告警。
+测试 `test_industry_exposure_historical_snapshot_no_lookahead` 锁定了"行业变更前的日期必须用旧分类"。
+
+---
+
+## 四、刻意明确排除了哪些"看起来像问题"的地方
+
+避免后续误改，记录在此：
+
+- **横截面标准化**（同一 t 内跨个股）≠ 未来函数；
+- **用 t 日收盘价计算信号**本身合法，前提是 t+1 成交（已满足）；
+- `drawdown_curve`、`benchmark` 只在**报告层**使用，不参与信号生成，不构成泄露；
+- 引擎启动时全量预载行情到内存，是为读写效率，与时间轴无关（但限制了超大规模股票池，见 README）。
+
+---
+
+## 五、接入真实数据后必须重跑的检查清单
+
+1. 用真实交易日历替换 `bdate_range` 近似日历（当前缺节假日，年化换算有偏差）；
+2. 确认 `check_survivorship_bias` 告警：退市股必须存在且 `delist_date` 正确；
+3. 确认 `adj_close` 与原始价在除权除息日的行为正确（合成数据中两者相同，此链路未被验证）；
+4. 确认 `limit_up/limit_down` 对 ST（±5%）、次新、科创板/创业板（±20%）的规则区分
+   —— 当前合成数据全部按 ±10% 生成；
+5. 用带 `announce_date` 的真实财务数据跑一遍 `latest_known`，验证 Value/Quality 因子可用性；
+6. 行业暴露改用 `bars.industry` 逐日快照；
+7. 重跑本清单 §2 的全部 8 项破坏性测试。
+
+---
+
+*回测结果不代表未来收益。本项目用于研究，不构成投资建议。*

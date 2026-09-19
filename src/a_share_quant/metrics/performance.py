@@ -133,6 +133,98 @@ def average_holding_period(positions: pd.DataFrame) -> float:
     return float(np.mean(durations)) if durations else float("nan")
 
 
+def industry_exposure(positions: pd.DataFrame,
+                      industry_map: pd.DataFrame | pd.Series) -> pd.DataFrame:
+    """行业暴露：每日各行业权重合计（只统计实际持仓）。
+
+    参数
+    ----
+    positions : 每日持仓快照，至少含 trade_date / symbol / weight；可选 shares。
+    industry_map :
+        * ``DataFrame[trade_date, symbol, industry]`` —— 行业**历史快照**（推荐）；
+          按 trade_date 向后取值（merge_asof），保证 t 日只用 t 日及以前已知的分类，
+          分类变更不会被未来信息污染；
+        * ``Series[symbol -> industry]`` —— 静态分类，仅在确认行业无历史变更时使用。
+
+    返回
+    ----
+    DataFrame：index=trade_date，columns=行业名，值为该行业当日权重合计。
+    缺失分类归入 ``"UNKNOWN"`` 列，绝不静默丢弃。
+    """
+    if positions is None or positions.empty:
+        return pd.DataFrame()
+    need = {"trade_date", "symbol", "weight"}
+    if not need.issubset(positions.columns):
+        raise KeyError(f"positions missing columns: {sorted(need - set(positions.columns))}")
+
+    left = positions.loc[:, ["trade_date", "symbol", "weight"]].copy()
+    if "shares" in positions.columns:  # 只统计实际持仓
+        left = positions.loc[positions["shares"] > 0,
+                             ["trade_date", "symbol", "weight"]].copy()
+    left["trade_date"] = pd.to_datetime(left["trade_date"])
+    if left.empty:
+        return pd.DataFrame()
+
+    if isinstance(industry_map, pd.Series):
+        left["industry"] = left["symbol"].map(industry_map)
+    elif isinstance(industry_map, pd.DataFrame):
+        cols = {"trade_date", "symbol", "industry"}
+        if not cols.issubset(industry_map.columns):
+            raise KeyError(f"industry_map missing columns: {sorted(cols - set(industry_map.columns))}")
+        right = industry_map.loc[:, ["trade_date", "symbol", "industry"]].copy()
+        right["trade_date"] = pd.to_datetime(right["trade_date"])
+        left = left.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
+        right = right.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
+        left = pd.merge_asof(left, right, on="trade_date", by="symbol",
+                             direction="backward", allow_exact_matches=True)
+    else:
+        raise TypeError("industry_map must be a DataFrame or a Series")
+
+    left["industry"] = left["industry"].fillna("UNKNOWN").replace("", "UNKNOWN")
+    out = left.pivot_table(index="trade_date", columns="industry", values="weight",
+                           aggfunc="sum", fill_value=0.0)
+    out.index.name = "trade_date"
+    out.columns.name = "industry"
+    return out.sort_index()
+
+
+def cost_contribution(result: "BacktestResult") -> dict[str, float]:
+    """交易成本贡献：成本金额、占比、年化拖累与单位换手成本。
+
+    成本本身已在 ``backtest/costs.py`` 独立建模，这里只做**归因度量**：
+    回答"成本吃掉了多少收益"，而不是重新计算成本。
+    """
+    eq = result.equity_curve
+    costs = result.costs
+    empty = {"total_costs": 0.0, "cost_pct_of_initial_capital": 0.0,
+             "cost_pct_of_avg_equity": 0.0, "annualized_cost_drag": 0.0,
+             "avg_cost_per_rebalance": 0.0, "total_turnover": 0.0,
+             "cost_bps_per_unit_turnover": float("nan"), "n_cost_events": 0}
+    if costs is None or len(costs) == 0 or len(eq) < 2:
+        return empty
+
+    total = float(costs.sum())
+    n_periods = max(len(eq) - 1, 1)
+    initial = float(eq.iloc[0])
+    avg_equity = float(eq.mean())
+    turnover = result.turnover
+    total_turnover = float(turnover.sum()) if turnover is not None and len(turnover) else 0.0
+    n_events = int((costs > 0).sum())
+    return {
+        "total_costs": total,
+        "cost_pct_of_initial_capital": total / initial if initial > 0 else float("nan"),
+        "cost_pct_of_avg_equity": total / avg_equity if avg_equity > 0 else float("nan"),
+        "annualized_cost_drag": (total / initial * TRADING_DAYS_PER_YEAR / n_periods
+                                 if initial > 0 else float("nan")),
+        "avg_cost_per_rebalance": total / n_events if n_events else 0.0,
+        "total_turnover": total_turnover,
+        "cost_bps_per_unit_turnover": (total / avg_equity / total_turnover * 1e4
+                                       if total_turnover > 0 and avg_equity > 0
+                                       else float("nan")),
+        "n_cost_events": n_events,
+    }
+
+
 # ---------- 汇总 ----------
 
 def summarize(result: "BacktestResult") -> dict[str, Any]:
@@ -174,18 +266,35 @@ def summarize(result: "BacktestResult") -> dict[str, Any]:
         summary["max_positions_held"] = 0
         summary["avg_positions_held"] = 0.0
         summary["max_single_weight"] = 0.0
+    # 交易成本贡献（成本归因，避免只报告"最终收益率"）
+    cc = cost_contribution(result)
+    summary["cost_pct_of_initial_capital"] = cc["cost_pct_of_initial_capital"]
+    summary["annualized_cost_drag"] = cc["annualized_cost_drag"]
+    summary["total_turnover"] = cc["total_turnover"]
     return summary
 
 
-def full_report(result: "BacktestResult") -> dict[str, Any]:
-    """汇总 + 年度/月度收益 + 回撤曲线（键统一转字符串，便于 JSON 序列化）。"""
+def full_report(result: "BacktestResult",
+                industry_map: pd.DataFrame | pd.Series | None = None) -> dict[str, Any]:
+    """汇总 + 年度/月度收益 + 回撤曲线 + 成本归因（+ 可选行业暴露）。
+
+    键统一转字符串，便于 JSON 序列化。``industry_map`` 为 None 时不输出行业暴露
+    （不会伪造行业分类）。
+    """
     report = summarize(result)
+    report["cost_contribution"] = cost_contribution(result)
     report["annual_returns"] = {str(k): v for k, v in
                                 annual_returns(result.equity_curve).items()}
     report["monthly_returns"] = {str(k): v for k, v in
                                  monthly_returns(result.equity_curve).items()}
     report["drawdown_curve"] = {str(k): v for k, v in
                                 drawdown_curve(result.equity_curve).round(6).items()}
+    if industry_map is not None:
+        expo = industry_exposure(result.positions, industry_map)
+        if not expo.empty:
+            report["industry_exposure_avg"] = {
+                str(c): float(expo[c].mean()) for c in expo.columns}
+            report["n_industries"] = int(expo.shape[1])
     return report
 
 

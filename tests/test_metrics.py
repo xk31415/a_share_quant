@@ -11,8 +11,10 @@ from a_share_quant.metrics import (
     annualized_volatility,
     average_holding_period,
     calmar_ratio,
+    cost_contribution,
     cumulative_return,
     drawdown_curve,
+    industry_exposure,
     maximum_drawdown,
     monthly_returns,
     sharpe_ratio,
@@ -93,3 +95,121 @@ def test_average_holding_period():
     # AAA 连续 5 天，BBB 连续 5 天 -> 平均 5
     assert average_holding_period(positions) == pytest.approx(5.0)
     assert math.isnan(average_holding_period(pd.DataFrame()))
+
+
+# ---------- 行业暴露 ----------
+
+def _expo_positions(d1, d2):
+    return pd.DataFrame([
+        {"trade_date": d1, "symbol": "AAA", "shares": 100, "weight": 0.4},
+        {"trade_date": d1, "symbol": "BBB", "shares": 100, "weight": 0.6},
+        {"trade_date": d2, "symbol": "AAA", "shares": 100, "weight": 1.0},
+    ])
+
+
+def test_industry_exposure_static_map():
+    d1, d2 = pd.Timestamp("2021-01-04"), pd.Timestamp("2021-01-05")
+    pos = _expo_positions(d1, d2)
+    imap = pd.Series({"AAA": "科技", "BBB": "消费"})
+    expo = industry_exposure(pos, imap)
+    assert expo.loc[d1, "科技"] == pytest.approx(0.4)
+    assert expo.loc[d1, "消费"] == pytest.approx(0.6)
+    assert expo.loc[d2, "科技"] == pytest.approx(1.0)
+    assert expo.loc[d2, "消费"] == pytest.approx(0.0)
+
+
+def test_industry_exposure_unknown_bucket_not_dropped():
+    d1 = pd.Timestamp("2021-01-04")
+    pos = pd.DataFrame([
+        {"trade_date": d1, "symbol": "AAA", "shares": 100, "weight": 0.4},
+        {"trade_date": d1, "symbol": "BBB", "shares": 100, "weight": 0.6},
+    ])
+    expo = industry_exposure(pos, pd.Series({"AAA": "科技"}))  # BBB 无分类
+    assert "UNKNOWN" in expo.columns
+    assert expo.loc[d1, "UNKNOWN"] == pytest.approx(0.6)
+    # 总权重守恒
+    assert float(expo.loc[d1].sum()) == pytest.approx(1.0)
+
+
+def test_industry_exposure_historical_snapshot_no_lookahead():
+    """行业分类变更时，历史日期必须使用当时已知的分类（防止未来函数）。"""
+    d1, d2 = pd.Timestamp("2021-01-04"), pd.Timestamp("2021-06-01")
+    pos = pd.DataFrame([
+        {"trade_date": d1, "symbol": "AAA", "shares": 100, "weight": 1.0},
+        {"trade_date": d2, "symbol": "AAA", "shares": 100, "weight": 1.0},
+    ])
+    hist = pd.DataFrame([
+        {"trade_date": pd.Timestamp("2021-01-01"), "symbol": "AAA", "industry": "旧行业"},
+        {"trade_date": pd.Timestamp("2021-05-01"), "symbol": "AAA", "industry": "新行业"},
+    ])
+    expo = industry_exposure(pos, hist)
+    assert expo.loc[d1, "旧行业"] == pytest.approx(1.0)
+    assert expo.loc[d1, "新行业"] == pytest.approx(0.0)
+    assert expo.loc[d2, "新行业"] == pytest.approx(1.0)
+    assert expo.loc[d2, "旧行业"] == pytest.approx(0.0)
+
+
+def test_industry_exposure_ignores_zero_share_rows():
+    d1 = pd.Timestamp("2021-01-04")
+    pos = pd.DataFrame([
+        {"trade_date": d1, "symbol": "AAA", "shares": 100, "weight": 0.5},
+        {"trade_date": d1, "symbol": "BBB", "shares": 0, "weight": 0.0},
+    ])
+    expo = industry_exposure(pos, pd.Series({"AAA": "科技", "BBB": "消费"}))
+    # 已清仓（shares=0）的行业不产生暴露列
+    assert "消费" not in expo.columns
+    assert expo.loc[d1, "科技"] == pytest.approx(0.5)
+
+
+def test_industry_exposure_empty_input():
+    assert industry_exposure(pd.DataFrame(), pd.Series(dtype=object)).empty
+
+
+# ---------- 交易成本贡献 ----------
+
+class _FakeResult:
+    def __init__(self, equity, costs, turnover):
+        self.equity_curve = equity
+        self.daily_returns = equity.pct_change().fillna(0.0)
+        self.costs = costs
+        self.turnover = turnover
+        self.positions = pd.DataFrame()
+        self.trades = pd.DataFrame()
+        self.benchmark = None
+
+
+def test_cost_contribution_amounts():
+    eq = _eq([100.0] * 253)  # 1 年（252 个区间），净值不变
+    costs = pd.Series([100.0], index=[eq.index[100]])
+    turnover = pd.Series([1.0], index=[eq.index[100]])
+    cc = cost_contribution(_FakeResult(eq, costs, turnover))
+    assert cc["total_costs"] == pytest.approx(100.0)
+    assert cc["cost_pct_of_initial_capital"] == pytest.approx(1.0)
+    assert cc["cost_pct_of_avg_equity"] == pytest.approx(1.0)
+    # 成本 100 / 期初 100，一年 -> 年化拖累约 100%
+    assert cc["annualized_cost_drag"] == pytest.approx(1.0, rel=1e-3)
+    assert cc["n_cost_events"] == 1
+    assert cc["avg_cost_per_rebalance"] == pytest.approx(100.0)
+    # 成本/平均权益 = 100% ，单位换手成本 = 10000 bps
+    assert cc["cost_bps_per_unit_turnover"] == pytest.approx(10000.0)
+
+
+def test_cost_contribution_empty_costs():
+    eq = _eq([100.0, 101.0])
+    cc = cost_contribution(_FakeResult(eq, pd.Series(dtype=float), pd.Series(dtype=float)))
+    assert cc["total_costs"] == 0.0
+    assert cc["annualized_cost_drag"] == 0.0
+    assert math.isnan(cc["cost_bps_per_unit_turnover"])
+
+
+def test_cost_contribution_in_summarize():
+    """成本归因必须进入汇总，避免只报告"最终收益率"。"""
+    from a_share_quant.metrics import summarize
+
+    eq = _eq([100.0] * 253)
+    s = summarize(_FakeResult(eq, pd.Series([50.0], index=[eq.index[5]]),
+                              pd.Series([1.0], index=[eq.index[5]])))
+    assert "cost_pct_of_initial_capital" in s
+    assert "annualized_cost_drag" in s
+    assert s["total_costs"] == pytest.approx(50.0)
+    assert s["annualized_cost_drag"] == pytest.approx(0.5, rel=1e-3)

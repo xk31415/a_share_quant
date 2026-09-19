@@ -23,7 +23,9 @@ from a_share_quant.data.loader import LocalFileProvider
 from a_share_quant.data.validation import validate_dataset
 from a_share_quant.metrics.performance import (
     annual_returns,
+    cost_contribution,
     full_report,
+    industry_exposure,
     monthly_returns,
     plot_equity_curve,
     summarize,
@@ -117,6 +119,22 @@ def main() -> None:
     result = engine.run()
     summary = summarize(result)
 
+    # 行业分类：优先用 bars 提供的逐日快照（无未来函数风险）；
+    # 无历史快照时才退回 instruments 的静态分类，并明确告警由使用者确认，
+    # 避免"用最新行业分类回溯历史"在暴露归因中引入前视偏差。
+    instruments = provider.get_instruments()
+    industry_map = None
+    industry_source = None
+    if "industry" in bars_all.columns and bars_all["industry"].notna().any():
+        industry_map = bars_all.loc[:, ["trade_date", "symbol", "industry"]]
+        industry_source = "bars 逐日快照（无未来函数风险）"
+    elif "industry" in instruments.columns and instruments["industry"].notna().any():
+        industry_map = instruments.set_index("symbol")["industry"]
+        industry_source = ("instruments 静态分类 —— 若行业发生过变更，"
+                           "暴露归因存在前视偏差，仅作参考")
+    if industry_map is not None:
+        print(f"[info] industry exposure source: {industry_source}")
+
     # ---- 保存结果 ----
     exp_id = new_experiment_id()
     out_dir = root / args.out / exp_id
@@ -129,12 +147,18 @@ def main() -> None:
                                               index_label="trade_date")
     result.costs.rename("costs").to_csv(out_dir / "costs.csv",
                                         index_label="trade_date")
+    if industry_map is not None:
+        industry_exposure(result.positions, industry_map).round(6).to_csv(
+            out_dir / "industry_exposure.csv", index_label="trade_date")
     annual_returns(result.equity_curve).rename("annual_return").to_csv(
         out_dir / "annual_returns.csv", index_label="year")
     monthly_returns(result.equity_curve).rename("monthly_return").to_csv(
         out_dir / "monthly_returns.csv", index_label="month")
     with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
-        json.dump(full_report(result), f, ensure_ascii=False, indent=2,
+        json.dump(full_report(result, industry_map=industry_map), f,
+                  ensure_ascii=False, indent=2, default=str)
+    with open(out_dir / "cost_contribution.json", "w", encoding="utf-8") as f:
+        json.dump(cost_contribution(result), f, ensure_ascii=False, indent=2,
                   default=str)
     try:
         plot_equity_curve(result, str(out_dir / "equity_curve.png"))
@@ -169,6 +193,16 @@ def main() -> None:
             print(f"  {k:32s} {v:,.6f}")
         else:
             print(f"  {k:32s} {v}")
+    cc = cost_contribution(result)
+    print("\n[cost contribution]")
+    print(f"  {'cost_pct_of_initial_capital':32s} {cc['cost_pct_of_initial_capital']:,.6%}")
+    print(f"  {'annualized_cost_drag':32s} {cc['annualized_cost_drag']:,.6%}")
+    print(f"  {'cost_bps_per_unit_turnover':32s} {cc['cost_bps_per_unit_turnover']:,.4f}")
+    if industry_map is not None:
+        expo = industry_exposure(result.positions, industry_map)
+        print("\n[industry exposure — 期间平均权重]")
+        for col in expo.columns:
+            print(f"  {col:32s} {expo[col].mean():,.6f}")
     print(f"\n[result files] {out_dir}")
     print(DISCLAIMER)
 

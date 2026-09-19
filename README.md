@@ -76,11 +76,22 @@ pip install -e ".[dev]"
 python -m pytest tests/
 ```
 
-62 个测试覆盖：日期对齐、数据校验、因子计算、股票池 point-in-time、
-T+1、涨跌停、停牌、佣金/印花税/滑点、组合权重、净值、最大回撤，
-以及专门的**未来函数测试**（`tests/test_no_lookahead.py`：
-篡改未来数据不得改变历史信号；成交价必须是 t+1 开盘价；
-财务数据公告日前不可见；股票池不受未来状态影响）。
+75 个测试覆盖：
+- 日期对齐、交易日历（`test_dates.py`）；
+- 数据 schema 与校验，含**幸存者偏差哨兵**（`test_data.py`）；
+- 因子计算正确性（`test_factors.py`）；
+- 股票池 point-in-time（`test_universe.py`）；
+- T+1、涨跌停、停牌、佣金/印花税/滑点、组合权重、净值（`test_backtest.py`、`test_costs.py`）；
+- 绩效指标，含行业暴露与成本归因（`test_metrics.py`）；
+- **未来函数专项**（`tests/test_no_lookahead.py`）：
+  - 篡改未来数据不得改变历史信号；
+  - 成交价必须是 t+1 开盘价而非信号日收盘价；
+  - 策略永远看不到 `as_of` 之后的数据；
+  - 财务数据在公告日前不可见；
+  - 行业分类变更不得污染历史暴露归因；
+  - 股票池不受未来状态/未来退市影响。
+
+完整的时间对齐与未来函数审计见 **`reports/lookahead_audit.md`**。
 
 ## 6. 如何运行回测
 
@@ -98,6 +109,21 @@ python scripts/run_baseline_backtest.py \
 
 结果输出到 `results/EXP-<id>/`（净值、成交、持仓、换手、成本、指标、图），
 元数据写入 `experiments/EXP-<id>.json`。
+
+每次运行产出的文件：
+
+| 文件 | 内容 |
+|---|---|
+| `equity_curve.csv` / `equity_curve.png` | 净值曲线与回撤图 |
+| `positions.csv` | 每日持仓快照（含权重、可卖份额） |
+| `trades.csv` | 逐笔成交，**含被拦截记录**（`blocked:*`） |
+| `turnover.csv` / `costs.csv` | 换手与成本（索引为成交日 t+1，非信号日） |
+| `annual_returns.csv` / `monthly_returns.csv` | 年度/月度收益分解 |
+| `metrics.json` | 全量指标 + 成本归因 + 行业暴露 |
+| `cost_contribution.json` | 成本归因明细 |
+| `industry_exposure.csv` | 逐日行业暴露权重 |
+
+> 注意：`turnover`/`costs` 的索引是**成交日（t+1）**，不是信号日，做时序对齐时勿错位一格。
 
 ## 7. 数据模型（重要）
 
@@ -120,7 +146,14 @@ python scripts/run_baseline_backtest.py \
 - **股票池**：`get_universe(as_of)` 只用当时已知信息（上市天数、当时未退市、
   当时状态），未来退市/ST 不影响历史时点；
 - **财务数据**：`latest_known(..., date_col="announce_date")` 按公告日取数；
-- **因子**：因子只做后视计算（rolling/shift），`compute_as_of` 截断输入。
+- **因子**：因子只做后视计算（rolling/shift），`compute_as_of` 截断输入；
+- **幸存者偏差哨兵**：`check_survivorship_bias` 已接入 `validate_dataset`，
+  发现「全表无退市股」或「行情中途消失却未标记退市」时告警（不静默通过）。
+  *为什么需要它*：股票池逻辑能在历史时点正确剔除未来退市股，前提是**数据源真的提供了退市股**——
+  若数据源只有当前上市股票，回测会被系统性高估，而股票池逻辑本身察觉不到；
+- **行业暴露归因**：优先取 `bars.industry` 逐日快照（按 as_of 向后取值），
+  退回 `instruments` 静态分类时会在 stdout 显式告警；
+  用"最新行业分类"回溯历史会在归因上引入前视偏差。
 
 ## 9. 如何新增因子
 
@@ -162,7 +195,11 @@ experiment_id、策略名、数据版本指纹、股票池规则、区间、频�
 5. 买入按"开盘即涨停则不成交"的保守假设，未建模盘中部分成交；
 6. 指数成分/市值/行业过滤未启用（缺历史数据，启用时会显式报错而非静默忽略）；
 7. 引擎在启动时全量预载行情（内存型），第一阶段规模足够，超大股票池需改分块；
-8. 基准对照需要基准指数行情数据，当前数据缺失时不输出对比。
+8. 基准对照需要基准指数行情数据，当前数据缺失时不输出对比；
+9. 行业暴露目前只有 `instruments` 的**静态**分类可用（合成数据），
+   真实数据应提供逐日/逐期行业快照，否则归因存在前视偏差；
+10. 因子实现层的"自造未来"（如 `shift(-1)`、跨时间标准化）无法由框架静态阻止，
+    必须靠每个新因子配套的篡改测试把关（见第 9 节流程）。
 
 ## 13. 当前缺少什么数据
 

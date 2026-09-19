@@ -6,6 +6,7 @@ import pytest
 from a_share_quant.data.schema import coerce_bars
 from a_share_quant.data.validation import (
     DataValidationError,
+    check_survivorship_bias,
     validate_bars,
     validate_dataset,
     validate_instruments,
@@ -96,3 +97,72 @@ def test_coerce_bars_sorts_and_casts():
     assert out.equals(coerce_bars(out))  # 幂等
     assert out[["open", "close"]].dtypes.eq("float64").all()
     assert out["is_st"].dtype == bool
+
+
+# ---------- 幸存者偏差哨兵 ----------
+
+def _long_sample(days=300):
+    """构造：AAA 全程在市；BBB 在第 100 个交易日退市（已正确标记）。"""
+    dates = pd.bdate_range("2021-01-04", periods=days)
+    rows = []
+    for d in dates[:100]:
+        rows.append({"trade_date": d, "symbol": "BBB", "open": 10.0, "high": 10.5,
+                     "low": 9.5, "close": 10.0, "volume": 1e6, "amount": 1e7})
+    for d in dates:
+        rows.append({"trade_date": d, "symbol": "AAA", "open": 10.0, "high": 10.5,
+                     "low": 9.5, "close": 10.0, "volume": 1e6, "amount": 1e7})
+    bars = pd.DataFrame(rows)
+    instruments = pd.DataFrame([
+        {"symbol": "AAA", "name": "a", "list_date": dates[0], "delist_date": pd.NaT},
+        {"symbol": "BBB", "name": "b", "list_date": dates[0], "delist_date": dates[99]},
+    ])
+    return bars, instruments
+
+
+def test_survivorship_sentinel_silent_when_delist_marked_correctly():
+    """退市股已正确标记 delist_date -> 不应产生告警。"""
+    bars, inst = _long_sample()
+    assert check_survivorship_bias(inst, bars) == []
+
+
+def test_survivorship_sentinel_detects_missing_delist_mark():
+    """BBB 行情中途消失但未标记退市 -> 必须告警（股票池会误把它当可投资）。"""
+    bars, inst = _long_sample()
+    inst.loc[inst["symbol"] == "BBB", "delist_date"] = pd.NaT  # 抹掉退市标记
+    warns = check_survivorship_bias(inst, bars)
+    assert len(warns) == 2  # 无退市股 + 未标记的中途消失
+    assert any(" BBB " in w or "'BBB'" in w or "['BBB']" in w for w in warns)
+    assert any("delist_date 为空" in w for w in warns)
+
+
+def test_survivorship_sentinel_warns_when_no_delisting_at_all():
+    """整个 instruments 无退市记录 -> 数据源可能只有"当前上市股票"。"""
+    bars, inst = _long_sample()
+    inst2 = inst.loc[inst["symbol"] == "AAA"].copy()
+    bars2 = bars.loc[bars["symbol"] == "AAA"].copy()
+    warns = check_survivorship_bias(inst2, bars2)
+    assert len(warns) == 1
+    assert "survivorship" in warns[0] and "没有任何已退市证券" in warns[0]
+
+
+def test_survivorship_sentinel_ignores_symbols_ending_at_sample_end():
+    """数据末端附近结束的标的属正常上市状态，不应被判为"消失"。"""
+    bars, inst = _long_sample()
+    # BBB 行情延到最后一天附近（只差 30 个自然日）
+    extra = pd.bdate_range("2021-01-04", periods=300)[-10:]
+    rows = [{"trade_date": d, "symbol": "BBB", "open": 10.0, "high": 10.5, "low": 9.5,
+             "close": 10.0, "volume": 1e6, "amount": 1e7} for d in extra]
+    bars2 = pd.concat([bars, pd.DataFrame(rows)], ignore_index=True)
+    inst2 = inst.copy()
+    inst2.loc[inst2["symbol"] == "BBB", "delist_date"] = pd.NaT
+    # max_missing_days=90 -> 尾部 10 天在容忍范围内，不告警（仅剩"无退市股"告警）
+    warns = check_survivorship_bias(inst2, bars2, max_missing_days=90)
+    assert all("delist_date 为空" not in w for w in warns)
+
+
+def test_validate_dataset_includes_survivorship_warnings():
+    """哨兵检查必须接入聚合校验，不能只在外部单独调用才生效。"""
+    bars, inst = _long_sample()
+    inst.loc[inst["symbol"] == "BBB", "delist_date"] = pd.NaT
+    warns = validate_dataset(bars=bars, instruments=inst)
+    assert any("survivorship" in w for w in warns)

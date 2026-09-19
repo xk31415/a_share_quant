@@ -35,6 +35,8 @@ def main() -> None:
     symbols = [f"SYN{i:04d}" for i in range(1, n + 1)]
 
     bar_rows, inst_rows, status_rows = [], [], []
+    # 合成行业分类（静态，仅用于验证"行业暴露"指标链路；真实数据需按历史快照提供）
+    industries = ["SYN-工业", "SYN-消费", "SYN-医药", "SYN-科技", "SYN-金融", "SYN-能源"]
     for i, sym in enumerate(symbols):
         # 上市日期：前 20 只在样本前上市，其余样本内陆续上市（检验次新过滤）
         if i < 20:
@@ -47,6 +49,7 @@ def main() -> None:
             "symbol": sym, "name": f"合成股票{i + 1}",
             "list_date": list_date.date().isoformat(),
             "delist_date": delist_date.date().isoformat() if pd.notna(delist_date) else "",
+            "industry": industries[i % len(industries)],
         })
 
         active = [d for d in cal
