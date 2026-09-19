@@ -220,7 +220,82 @@ print(summarize(engine.run()))
 
 ---
 
-## 8. 排错
+## 8. 在 VS Code 里运行和调试
+
+打开项目：
+
+```bash
+code D:\a_share_quant
+```
+
+### 第一步：选对解释器（最容易踩的坑）
+
+这个项目的虚拟环境在 WorkBuddy 的托管目录里，**不在项目下的 `.venv`**，
+VS Code 不会自动发现它，默认会用一个没有 pandas 的 Python，然后满屏 `ModuleNotFoundError`。
+
+我已经写好 `.vscode/settings.json` 指定了正确路径，打开项目时按提示装推荐插件即可。
+如果还是不对，手动选一次：
+
+`Ctrl+Shift+P` → `Python: Select Interpreter` → 选
+`C:\Users\67478\.workbuddy\binaries\python\envs\default\Scripts\python.exe`
+
+验证方法：新建终端（`Ctrl+\``），运行
+
+```bash
+python -c "import a_share_quant; print(a_share_quant.__version__)"
+# -> 0.1.0
+```
+
+### 第二步：F5 直接跑
+
+`.vscode/launch.json` 里已经配好，**按 F5 选一个就行**：
+
+| 配置项 | 干什么 |
+|---|---|
+| 回测 · 等权基准（合成数据） | 最常用，跑完整回测 |
+| 回测 · 真实数据（data/processed） | 接入真实数据后用这个 |
+| Python · 当前文件 | 调试你正在写的脚本 |
+| pytest · 全部测试 | 断点调试 75 个测试 |
+| pytest · 当前文件 | 只跑光标所在的测试文件 |
+| 生成合成数据 | 重新生成合成数据 |
+
+### 第三步：打断点看什么
+
+引擎一天一天地跑 780 次，单步会累死。**用条件断点**：
+
+| 想看什么 | 在哪下断点 | 条件 |
+|---|---|---|
+| 某个调仓日发生了什么 | `backtest/engine.py` 信号日那段 | `str(d.date()) == "2021-04-30"` |
+| 成交价到底取的是哪天的价 | `backtest/execution.py` 的 `execute()` | 直接断，看 `open_px` 和 `row` |
+| 为什么这只票没成交 | 同上 | `od.symbol == "SYN0005"` |
+| 股票池为什么排除了它 | `universe/builder.py` 的 `get_universe()` | 看 `candidates` 的变化 |
+| 因子值算得对不对 | `factors/technical.py` | 用 `compute_as_of` 单独调 |
+
+调试控制台里可以直接查 DataFrame：
+
+```python
+bars.loc[bars["trade_date"] == pd.Timestamp("2021-04-30")].head()
+result.trades[result.trades["note"] != "filled"]     # 看所有被拦截的成交
+```
+
+### 测试面板
+
+装好 Python 插件后，左侧出现**烧杯图标**（Testing）：
+
+- 会列出 75 个测试，可以单跑、单挑一个调试；
+- 改完代码自动重新发现；
+- 建议先跑 `tests/test_no_lookahead.py` —— 它专门抓未来函数，动过因子或引擎就该跑它。
+
+### 其他小提示
+
+- 回测脚本画图用的是 `matplotlib` 的 `Agg` 后端，**不会弹窗卡住调试**；图存在 `results/EXP-*/equity_curve.png`。
+- 想单步进 pandas 内部：用「Python · 当前文件」配置（`justMyCode: false` 已设好）。
+- `.vscode/` 目前被 `.gitignore` 忽略了（里面有机器相关的绝对路径）。
+  要把它纳入版本管理的话，改 `.gitignore` 删掉 `.vscode/` 那行即可。
+
+---
+
+## 9. 排错
 
 | 现象 | 原因 / 处理 |
 |---|---|
