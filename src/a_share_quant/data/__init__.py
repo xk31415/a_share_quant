@@ -1,0 +1,26 @@
+"""数据层：schema 规范、数据加载、质量校验与 point-in-time 查询。"""
+from .asof import latest_known
+from .loader import DataProvider, LocalFileProvider
+from .schema import (
+    BAR_OPTIONAL_COLUMNS,
+    BAR_REQUIRED_COLUMNS,
+    INSTRUMENT_REQUIRED_COLUMNS,
+    PRICE_USAGE_POLICY,
+    STATUS_REQUIRED_COLUMNS,
+    coerce_bars,
+)
+from .validation import DataValidationError, validate_dataset
+
+__all__ = [
+    "DataProvider",
+    "LocalFileProvider",
+    "latest_known",
+    "DataValidationError",
+    "validate_dataset",
+    "BAR_REQUIRED_COLUMNS",
+    "BAR_OPTIONAL_COLUMNS",
+    "INSTRUMENT_REQUIRED_COLUMNS",
+    "STATUS_REQUIRED_COLUMNS",
+    "PRICE_USAGE_POLICY",
+    "coerce_bars",
+]

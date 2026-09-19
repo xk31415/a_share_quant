@@ -1,0 +1,32 @@
+# =====================================================================
+# 全局回测设置
+# 交易规则与数据源一律在此配置；禁止硬编码进策略代码。
+# =====================================================================
+
+backtest:
+  start_date: "2018-01-01"     # 回测开始日（会被实际数据覆盖范围裁剪）
+  end_date: "2023-12-31"       # 回测结束日
+  benchmark: "000300"          # 基准：沪深300（需基准行情数据，缺失时不对比）
+  initial_capital: 1000000     # 初始资金（元）
+  rebalance_frequency: "M"     # 调仓频率：D=每日 / W=每周 / M=每月（取周期内最后交易日为信号日）
+  execution_price: "open"      # t 日收盘生成信号，t+1 以该价格撮合（open=开盘价）
+
+portfolio:
+  max_positions: 20            # 最大持仓数量
+  max_weight_per_stock: 0.10   # 单只股票最大权重
+
+costs:
+  commission_rate: 0.00025     # 券商佣金（双边，比例）
+  commission_min: 5.0          # 单笔最低佣金（元）
+  stamp_duty_rate: 0.0005      # 印花税（仅卖出；2023-08-28 起为 0.05%）
+  slippage_rate: 0.0005        # 滑点（按参考价向不利方向偏移的比例）
+
+market_rules:
+  consider_limit_up_down: true # 是否模拟涨跌停无法成交
+  consider_suspension: true    # 是否模拟停牌无法成交
+  consider_st: true            # 股票池是否剔除 ST（见 universe.yaml）
+  lot_size: 100                # A 股一手股数
+
+data:
+  provider: "local_files"      # 当前唯一实现：本地 CSV/Parquet
+  root: "./data/processed"     # 数据目录（bars.csv|parquet, instruments.csv, status.csv|parquet, calendar.csv）

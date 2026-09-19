@@ -1,0 +1,198 @@
+# A 股量化策略研究与回测框架
+
+一个**研究基础设施优先**的 A 股量化研究项目。目标不是立即寻找"最赚钱的策略"，
+而是建立严谨、可重复、可扩展、尽可能避免未来函数与数据泄露的研究框架。
+
+> **回测结果不代表未来收益。**
+> **本项目用于研究，不构成投资建议。**
+>
+> 当前项目尚未接入真实 A 股历史数据；在接入之前，任何回测数字
+> （包括合成数据冒烟测试的数字）都不具备市场含义。
+
+---
+
+## 1. 项目用途
+
+- 建立可长期沉淀的 A 股因子/策略研究流水线；
+- 以机制（而非自觉）防止未来函数、幸存者偏差与数据泄露；
+- 用统一的实验记录保证每一次回测可复现。
+
+## 2. 项目结构
+
+```
+a_share_quant/
+├── README.md / pyproject.toml / .gitignore / .env.example
+├── config/
+│   ├── settings.yaml        # 回测区间、基准、资金、成本、调仓频率等全局设置
+│   └── universe.yaml        # 股票池过滤规则（按 as_of 时间点求值）
+├── data/
+│   ├── raw/                 # 原始外部数据（不入库）
+│   ├── interim/             # 中间数据（含 synthetic/ 合成冒烟数据）
+│   ├── processed/           # 规范化数据（LocalFileProvider 读取）
+│   └── metadata/            # 日历等元数据
+├── src/a_share_quant/
+│   ├── data/                # schema、loader（DataProvider 接口）、validation、asof
+│   ├── universe/            # 动态股票池（point-in-time）
+│   ├── factors/             # 因子框架 + 示例因子（动量/波动率/成交额）
+│   ├── strategies/          # 策略接口 + 等权基准策略
+│   ├── portfolio/           # 目标权重构建（数量/单票上限）
+│   ├── backtest/            # 引擎、执行模拟、成本、持仓（T+1）
+│   ├── metrics/             # 绩效指标（收益/风险/回撤/换手/分解报表）
+│   ├── research/            # 实验记录（元数据 + Git commit）
+│   └── utils/               # 交易日历
+├── tests/                   # pytest 测试（含未来函数专项测试）
+├── scripts/                 # 合成数据生成、基准回测入口
+├── notebooks/ experiments/ results/ reports/
+```
+
+## 3. 安装
+
+要求 Python >= 3.10。
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate   Linux/macOS: source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+核心依赖刻意保持精简：`pandas / numpy / scipy / matplotlib / pyyaml`（dev 另有
+`pytest / pyarrow`）。不预装一堆用不上的量化库。
+
+## 4. 如何配置
+
+- `config/settings.yaml`：回测区间、基准（默认沪深300）、初始资金、
+  佣金（双边 0.025%、最低 5 元）、印花税（卖出 0.05%）、滑点（0.05%）、
+  调仓频率（默认月度）、最大持仓数（20）、单票上限（10%）、
+  涨跌停/停牌/ST 开关、整手 100 股。
+- `config/universe.yaml`：股票池规则——上市满 60 个交易日、剔除 ST/停牌/退市；
+  指数成分、市值、行业、流动性过滤为预留项（需对应历史数据）。
+- `.env.example`：环境变量模板（数据目录、未来的数据源密钥）。
+
+**交易规则与数据源一律在配置中，禁止硬编码进策略。**
+
+## 5. 如何运行测试
+
+```bash
+python -m pytest tests/
+```
+
+62 个测试覆盖：日期对齐、数据校验、因子计算、股票池 point-in-time、
+T+1、涨跌停、停牌、佣金/印花税/滑点、组合权重、净值、最大回撤，
+以及专门的**未来函数测试**（`tests/test_no_lookahead.py`：
+篡改未来数据不得改变历史信号；成交价必须是 t+1 开盘价；
+财务数据公告日前不可见；股票池不受未来状态影响）。
+
+## 6. 如何运行回测
+
+```bash
+# (a) 生成合成数据（仅用于框架冒烟测试，非真实市场数据）
+python scripts/generate_synthetic_data.py
+
+# (b) 运行等权基准回测（验证数据/股票池/调仓/T+1/成本/净值/绩效整条链路）
+python scripts/run_baseline_backtest.py \
+    --data-dir data/interim/synthetic --start 2021-01-04 --end 2023-12-29
+
+# (c) 接入真实数据后：把规范文件放入 data/processed/ 再运行
+#     需要的文件：bars.csv|parquet, instruments.csv, status.csv|parquet, calendar.csv
+```
+
+结果输出到 `results/EXP-<id>/`（净值、成交、持仓、换手、成本、指标、图），
+元数据写入 `experiments/EXP-<id>.json`。
+
+## 7. 数据模型（重要）
+
+| 用途 | 使用的价格 | 说明 |
+|---|---|---|
+| 因子/信号计算 | `adj_close`（后复权） | 避免除权除息造成的假跳空 |
+| 成交模拟 | `open/high/low/close`（原始） | 真实可成交价格 |
+| 涨跌停约束 | `limit_up/limit_down/pre_close`（原始） | 交易所规则基于原始价 |
+| 财务数据 | 必须带 `announce_date` | t 日信号只能用公告日 <= t 的行 |
+
+数据规范（`src/a_share_quant/data/schema.py`）：
+- 行情 long format，一行 = (trade_date, symbol)，必填 OHLCV+amount；
+- 证券信息含 `list_date/delist_date`（退市股必须保留，防幸存者偏差）；
+- 每日状态表逐交易日覆盖 `is_st/is_suspended`。
+
+## 8. 防未来函数机制
+
+- **时间对齐**：t 日收盘生成信号，t+1 开盘成交（引擎强制，有测试锁定）；
+- **策略视野**：引擎只向策略传 `trade_date <= as_of` 的行情（有测试锁定）；
+- **股票池**：`get_universe(as_of)` 只用当时已知信息（上市天数、当时未退市、
+  当时状态），未来退市/ST 不影响历史时点；
+- **财务数据**：`latest_known(..., date_col="announce_date")` 按公告日取数；
+- **因子**：因子只做后视计算（rolling/shift），`compute_as_of` 截断输入。
+
+## 9. 如何新增因子
+
+1. 在 `src/a_share_quant/factors/` 新建类，继承 `Factor`；
+2. 声明 `name`、`window`（暖机期）、`uses_adjusted`（是否后复权价）；
+3. 实现 `compute(bars) -> DataFrame`（trade_date × symbol，缺失为 NaN）；
+4. docstring 写明：数学定义、数据输入、信号形成时间、复权方式；
+5. 在 `tests/test_factors.py` 加手工可验证的正确性测试；
+   在 `tests/test_no_lookahead.py` 加"篡改未来数据不变历史值"测试。
+
+参考实现：`factors/technical.py` 的 `Momentum / Volatility / AvgAmount`。
+
+## 10. 如何新增策略
+
+1. 继承 `Strategy`，实现
+   `generate_target(as_of, bars, universe) -> TargetPortfolio`；
+2. 只输出目标权重（symbol -> weight）；不做 I/O、不算成本、不下单；
+3. 因子计算在策略内部调用因子框架完成；
+4. 用 `scripts/run_baseline_backtest.py` 的模式写运行入口（或扩展它）。
+
+参考实现：`strategies/equal_weight.py`。
+
+## 11. 如何保存实验
+
+每次运行 `run_baseline_backtest.py` 自动记录：
+experiment_id、策略名、数据版本指纹、股票池规则、区间、频率、
+成本假设、参数、基准、结果路径、**Git commit**、时间戳。
+
+查看：`experiments/EXP-*.json`；复现：同一 commit + 同一数据版本 + 同一配置。
+
+## 12. 当前已知限制（诚实清单）
+
+1. **没有真实 A 股历史数据**（最重要的限制，见下节）；
+2. 净值以原始收盘价估值，未处理分红送转（公司行动）——接入真实数据后
+   应改为后复权收益率法或在估值层处理公司行动；
+3. 停牌/退市后持仓冻结在最后已知价（无退市整理期/清算建模）；
+4. 调仓日先卖后买仍可能因卖出受阻（跌停/停牌）导致持仓数短暂超过
+   `max_positions`；
+5. 买入按"开盘即涨停则不成交"的保守假设，未建模盘中部分成交；
+6. 指数成分/市值/行业过滤未启用（缺历史数据，启用时会显式报错而非静默忽略）；
+7. 引擎在启动时全量预载行情（内存型），第一阶段规模足够，超大股票池需改分块；
+8. 基准对照需要基准指数行情数据，当前数据缺失时不输出对比。
+
+## 13. 当前缺少什么数据
+
+**当前项目缺少真实 A 股历史数据，需要提供数据源或数据文件。** 具体 gap：
+
+| 数据 | 用途 | 现状 |
+|---|---|---|
+| 日线行情（含退市股、后复权价、涨跌停价） | 信号与成交模拟 | 缺 |
+| 上市/退市日期表 | 股票池防幸存者偏差 | 缺 |
+| 每日 ST/停牌状态表 | 股票池与成交约束 | 缺 |
+| 真实交易日历 | 时间对齐 | 缺（合成数据用近似工作日历） |
+| 财务数据（带公告日） | Value/Quality 因子 | 缺 |
+| 指数成分变更历史 | 成分股池 | 缺 |
+| 基准指数行情 | 绩效对照 | 缺 |
+
+接入任何外部数据源前，必须先明确：数据源是什么、覆盖范围、是否包含退市股、
+是否包含历史股票池信息、复权方式、财务数据公告日、授权限制——然后再决定。
+
+## 14. 下一步建议（按优先级）
+
+1. **接入真实数据源**（最高优先级）：确定来源与授权，转换为
+   `data/processed/` 的规范文件（先用小样本验证 schema 与校验）；
+2. 用真实数据重跑等权基准，检查成本/换手/涨跌停拦截比例是否合理；
+3. 增加基于真实财务数据（带公告日）的 Value/Quality 因子；
+4. 实现周度/月度调仓下的因子排序选股策略（而非等权）；
+5. 加入行业暴露、交易成本贡献等更细的组合归因。
+
+## 15. 第一阶段纪律（禁止事项）
+
+- 不自动寻找"最赚钱策略"、不暴力参数优化、不自动挑最高收益参数；
+- 不使用未来数据/未来股票池/未来财务数据；
+- 不为提高收益修改交易规则；
+- 不删除或隐藏失败的回测，不把回测结果包装成投资结论。

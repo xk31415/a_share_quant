@@ -1,0 +1,21 @@
+# =====================================================================
+# 股票池过滤规则
+# 全部规则按 as_of_date 时间点求值：只使用 as_of 当日及以前已可知的信息，
+# 从机制上杜绝幸存者偏差与未来函数。
+# =====================================================================
+
+min_list_days: 60              # 上市满 N 个交易日才可入池（剔除次新股）
+exclude_st: true               # 剔除当日 ST/*ST
+exclude_suspended: true        # 剔除当日停牌
+exclude_delisted: true         # 剔除已退市（delist_date <= as_of）
+
+# ---- 以下为预留过滤项：接入对应历史数据后才可启用 ----
+index_membership: null         # 限定指数成分（需成分变更历史，防止未来成分偏差）
+market_cap:
+  min: null                    # 最小市值（元；需市值历史）
+  max: null                    # 最大市值（元）
+industry:
+  include: null                # 行业白名单（需行业分类历史）
+liquidity:
+  min_avg_daily_amount: null   # 近 N 日日均成交额下限（元）
+  lookback_days: 20            # 流动性回看交易日数
