@@ -233,11 +233,27 @@ code D:\a_share_quant
 这个项目的虚拟环境在 WorkBuddy 的托管目录里，**不在项目下的 `.venv`**，
 VS Code 不会自动发现它，默认会用一个没有 pandas 的 Python，然后满屏 `ModuleNotFoundError`。
 
-我已经写好 `.vscode/settings.json` 指定了正确路径，打开项目时按提示装推荐插件即可。
-如果还是不对，手动选一次：
+我已经在 `.vscode/settings.json` 和 `.vscode/launch.json` 里写死了这个路径
+（`C:/Users/67478/.workbuddy/binaries/python/envs/default/Scripts/python.exe`）。
+
+> **两个坑，都踩过了**
+>
+> 1. **不要写 `${env:USERPROFILE}`**。VS Code 在 launch.json 里不展开它，
+>    debugpy 最终拿到的是 `/.workbuddy/binaries/python/...`（丢了盘符），
+>    报 `FileNotFoundError: [WinError 2] 系统找不到指定的文件`。
+>    必须写死绝对路径。
+> 2. **在终端里 `Activate.ps1` 激活虚拟环境，对 F5 调试没用。**
+>    调试器用的是配置里指定的解释器，不看终端的 PATH。
+>    激活只影响你在终端手敲的命令（激活后提示符会变成 `(default)`）。
+
+改完配置后如果没生效，重载一次窗口：`Ctrl+Shift+P` → `Developer: Reload Window`。
+
+另外建议手动选一次解释器（会影响 Pylance 补全、新建终端时是否自动激活）：
 
 `Ctrl+Shift+P` → `Python: Select Interpreter` → 选
 `C:\Users\67478\.workbuddy\binaries\python\envs\default\Scripts\python.exe`
+
+选好后 VS Code 窗口**右下角状态栏**应该显示 `3.13.x ('.workbuddy...')` 之类的字样。
 
 验证方法：新建终端（`Ctrl+\``），运行
 
