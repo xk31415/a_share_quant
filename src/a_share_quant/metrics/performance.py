@@ -193,6 +193,10 @@ def cost_contribution(result: "BacktestResult") -> dict[str, float]:
 
     成本本身已在 ``backtest/costs.py`` 独立建模，这里只做**归因度量**：
     回答"成本吃掉了多少收益"，而不是重新计算成本。
+
+    口径说明：``total_turnover`` 用**单边**换手（``(买入额+卖出额)/2/权益``），
+    因此 ``cost_bps_per_unit_turnover`` 是"每单位单边换手对应的 bps 成本"，
+    可直接与文献中的换手成本比较。旧版本用的是双边口径，数值约为现值一半。
     """
     eq = result.equity_curve
     costs = result.costs
@@ -262,6 +266,20 @@ def summarize(result: "BacktestResult") -> dict[str, Any]:
         summary["max_positions_held"] = int(per_day_count.max())
         summary["avg_positions_held"] = float(per_day_count.mean())
         summary["max_single_weight"] = float(positions["weight"].max())
+        # --- 剔除建仓前空仓期的口径 ---
+        # 股票池暖机（如 min_list_days=60）会让前若干十个交易日全现金，
+        # 这段直线的零收益会稀释年化收益、压低波动与夏普。全区间口径保留
+        # （便于与历史实验对比），同时给出有效区间口径以便如实汇报。
+        first_inv = pd.Timestamp(pd.to_datetime(positions["trade_date"]).min())
+        active_eq = eq.loc[first_inv:]
+        if len(active_eq) >= 2:
+            active_ret = active_eq.pct_change()
+            summary["first_invested_date"] = str(first_inv.date())
+            summary["n_cash_only_days"] = int((eq.index < first_inv).sum())
+            summary["cumulative_return_active"] = cumulative_return(active_eq)
+            summary["annualized_return_active"] = annualized_return(active_eq)
+            summary["annualized_volatility_active"] = annualized_volatility(active_ret)
+            summary["sharpe_ratio_active"] = sharpe_ratio(active_ret)
     else:
         summary["max_positions_held"] = 0
         summary["avg_positions_held"] = 0.0

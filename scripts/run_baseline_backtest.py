@@ -77,15 +77,14 @@ def main() -> None:
 
     provider = LocalFileProvider(data_dir)
 
-    # 数据质量校验（致命问题直接失败）
+    # 全量数据质量校验（致命问题直接失败）。引擎启动时还会对回测窗口内的数据
+    # 再校验一次（覆盖编程式调用路径），两边告警稍后合并去重打印。
     bars_all = provider.get_bars("1990-01-01", "2099-12-31")
     warnings = validate_dataset(
         bars=bars_all,
         instruments=provider.get_instruments(),
         status=provider.get_status("1990-01-01", "2099-12-31"),
         calendar=provider.get_calendar())
-    for w in warnings:
-        print(f"[warn] {w}")
 
     uni_cfg = root / args.universe_config
     rules = (UniverseRules.from_yaml(uni_cfg) if uni_cfg.exists()
@@ -101,7 +100,8 @@ def main() -> None:
         end_date=args.end or bt.get("end_date", "2023-12-29"),
         rebalance_frequency=args.freq or bt.get("rebalance_frequency", "M"),
         initial_capital=float(bt.get("initial_capital", 1_000_000)),
-        benchmark=bt.get("benchmark"))
+        benchmark=bt.get("benchmark"),
+        cash_buffer=float(pf.get("cash_buffer", 0.01)))
 
     engine = BacktestEngine(
         provider=provider,
@@ -117,6 +117,11 @@ def main() -> None:
         enforce_suspension=mr.get("consider_suspension", True))
 
     result = engine.run()
+    # 引擎自身也会做校验（覆盖编程式调用路径）；这里把全量数据校验的告警一并打印，
+    # 去重后避免同一条 warning 出现两次。
+    all_warnings = list(dict.fromkeys(list(warnings) + list(result.validation_warnings)))
+    for w in all_warnings:
+        print(f"[warn] {w}")
     summary = summarize(result)
 
     # 行业分类：优先用 bars 提供的逐日快照（无未来函数风险）；

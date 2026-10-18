@@ -62,7 +62,12 @@ FUNDAMENTALS_REQUIRED_COLUMNS: dict[str, str] = {
 
 @dataclass(frozen=True)
 class PriceUsagePolicy:
-    """明确区分复权价与原始价的用途（见 README「数据模型」一节）。"""
+    """复权价 / 原始价用途的**声明性说明**（见 README「数据模型」一节）。
+
+    注意：这是一个常量，**不参与运行时强制**。真正的保证来自约定——
+    因子只读 ``adj_close``，成交模拟只读 ``open``，涨跌停只看原始价。
+    新增代码请遵守本声明，不要把它当成运行时会自动拦截的检查器。
+    """
 
     signal_columns: tuple[str, ...] = ("adj_close",)          # 因子/信号默认输入（后复权）
     execution_columns: tuple[str, ...] = ("open", "high", "low", "close")  # 成交模拟（原始）
@@ -73,6 +78,26 @@ class PriceUsagePolicy:
 
 
 PRICE_USAGE_POLICY = PriceUsagePolicy()
+
+_BOOL_TRUE = {"true", "1", "t", "yes", "y", "是"}
+_BOOL_FALSE = {"false", "0", "f", "no", "n", "", "否"}
+
+
+def coerce_bool(series: pd.Series) -> pd.Series:
+    """把布尔列转换为真正的 bool dtype。
+
+    不能直接用 ``astype(bool)``：对 object 列里的字符串 "False"，
+    ``bool("False") == True``——会把"未停牌"静默变成"停牌"（或反之）。
+    这里显式按字面值映射，无法识别的值按 False 处理。
+    """
+    if pd.api.types.is_bool_dtype(series):
+        return series.astype(bool)
+    if pd.api.types.is_numeric_dtype(series):
+        return series.fillna(0).astype(bool)
+    text = series.astype("string").str.strip().str.lower()
+    mapped = text.map(lambda v: True if v in _BOOL_TRUE
+                      else (False if v in _BOOL_FALSE else pd.NA))
+    return mapped.fillna(False).astype(bool)
 
 
 def coerce_bars(df: pd.DataFrame) -> pd.DataFrame:
@@ -91,7 +116,7 @@ def coerce_bars(df: pd.DataFrame) -> pd.DataFrame:
         if col not in out.columns:
             continue
         if col.startswith("is_"):
-            out[col] = out[col].fillna(False).astype(bool)
+            out[col] = coerce_bool(out[col])
         elif col not in ("industry",):
             out[col] = pd.to_numeric(out[col], errors="coerce")
     return out.sort_values(["symbol", "trade_date"]).reset_index(drop=True)

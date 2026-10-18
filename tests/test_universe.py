@@ -57,6 +57,38 @@ def test_universe_min_list_days_zero_keeps_new_listing():
     assert builder.get_universe(dates[6]) == ["FRESH"]
 
 
+def test_universe_min_list_days_boundary_is_inclusive():
+    """“上市满 N 个交易日”应含当日：恰好 N 个交易日必须入池。
+
+    历史缺陷：cutoff 取了倒数第 N+1 个交易日，实际要求 N+1 个交易日。
+    """
+    dates = pd.bdate_range("2021-01-04", periods=100)
+    instruments = pd.DataFrame([
+        # 含 as_of 当日 59 个交易日 -> 剔除
+        {"symbol": "D59", "name": "x", "list_date": dates[41], "delist_date": pd.NaT},
+        # 含 as_of 当日 60 个交易日 -> 保留
+        {"symbol": "D60", "name": "x", "list_date": dates[40], "delist_date": pd.NaT},
+        # 61 个交易日 -> 保留
+        {"symbol": "D61", "name": "x", "list_date": dates[39], "delist_date": pd.NaT},
+    ])
+    provider = make_provider(dates, ["D59", "D60", "D61"], instruments=instruments)
+    universe = UniverseBuilder(provider, UniverseRules(min_list_days=60)).get_universe(dates[-1])
+    assert universe == ["D60", "D61"]
+
+
+def test_universe_warns_when_status_missing_symbols():
+    """status 表缺标的记录时不得静默放行，必须留下告警。"""
+    dates = pd.bdate_range("2021-01-04", periods=30)
+    symbols = ["AAA", "BBB"]
+    status = pd.DataFrame([
+        {"trade_date": d, "symbol": "AAA", "is_st": False, "is_suspended": False}
+        for d in dates])  # 只有 AAA
+    provider = make_provider(dates, symbols, status=status)
+    builder = UniverseBuilder(provider, UniverseRules(min_list_days=0))
+    builder.get_universe(dates[-1])
+    assert any("缺少" in w and "BBB" in w for w in builder.warnings)
+
+
 def test_universe_liquidity_filter():
     dates = pd.bdate_range("2021-01-04", periods=30)
     bars = make_provider(dates, ["AAA", "BBB"]).get_bars(dates[0], dates[-1])

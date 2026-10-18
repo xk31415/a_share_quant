@@ -76,6 +76,7 @@ class UniverseBuilder:
     def __init__(self, provider: DataProvider, rules: UniverseRules) -> None:
         self._provider = provider
         self._rules = rules
+        self.warnings: list[str] = []
 
     @property
     def rules(self) -> UniverseRules:
@@ -88,6 +89,7 @@ class UniverseBuilder:
         """
         rules = self._rules
         ts = pd.Timestamp(as_of).normalize()
+        self.warnings = []
 
         # 预留过滤项：缺数据时明确报错，而不是静默忽略
         if rules.index_membership is not None:
@@ -109,9 +111,11 @@ class UniverseBuilder:
 
         inst = self._provider.get_instruments()
         if rules.min_list_days > 0:
-            if len(hist) <= rules.min_list_days:
+            # “上市满 N 个交易日”：list_date 必须早于等于倒数第 N 个交易日，
+            # 这样 list_date..as_of 恰好覆盖 N 个交易日（含 as_of 当日）。
+            if len(hist) < rules.min_list_days:
                 return []
-            cutoff = hist[len(hist) - rules.min_list_days - 1]
+            cutoff = hist[len(hist) - rules.min_list_days]
             mask = inst["list_date"] <= cutoff
         else:
             mask = inst["list_date"] <= hist[-1]
@@ -125,11 +129,21 @@ class UniverseBuilder:
             if not last.empty:
                 st_map = dict(zip(last["symbol"].astype(str), last["is_st"].astype(bool)))
                 susp_map = dict(zip(last["symbol"].astype(str), last["is_suspended"].astype(bool)))
+                missing = [s for s in candidates if s not in st_map]
+                if missing:
+                    self.warnings.append(
+                        f"status 表在 {ts.date()} 缺少 {len(missing)} 个候选标的的记录"
+                        f"（例如 {missing[:5]}），这些标的被按“非 ST、非停牌”放行。"
+                        f"请确认状态表覆盖完整，否则 ST/停牌过滤会漏。")
                 candidates = [
                     s for s in candidates
                     if not (rules.exclude_st and st_map.get(s, False))
                     and not (rules.exclude_suspended and susp_map.get(s, False))
                 ]
+            elif candidates:
+                self.warnings.append(
+                    f"status 表在 {ts.date()} 为空，ST/停牌过滤未生效"
+                    f"（{len(candidates)} 个候选标的全部放行）。")
 
         if rules.min_avg_daily_amount is not None:
             lookback = max(1, rules.liquidity_lookback_days)

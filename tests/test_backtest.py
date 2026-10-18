@@ -127,12 +127,37 @@ def test_limit_down_blocks_sell():
 
 # ---------- 停牌 ----------
 
-def test_suspension_blocks_trading():
+def test_suspension_blocks_trading_from_status_table():
+    """停牌以 status 表为权威来源：bars 完全没有 is_suspended 列时也必须拦截。
+
+    这是历史缺陷的回归测试——旧实现只读 bars.is_suspended（可选列），
+    导致按 schema 只提供 status 表的数据集里停牌约束静默失效。
+    """
+    dates = pd.bdate_range("2021-01-04", periods=6)
+    bars = make_bars(dates, ["AAA", "BBB"]).drop(columns=["is_suspended", "is_st"])
+    d2 = pd.Timestamp(dates[1])
+    status = pd.DataFrame([
+        {"trade_date": d, "symbol": s,
+         "is_st": False, "is_suspended": (d == d2 and s == "BBB")}
+        for d in dates for s in ["AAA", "BBB"]])
+    provider = make_provider(dates, ["AAA", "BBB"], bars=bars, status=status)
+    result = _engine(provider, freq="D", end=str(dates[-1].date())).run()
+    bbb_d2 = result.trades[(result.trades["symbol"] == "BBB")
+                           & (result.trades["trade_date"] == d2)]
+    assert len(bbb_d2) >= 1
+    assert (bbb_d2["note"] == "blocked:suspended").all()
+
+
+def test_suspension_falls_back_to_bars_when_status_missing_row():
+    """status 缺该交易日的记录时，bars 自带的 is_suspended 仍应生效（兜底）。"""
     dates = pd.bdate_range("2021-01-04", periods=6)
     bars = make_bars(dates, ["AAA", "BBB"])
     d2 = pd.Timestamp(dates[1])
     bars.loc[(bars["trade_date"] == d2) & (bars["symbol"] == "BBB"), "is_suspended"] = True
-    provider = make_provider(dates, ["AAA", "BBB"], bars=bars)
+    status = pd.DataFrame([
+        {"trade_date": d, "symbol": s, "is_st": False, "is_suspended": False}
+        for d in dates for s in ["AAA", "BBB"] if d != d2])
+    provider = make_provider(dates, ["AAA", "BBB"], bars=bars, status=status)
     result = _engine(provider, freq="D", end=str(dates[-1].date())).run()
     bbb_d2 = result.trades[(result.trades["symbol"] == "BBB")
                            & (result.trades["trade_date"] == d2)]
@@ -204,3 +229,46 @@ def test_trades_and_costs_recorded():
     assert (result.trades["cost"] >= 0).all()
     assert result.costs.sum() > 0
     assert (result.turnover > 0).all()
+
+
+# ---------- 换手率口径 ----------
+
+def test_turnover_is_one_way():
+    """单边换手 = (买入额+卖出额)/2/权益；只买入时约等于买入额的一半。"""
+    dates = pd.bdate_range("2021-01-04", "2021-01-15")
+    provider = make_provider(dates, ["AAA", "BBB"])
+    result = _engine(provider).run()
+    d0 = result.turnover.index[0]
+    assert result.buy_turnover.loc[d0] > 0
+    assert result.sell_turnover.loc[d0] == 0 or pd.isna(result.sell_turnover.loc[d0])
+    assert result.turnover.loc[d0] == pytest.approx(
+        result.buy_turnover.loc[d0] / 2.0, rel=0.01)
+
+
+# ---------- 现金不足时按比例缩放，而不是整笔丢弃 ----------
+
+def test_cash_shortfall_scales_buys_instead_of_dropping():
+    """目标权重合计 100% 且无现金缓冲时，所有买单按比例缩减，不得整笔丢弃。
+
+    历史缺陷：买入按 symbol 升序消耗现金，末尾标的被 blocked:insufficient_cash
+    整笔丢弃，造成与股票代码字典序相关的系统性偏差。
+    """
+    dates = pd.bdate_range("2021-01-04", "2021-02-26")
+    syms = [f"S{i:02d}" for i in range(10)]
+    provider = make_provider(dates, syms)
+    engine = BacktestEngine(
+        provider=provider,
+        strategy=EqualWeightStrategy(max_positions=10),
+        universe_builder=UniverseBuilder(provider, UniverseRules(min_list_days=0)),
+        portfolio_rules=PortfolioRules(max_positions=10, max_weight_per_stock=0.10),
+        cost_model=CostModel(),                      # 含滑点，现金更紧
+        config=BacktestConfig(start_date=str(dates[0].date()),
+                              end_date=str(dates[-1].date()),
+                              rebalance_frequency="M",
+                              cash_buffer=0.0),      # 故意不预留缓冲
+    )
+    result = engine.run()
+    assert "blocked:insufficient_cash" not in set(result.trades["note"])
+    first_day = result.positions["trade_date"].min()
+    held = result.positions[result.positions["trade_date"] == first_day]
+    assert len(held) == 10

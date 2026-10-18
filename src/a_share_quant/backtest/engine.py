@@ -8,15 +8,29 @@
     * d 为信号日：策略只看到 trade_date <= d 的行情；
     * 目标权重于 d 收盘生成，d+1（下一交易日）开盘撮合；
     * 每个阶段（股票池/因子/策略/执行/成本/估值）都可单独测试。
+
+数据校验约定（重要）：
+    * ``run()`` 在启动阶段自行执行 ``validate_dataset``，**不依赖调用方脚本**。
+      QUICKSTART 里的编程式用法同样会走数据校验与幸存者偏差哨兵；
+    * 非致命问题收集到 ``BacktestResult.validation_warnings``；
+    * 致命问题直接抛 ``DataValidationError``，不进入回测。
+
+状态数据约定（重要）：
+    * 停牌/ST 以 status 表为权威来源，启动时合并进 bars（status 优先，
+      bars 同名列只在该 (date, symbol) 无 status 记录时兜底）；
+    * ``enforce_limit=True`` 但 bars 缺 ``limit_up/limit_down`` 时启动即报错，
+      不允许"配置写了开启、实际静默不生效"。
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import pandas as pd
 
 from ..data.loader import DataProvider
+from ..data.schema import coerce_bool
+from ..data.validation import DataValidationError, validate_dataset
 from ..portfolio.construction import PortfolioRules, build_target_weights
 from ..strategies.base import Strategy
 from ..universe.builder import UniverseBuilder
@@ -36,6 +50,11 @@ class BacktestConfig:
     initial_capital: float = 1_000_000.0
     execution_price: str = "open"   # t+1 成交参考价列名
     benchmark: Optional[str] = None
+    cash_buffer: float = 0.01       # 建仓时预留的现金比例（覆盖费用/滑点）
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.cash_buffer < 1.0:
+            raise ValueError("cash_buffer must be in [0, 1)")
 
 
 @dataclass
@@ -46,10 +65,13 @@ class BacktestResult:
     daily_returns: pd.Series      # 日收益率
     positions: pd.DataFrame       # 每日持仓快照（含权重）
     trades: pd.DataFrame          # 逐笔成交（含受阻记录）
-    turnover: pd.Series           # 调仓日双边换手率
+    turnover: pd.Series           # 调仓日单边换手率（(买+卖)/2/权益）
     costs: pd.Series              # 调仓日总成本（元）
     benchmark: Optional[pd.Series] = None
     config: Optional[BacktestConfig] = None
+    buy_turnover: Optional[pd.Series] = None    # 买入成交额/权益
+    sell_turnover: Optional[pd.Series] = None   # 卖出成交额/权益
+    validation_warnings: list[str] = field(default_factory=list)
 
     @property
     def final_equity(self) -> float:
@@ -64,7 +86,8 @@ class BacktestEngine:
                  portfolio_rules: PortfolioRules, cost_model: CostModel,
                  config: BacktestConfig, lot_size: int = 100,
                  enforce_limit: bool = True,
-                 enforce_suspension: bool = True) -> None:
+                 enforce_suspension: bool = True,
+                 validate: bool = True) -> None:
         self.provider = provider
         self.strategy = strategy
         self.universe_builder = universe_builder
@@ -74,7 +97,87 @@ class BacktestEngine:
         self.lot_size = lot_size
         self.enforce_limit = enforce_limit
         self.enforce_suspension = enforce_suspension
+        self.validate = validate
 
+    # ---- 启动阶段：数据准备与校验 ----
+    def _prepare_data(self, start, end):
+        """加载行情 + 状态，合并，并做数据校验。返回 (bars, warnings)。"""
+        warnings: list[str] = []
+        bars = self.provider.get_bars(start, end)
+        if bars.empty:
+            raise ValueError("no bars in backtest window")
+
+        status = self._load_status(start, end)
+        bars = self._attach_status(bars, status)
+
+        if self.validate:
+            calendar = self.provider.get_calendar()
+            instruments = self.provider.get_instruments()
+            warnings.extend(validate_dataset(
+                bars=bars,
+                instruments=instruments,
+                status=status if status is not None and not status.empty else None,
+                calendar=calendar))
+            self._require_limit_columns(bars)
+        return bars, warnings
+
+    def _load_status(self, start, end) -> Optional[pd.DataFrame]:
+        try:
+            status = self.provider.get_status(start, end)
+        except FileNotFoundError:
+            return None
+        return status
+
+    @staticmethod
+    def _attach_status(bars: pd.DataFrame,
+                       status: Optional[pd.DataFrame]) -> pd.DataFrame:
+        """把 status 表的 is_st / is_suspended 合并进 bars。
+
+        status 是权威来源（schema 里的必填表）；bars 上的同名列只在
+        status 没有该 (trade_date, symbol) 记录时兜底——避免数据源只填了
+        status 就被静默忽略（曾经的缺陷），也避免 bars 的旧标记覆盖新状态。
+        """
+        out = bars.copy()
+        if status is None or status.empty:
+            for col in ("is_st", "is_suspended"):
+                if col in out.columns:
+                    out[col] = out[col].fillna(False).astype(bool)
+            return out
+
+        st = status.loc[:, ["trade_date", "symbol", "is_st", "is_suspended"]].copy()
+        st["trade_date"] = pd.to_datetime(st["trade_date"])
+        out["trade_date"] = pd.to_datetime(out["trade_date"])
+        merged = out.merge(st, on=["trade_date", "symbol"], how="left",
+                           suffixes=("", "__status"))
+        for col in ("is_st", "is_suspended"):
+            status_col = f"{col}__status"
+            if status_col in merged.columns:      # bars 也有同名列 -> 被加了后缀
+                if col in out.columns:
+                    merged[col] = merged[status_col].where(
+                        merged[status_col].notna(), merged[col])
+                else:  # pragma: no cover - 两列都缺时无同名列
+                    merged[col] = merged[status_col]
+                merged = merged.drop(columns=[status_col])
+            merged[col] = coerce_bool(merged[col])
+        return merged.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+
+    def _require_limit_columns(self, bars: pd.DataFrame) -> None:
+        """enforce_limit 打开但没有涨跌停价 -> 启动即失败（不允许静默失效）。"""
+        if not self.enforce_limit:
+            return
+        missing = [c for c in ("limit_up", "limit_down") if c not in bars.columns]
+        if missing:
+            raise DataValidationError(
+                f"enforce_limit=True 但 bars 缺少 {missing}。"
+                "涨跌停约束无法执行——请提供 limit_up/limit_down 列，"
+                "或在配置中显式设置 market_rules.consider_limit_up_down=false。"
+                "不要用 pre_close*10% 自行推算：ST/创业板/科创板/北交所规则不同。")
+        if not bars["limit_up"].notna().any() or not bars["limit_down"].notna().any():
+            raise DataValidationError(
+                "enforce_limit=True 但 bars 的 limit_up/limit_down 全为空值，"
+                "涨跌停约束无法执行。请补齐数据或关闭 consider_limit_up_down。")
+
+    # ---- 主循环 ----
     def run(self) -> BacktestResult:
         cfg = self.config
         cal = self.provider.get_calendar()
@@ -82,12 +185,11 @@ class BacktestEngine:
         if len(trading_days) < 2:
             raise ValueError("backtest window must span at least 2 trading days")
 
-        bars = self.provider.get_bars(trading_days[0], trading_days[-1])
-        if bars.empty:
-            raise ValueError("no bars in backtest window")
+        bars, warnings = self._prepare_data(trading_days[0], trading_days[-1])
         bars = bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
         bars_by_date = {ts: g for ts, g in bars.groupby("trade_date")}
         signal_dates = set(rebalance_dates(trading_days, cfg.rebalance_frequency))
+        warnings.extend(self._check_warmup(trading_days, signal_dates))
 
         state = PortfolioState(cfg.initial_capital)
         simulator = ExecutionSimulator(
@@ -103,6 +205,8 @@ class BacktestEngine:
         position_rows: list[dict] = []
         trade_rows: list[dict] = []
         turnover_records: dict[pd.Timestamp, float] = {}
+        buy_turnover_records: dict[pd.Timestamp, float] = {}
+        sell_turnover_records: dict[pd.Timestamp, float] = {}
         cost_records: dict[pd.Timestamp, float] = {}
 
         for d in trading_days:
@@ -117,20 +221,35 @@ class BacktestEngine:
                     day_bars.set_index("symbol")[cfg.execution_price]
                     .astype(float).to_dict()
                 )
-                orders = generate_orders(pending_weights, state, prev_equity,
-                                         ref_prices, self.lot_size)
+                # 定仓基数要扣掉"当天无法交易"的持仓市值（停牌/退市无行情）。
+                # 否则这部分冻结市值会被当成可用资金重复分配，
+                # 导致每次调仓都现金不足、大量买单被缩减。
+                tradeable = self._tradeable_symbols(day_bars, cfg.execution_price)
+                sizing_equity = self._sizing_equity(state, prev_equity,
+                                                    tradeable, last_prices)
+                orders = generate_orders(pending_weights, state, sizing_equity,
+                                         ref_prices, self.lot_size,
+                                         cash_buffer=cfg.cash_buffer)
                 fills = simulator.execute(orders, day_bars, state)
-                day_turnover = 0.0
+                day_buy = 0.0
+                day_sell = 0.0
                 day_cost = 0.0
                 for f in fills:
                     trade_rows.append({
                         "trade_date": d, "symbol": f.symbol,
                         "direction": f.direction, "shares": f.shares,
                         "price": f.price, "cost": f.cost, "note": f.note})
-                    day_turnover += f.shares * f.price
+                    if f.direction == "buy":
+                        day_buy += f.shares * f.price
+                    else:
+                        day_sell += f.shares * f.price
                     day_cost += f.cost
-                if fills and (day_turnover > 0 or day_cost > 0):
-                    turnover_records[d] = day_turnover / max(prev_equity, 1e-12)
+                if fills and (day_buy > 0 or day_sell > 0 or day_cost > 0):
+                    denom = max(prev_equity, 1e-12)
+                    buy_turnover_records[d] = day_buy / denom
+                    sell_turnover_records[d] = day_sell / denom
+                    # 单边换手率：买卖对称时约等于一侧成交额/权益
+                    turnover_records[d] = (day_buy + day_sell) / 2.0 / denom
                     cost_records[d] = day_cost
                 pending_weights = None
 
@@ -158,6 +277,8 @@ class BacktestEngine:
                                                        self.portfolio_rules)
             prev_equity = equity
 
+        warnings.extend(getattr(self.universe_builder, "warnings", []) or [])
+
         equity_curve = pd.Series(dict(equity_records), name="equity")
         equity_curve.index.name = "trade_date"
         positions = pd.DataFrame(
@@ -179,7 +300,55 @@ class BacktestEngine:
             costs=pd.Series(cost_records, name="costs"),
             benchmark=benchmark,
             config=cfg,
+            buy_turnover=pd.Series(buy_turnover_records, name="buy_turnover"),
+            sell_turnover=pd.Series(sell_turnover_records, name="sell_turnover"),
+            validation_warnings=list(dict.fromkeys(warnings)),
         )
+
+    # ---- 辅助 ----
+    @staticmethod
+    def _tradeable_symbols(day_bars: pd.DataFrame, price_col: str) -> set[str]:
+        """当日可用于定仓的标的：有行情、未停牌、参考价为正。"""
+        if day_bars is None or day_bars.empty:
+            return set()
+        mask = day_bars[price_col].astype(float) > 0
+        if "is_suspended" in day_bars.columns:
+            mask &= ~day_bars["is_suspended"].astype(bool)
+        return set(day_bars.loc[mask, "symbol"].astype(str))
+
+    @staticmethod
+    def _sizing_equity(state: PortfolioState, equity: float,
+                       tradeable: set[str],
+                       last_prices: dict[str, float]) -> float:
+        """扣除无法交易持仓后的定仓基数。
+
+        停牌/退市股卖不掉，这部分市值不能再拿去开新仓；若不扣除，
+        目标权重会按"包含冻结市值"的总权益分配，每次调仓都现金不足。
+        """
+        locked = 0.0
+        for sym, pos in state.positions.items():
+            if sym in tradeable:
+                continue
+            locked += pos.shares * float(last_prices.get(sym, pos.avg_cost))
+        if locked <= 0:
+            return float(equity)
+        return max(float(equity) - locked, 0.0)
+
+    def _check_warmup(self, trading_days: pd.DatetimeIndex,
+                      signal_dates: set) -> list[str]:
+        """因子暖机期不足时显式告警（否则会静默产出全现金组合）。"""
+        warmup = int(getattr(self.strategy, "warmup", 0) or 0)
+        if warmup <= 0 or not signal_dates:
+            return []
+        first_signal = min(signal_dates)
+        available = int(trading_days.get_loc(first_signal)) + 1
+        if available >= warmup:
+            return []
+        return [
+            f"warmup: 策略声明暖机期 {warmup} 个交易日，但首个信号日"
+            f"（{pd.Timestamp(first_signal).date()}）只有 {available} 个交易日的行情，"
+            f"前若干次调仓将因因子全为 NaN 而产出空目标（全现金）。"
+            f"请把回测起点前移，或缩短因子窗口。"]
 
     @staticmethod
     def _load_benchmark(bars: pd.DataFrame,
@@ -187,9 +356,10 @@ class BacktestEngine:
         """若基准指数在行情数据中，返回其价格序列用于对照。"""
         if not benchmark:
             return None
-        bench = bars.loc[bars["symbol"] == benchmark, ["trade_date", "adj_close"]]
-        if bench.empty:
-            bench = bars.loc[bars["symbol"] == benchmark, ["trade_date", "close"]]
+        if "symbol" not in bars.columns:
+            return None
+        col = "adj_close" if "adj_close" in bars.columns else "close"
+        bench = bars.loc[bars["symbol"] == benchmark, ["trade_date", col]].dropna()
         if bench.empty:
             return None
         series = bench.set_index("trade_date").sort_index().iloc[:, 0]

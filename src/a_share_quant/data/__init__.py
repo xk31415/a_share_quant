@@ -8,6 +8,7 @@ from .schema import (
     PRICE_USAGE_POLICY,
     STATUS_REQUIRED_COLUMNS,
     coerce_bars,
+    coerce_bool,
 )
 from .validation import DataValidationError, validate_dataset
 
@@ -23,4 +24,5 @@ __all__ = [
     "STATUS_REQUIRED_COLUMNS",
     "PRICE_USAGE_POLICY",
     "coerce_bars",
+    "coerce_bool",
 ]

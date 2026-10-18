@@ -16,9 +16,25 @@
 | 因子/策略读取未来日期 | ✅ 机制正确，有测试锁定 |
 | 财务数据按公告日可见 | ✅ 机制正确，有测试锁定 |
 | 股票池 point-in-time（防幸存者偏差） | ✅ 机制正确，有测试锁定 |
-| T+1 / 涨跌停 / 停牌 / 整手 | ✅ 约束生效（本轮 49 笔被拦截） |
+| T+1 / 整手 | ✅ 约束生效 |
+| 涨跌停 / 停牌 | ⚠️ **原结论有误，见下方勘误；已修复并补测试** |
 | **数据源层面的幸存者偏差** | ⚠️ **本轮发现缺陷，已修复**（见 §3 风险 #7） |
 | **行业暴露归因的前视偏差** | ⚠️ **本轮发现隐患，已修正**（见 §3 风险 #8） |
+
+> **勘误（2026-10-18，全面审查后补记）**
+>
+> 本表原先写"T+1 / 涨跌停 / 停牌 / 整手 ✅ 约束生效（本轮 49 笔被拦截）"。
+> **这个结论是错的。** 那 49 笔拦截拆开是：`blocked:no_bar` 28 笔（退市股无行情）
+> + `blocked:insufficient_cash` 21 笔（现金不足），**涨跌停 0 笔、停牌 0 笔**。
+>
+> 根因有两个，均已修复（详见 `reports/fix_log.md`）：
+> 1. 成交层只读 `bars.is_suspended`（可选列），从不读 `status.csv`（必填表）——
+>    规范数据下停牌约束完全失效；
+> 2. 合成数据生成器把 ST/停牌窗口分配给上市晚于窗口期的标的，窗口永远不生效，
+>    所以"冒烟测试覆盖了停牌"本身就不成立。
+>
+> **教训**：拦截笔数 > 0 并不能证明"某个约束生效"，必须按 `note` 分类看。
+> 现已补充对应回归测试（`test_engine_guards.py`、`test_backtest.py`）。
 
 **本次审计新增/修改的代码**：`data/validation.py::check_survivorship_bias`、
 `metrics/performance.py::{industry_exposure, cost_contribution}`、`scripts/run_baseline_backtest.py`（行业源优先级），
@@ -40,12 +56,12 @@
 | 股票池不受未来状态影响 | `latest_known(status, as_of)` 向后取最后一个已知状态 | `test_no_lookahead::test_universe_unaffected_by_future_status_changes` |
 | 股票池不受未来退市影响 | `delist_date > as_of` 视为当时仍可投资 | `test_no_lookahead::test_universe_unaffected_by_future_delist_dates` |
 | 财务按公告日 | `latest_known(..., date_col="announce_date")` | `test_no_lookahead::test_latest_known_excludes_unannounced_fundamentals`（同一报告期多次修正，必须取当时已公告的那条） |
-| 复权价不混入成交 | `PriceUsagePolicy` 区分 signal/execution/constraint 列 | README「数据模型」表 + `test_costs`/`test_backtest` 均使用原始价撮合 |
+| 复权价不混入成交 | 因子只用 `adj_close`，成交模拟只用 `open`（`PriceUsagePolicy` 只是**声明性常量，不参与运行时强制**） | README「数据模型」表 + `test_costs`/`test_backtest` 均使用原始价撮合 |
 
-运行 75 项测试确认：
+运行 90 项测试确认：
 
 ```
-pytest tests/  ->  75 passed
+pytest tests/  ->  90 passed
 ```
 
 ---

@@ -14,6 +14,7 @@ from .schema import (
     INSTRUMENT_REQUIRED_COLUMNS,
     STATUS_REQUIRED_COLUMNS,
     coerce_bars,
+    coerce_bool,
 )
 
 
@@ -61,22 +62,39 @@ class LocalFileProvider(DataProvider):
     _INSTRUMENT_FILES = ("instruments.parquet", "instruments.csv")
     _STATUS_FILES = ("status.parquet", "status.csv")
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, use_cache: bool = True) -> None:
         self.root = Path(root)
         if not self.root.is_dir():
             raise FileNotFoundError(f"data root not found: {self.root}")
+        # 缓存已解析的表：一次回测里 universe 会按每次调仓反复取
+        # instruments/status/calendar，不缓存就会把整表重读 30+ 次。
+        # provider 视为只读，缓存安全；运行中替换数据文件需新建 provider。
+        self.use_cache = use_cache
+        self._cache: dict[str, pd.DataFrame] = {}
+        self._calendar: TradingCalendar | None = None
 
     # -- 内部 --
     def _read_table(self, candidates: tuple[str, ...], name: str) -> pd.DataFrame:
+        if self.use_cache and name in self._cache:
+            return self._cache[name]
         for fname in candidates:
             path = self.root / fname
             if path.exists():
                 if path.suffix == ".parquet":
-                    return pd.read_parquet(path)
-                return pd.read_csv(path)
+                    df = pd.read_parquet(path)
+                else:
+                    df = pd.read_csv(path)
+                if self.use_cache:
+                    self._cache[name] = df
+                return df
         raise FileNotFoundError(
             f"{name} file not found under {self.root} (looked for: {', '.join(candidates)})"
         )
+
+    def clear_cache(self) -> None:
+        """数据文件发生变化后手动失效缓存。"""
+        self._cache.clear()
+        self._calendar = None
 
     @staticmethod
     def _slice_dates(df: pd.DataFrame, start, end,
@@ -90,13 +108,23 @@ class LocalFileProvider(DataProvider):
 
     # -- 接口实现 --
     def get_bars(self, start, end, symbols=None) -> pd.DataFrame:
-        df = self._read_table(self._BAR_FILES, "bars")
-        missing = [c for c in BAR_REQUIRED_COLUMNS if c not in df.columns]
+        raw = self._read_table(self._BAR_FILES, "bars")
+        missing = [c for c in BAR_REQUIRED_COLUMNS if c not in raw.columns]
         if missing:
             raise KeyError(f"bars missing required columns: {missing}")
-        return self._slice_dates(coerce_bars(df), start, end, symbols)
+        key = "bars:coerced"
+        if self.use_cache and key in self._cache:
+            coerced = self._cache[key]
+        else:
+            coerced = coerce_bars(raw)
+            if self.use_cache:
+                self._cache[key] = coerced
+        return self._slice_dates(coerced, start, end, symbols)
 
     def get_instruments(self) -> pd.DataFrame:
+        key = "instruments:typed"
+        if self.use_cache and key in self._cache:
+            return self._cache[key].copy()
         df = self._read_table(self._INSTRUMENT_FILES, "instruments")
         missing = [c for c in INSTRUMENT_REQUIRED_COLUMNS if c not in df.columns]
         if missing:
@@ -104,24 +132,35 @@ class LocalFileProvider(DataProvider):
         out = df.copy()
         out["list_date"] = pd.to_datetime(out["list_date"])
         out["delist_date"] = pd.to_datetime(out["delist_date"])
-        return out
+        if self.use_cache:
+            self._cache[key] = out
+        return out.copy()
 
     def get_status(self, start, end, symbols=None) -> pd.DataFrame:
-        df = self._read_table(self._STATUS_FILES, "status")
-        missing = [c for c in STATUS_REQUIRED_COLUMNS if c not in df.columns]
-        if missing:
-            raise KeyError(f"status missing required columns: {missing}")
-        out = df.copy()
-        out["trade_date"] = pd.to_datetime(out["trade_date"])
-        out["is_st"] = out["is_st"].astype(bool)
-        out["is_suspended"] = out["is_suspended"].astype(bool)
+        key = "status:typed"
+        if self.use_cache and key in self._cache:
+            out = self._cache[key]
+        else:
+            df = self._read_table(self._STATUS_FILES, "status")
+            missing = [c for c in STATUS_REQUIRED_COLUMNS if c not in df.columns]
+            if missing:
+                raise KeyError(f"status missing required columns: {missing}")
+            out = df.copy()
+            out["trade_date"] = pd.to_datetime(out["trade_date"])
+            out["is_st"] = coerce_bool(out["is_st"])
+            out["is_suspended"] = coerce_bool(out["is_suspended"])
+            if self.use_cache:
+                self._cache[key] = out
         return self._slice_dates(out, start, end, symbols)
 
     def get_calendar(self) -> TradingCalendar:
+        if self._calendar is not None:
+            return self._calendar
         path = self.root / "calendar.csv"
         if not path.exists():
             raise FileNotFoundError(f"calendar.csv not found under {self.root}")
-        return TradingCalendar(pd.to_datetime(pd.read_csv(path)["trade_date"]))
+        self._calendar = TradingCalendar(pd.to_datetime(pd.read_csv(path)["trade_date"]))
+        return self._calendar
 
     def data_version(self) -> str:
         """以目录内文件名/大小/mtime 生成指纹，标识数据快照版本。"""

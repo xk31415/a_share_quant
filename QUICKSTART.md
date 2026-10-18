@@ -33,7 +33,7 @@
 ```bash
 cd /d/a_share_quant
 "C:\Users\67478\.workbuddy\binaries\python\envs\default\Scripts\python.exe" -m pytest
-# -> 75 passed
+# -> 90 passed
 ```
 
 只跑某一类：
@@ -95,9 +95,12 @@ cd /d/a_share_quant
 
 **快速判断一次回测是否可信**，看三处：
 
-1. `n_blocked_trades` 是否 > 0 —— 等于 0 要警惕，说明涨跌停/停牌约束可能没触发；
+1. `trades.csv` 里 `note` 的**分布**——出现 `blocked:suspended` / `blocked:limit_up` /
+   `blocked:limit_down` 才说明对应约束被真正触发过；如果只有 `blocked:no_bar`
+   （退市股无行情），说明涨跌停/停牌在本次样本里根本没发生，别据此声称"约束已验证"；
 2. `trades.csv` 里成交日期是否都晚于信号日一天（t→t+1）；
-3. 控制台有没有 `[warn]` —— 尤其是 `survivorship` 开头的幸存者偏差告警。
+3. 控制台有没有 `[warn]` —— 尤其是 `survivorship` / `warmup` / `status` 开头的告警。
+   引擎启动时会自带一次 `validate_dataset`，不经过本脚本的编程式调用同样会被校验。
 
 ---
 
@@ -108,13 +111,17 @@ cd /d/a_share_quant
 | 想调什么 | 改哪里 |
 |---|---|
 | 回测区间、初始资金、基准 | `backtest:` |
-| 最大持仓数、单票上限 | `portfolio:` |
+| 最大持仓数、单票上限、建仓现金缓冲 | `portfolio:` |
 | 佣金/印花税/滑点 | `costs:` |
 | 涨跌停、停牌、一手股数开关 | `market_rules:` |
 | 上市天数、ST/停牌/退市过滤 | `config/universe.yaml` |
 
 `universe.yaml` 里的市值/行业/指数成分过滤是**预留项**——现在启用会直接抛
 `NotImplementedError` 而不是静默忽略，因为缺对应历史数据。
+
+`market_rules.consider_limit_up_down: true` 时，bars 必须提供
+`limit_up/limit_down`，否则**引擎启动即报错**（不再静默跳过涨跌停判断）。
+停牌判断以 `status.csv` 为准，与 bars 上有没有 `is_suspended` 列无关。
 
 ---
 
@@ -271,7 +278,7 @@ python -c "import a_share_quant; print(a_share_quant.__version__)"
 | 回测 · 等权基准（合成数据） | 最常用，跑完整回测 |
 | 回测 · 真实数据（data/processed） | 接入真实数据后用这个 |
 | Python · 当前文件 | 调试你正在写的脚本 |
-| pytest · 全部测试 | 断点调试 75 个测试 |
+| pytest · 全部测试 | 断点调试 90 个测试 |
 | pytest · 当前文件 | 只跑光标所在的测试文件 |
 | 生成合成数据 | 重新生成合成数据 |
 
@@ -298,7 +305,7 @@ result.trades[result.trades["note"] != "filled"]     # 看所有被拦截的成�
 
 装好 Python 插件后，左侧出现**烧杯图标**（Testing）：
 
-- 会列出 75 个测试，可以单跑、单挑一个调试；
+- 会列出 90 个测试，可以单跑、单挑一个调试；
 - 改完代码自动重新发现；
 - 建议先跑 `tests/test_no_lookahead.py` —— 它专门抓未来函数，动过因子或引擎就该跑它。
 

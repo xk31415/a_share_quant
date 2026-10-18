@@ -33,9 +33,14 @@ class Strategy(ABC):
       * 只消费传入的截至 as_of 的数据（引擎保证 bars 的 trade_date <= as_of）；
       * 只产出目标权重；
       * 不做 I/O、不算成本、不下订单、不算绩效。
+
+    warmup：策略内因子所需的最小历史交易日数（暖机期）。声明后引擎会在启动时
+    校验窗口是否够长——不声明则暖机不足会静默产出空目标（全现金），
+    这种失败模式在回测里几乎看不出来。
     """
 
     name: str = "strategy"
+    warmup: int = 0
 
     @abstractmethod
     def generate_target(self, as_of, bars: pd.DataFrame,

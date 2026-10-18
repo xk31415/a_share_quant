@@ -65,10 +65,12 @@ pip install -e ".[dev]"
 - `config/settings.yaml`：回测区间、基准（默认沪深300）、初始资金、
   佣金（双边 0.025%、最低 5 元）、印花税（卖出 0.05%）、滑点（0.05%）、
   调仓频率（默认月度）、最大持仓数（20）、单票上限（10%）、
-  涨跌停/停牌/ST 开关、整手 100 股。
+  建仓现金缓冲（1%，覆盖费用与滑点）、涨跌停/停牌开关、整手 100 股。
 - `config/universe.yaml`：股票池规则——上市满 60 个交易日、剔除 ST/停牌/退市；
   指数成分、市值、行业、流动性过滤为预留项（需对应历史数据）。
-- `.env.example`：环境变量模板（数据目录、未来的数据源密钥）。
+   **ST 过滤只在这里配置**（`settings.yaml` 不再有重复开关）。
+- 数据目录由命令行 `--data-dir` 指定（默认 `data/interim/synthetic`）；
+  当前代码**不读取任何环境变量**，`.env.example` 仅为将来接入数据源 API 预留。
 
 **交易规则与数据源一律在配置中，禁止硬编码进策略。**
 
@@ -78,13 +80,15 @@ pip install -e ".[dev]"
 python -m pytest tests/
 ```
 
-75 个测试覆盖：
+90 个测试覆盖：
 - 日期对齐、交易日历（`test_dates.py`）；
 - 数据 schema 与校验，含**幸存者偏差哨兵**（`test_data.py`）；
 - 因子计算正确性（`test_factors.py`）；
 - 股票池 point-in-time（`test_universe.py`）；
-- T+1、涨跌停、停牌、佣金/印花税/滑点、组合权重、净值（`test_backtest.py`、`test_costs.py`）；
+- T+1、涨跌停、停牌、佣金/印花税/滑点、组合权重、净值、单边换手（`test_backtest.py`、`test_costs.py`）；
 - 绩效指标，含行业暴露与成本归因（`test_metrics.py`）；
+- **引擎启动守卫**（`test_engine_guards.py`）：缺涨跌停价必须报错、编程式调用也要跑数据校验、
+  暖机期不足必须告警、基准缺 `adj_close` 不得崩；
 - **未来函数专项**（`tests/test_no_lookahead.py`）：
   - 篡改未来数据不得改变历史信号；
   - 成交价必须是 t+1 开盘价而非信号日收盘价；
@@ -119,7 +123,7 @@ python scripts/run_baseline_backtest.py \
 | `equity_curve.csv` / `equity_curve.png` | 净值曲线与回撤图 |
 | `positions.csv` | 每日持仓快照（含权重、可卖份额） |
 | `trades.csv` | 逐笔成交，**含被拦截记录**（`blocked:*`） |
-| `turnover.csv` / `costs.csv` | 换手与成本（索引为成交日 t+1，非信号日） |
+| `turnover.csv` / `costs.csv` | 单边换手（`(买入额+卖出额)/2/权益`）与成本（索引为成交日 t+1，非信号日） |
 | `annual_returns.csv` / `monthly_returns.csv` | 年度/月度收益分解 |
 | `metrics.json` | 全量指标 + 成本归因 + 行业暴露 |
 | `cost_contribution.json` | 成本归因明细 |
@@ -141,8 +145,19 @@ python scripts/run_baseline_backtest.py \
 - 证券信息含 `list_date/delist_date`（退市股必须保留，防幸存者偏差）；
 - 每日状态表逐交易日覆盖 `is_st/is_suspended`。
 
+**停牌/ST 的权威来源是状态表**。引擎在启动时把 `status.csv` 合并进 bars
+（同一 `(trade_date, symbol)` 以 status 为准，bars 的同名列只在缺 status 记录时兜底），
+因此成交模拟的停牌拦截不再依赖 bars 的可选列。
+
+**涨跌停必须由数据提供** `limit_up/limit_down`。`consider_limit_up_down: true`
+但 bars 缺这两列时，引擎**启动即报错**——不用 `pre_close × 10%` 自行推算，
+因为 ST（±5%）、创业板/科创板（±20%）、北交所（±30%）、新股无涨跌幅规则各不相同。
+
 ## 8. 防未来函数机制
 
+- **数据校验**：`BacktestEngine.run()` 在启动阶段自行执行 `validate_dataset`，
+  **不依赖调用方脚本**——编程式用法（QUICKSTART §6）同样会跑数据校验与
+  幸存者偏差哨兵；致命问题直接抛错，非致命告警写入 `result.validation_warnings`；
 - **时间对齐**：t 日收盘生成信号，t+1 开盘成交（引擎强制，有测试锁定）；
 - **策略视野**：引擎只向策略传 `trade_date <= as_of` 的行情（有测试锁定）；
 - **股票池**：`get_universe(as_of)` 只用当时已知信息（上市天数、当时未退市、
@@ -201,7 +216,13 @@ experiment_id、策略名、数据版本指纹、股票池规则、区间、频�
 9. 行业暴露目前只有 `instruments` 的**静态**分类可用（合成数据），
    真实数据应提供逐日/逐期行业快照，否则归因存在前视偏差；
 10. 因子实现层的"自造未来"（如 `shift(-1)`、跨时间标准化）无法由框架静态阻止，
-    必须靠每个新因子配套的篡改测试把关（见第 9 节流程）。
+    必须靠每个新因子配套的篡改测试把关（见第 9 节流程）；
+11. **换手率是单边口径**（`(买入额+卖出额)/2/权益`）。旧版本用双边口径，数值约为
+    现值两倍，因此 v0.1.0 之后的结果不能与更早的实验直接比较换手与单位成本；
+12. 停牌/退市持仓的**市值不计入定仓基数**（否则同一笔钱会被重复分配，导致每次调仓
+    现金不足），但这部分资产仍计入总权益，所以持仓权重合计会低于 100%；
+13. 绩效指标默认按**全区间**计算，包含建仓前的空仓期（`min_list_days` 暖机）。
+    同一份 summary 里另有 `*_active` 字段给出剔除空仓期后的口径，汇报时优先用它。
 
 ## 13. 当前缺少什么数据
 

@@ -99,6 +99,25 @@ def test_coerce_bars_sorts_and_casts():
     assert out["is_st"].dtype == bool
 
 
+def test_coerce_bars_string_booleans_are_parsed_by_literal_value():
+    """CSV 里的字符串 "False" 不得被 bool() 解析成 True。
+
+    历史缺陷：``.astype(bool)`` 对 object 列调用的是 ``bool("False") == True``，
+    会把"未停牌"整列静默变成"停牌"。
+    """
+    df = make_bars(pd.bdate_range("2021-01-04", periods=3), ["AAA"])
+    df["is_suspended"] = ["False", "True", "False"]
+    out = coerce_bars(df)
+    assert out["is_suspended"].tolist() == [False, True, False]
+
+
+def test_coerce_bars_missing_bool_values_default_false():
+    df = make_bars(pd.bdate_range("2021-01-04", periods=3), ["AAA"])
+    df["is_suspended"] = pd.Series([True, None, False], dtype=object)
+    out = coerce_bars(df)
+    assert out["is_suspended"].tolist() == [True, False, False]
+
+
 # ---------- 幸存者偏差哨兵 ----------
 
 def _long_sample(days=300):

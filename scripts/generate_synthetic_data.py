@@ -78,9 +78,13 @@ def main() -> None:
             })
             prev_close = close
         # 状态表：1 只 ST 窗口、1 只停牌窗口（默认正常）
+        # 注意：必须选样本前上市的老股（i < 20），否则这些标的的上市日晚于
+        # 窗口起点，ST/停牌标记永远不会被写入——曾经的静默缺陷。
+        # 停牌窗口刻意跨过月末信号日（2022-06-30）并延续到 07-15，
+        # 保证"信号日被剔除 -> 次日执行时仍停牌 -> 成交被拦截"这条链路被真正走到。
         for d in active:
-            is_st = (i == n - 3 and pd.Timestamp("2022-03-01") <= d <= pd.Timestamp("2022-09-30"))
-            is_susp = (i == n - 4 and pd.Timestamp("2022-06-01") <= d <= pd.Timestamp("2022-06-30"))
+            is_st = (i == 2 and pd.Timestamp("2022-03-01") <= d <= pd.Timestamp("2022-09-30"))
+            is_susp = (i == 3 and pd.Timestamp("2022-06-01") <= d <= pd.Timestamp("2022-07-15"))
             status_rows.append({"trade_date": d.date().isoformat(), "symbol": sym,
                                 "is_st": bool(is_st), "is_suspended": bool(is_susp)})
 
