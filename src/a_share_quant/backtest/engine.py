@@ -72,6 +72,7 @@ class BacktestResult:
     buy_turnover: Optional[pd.Series] = None    # 买入成交额/权益
     sell_turnover: Optional[pd.Series] = None   # 卖出成交额/权益
     validation_warnings: list[str] = field(default_factory=list)
+    universe_violations: Optional[pd.DataFrame] = None  # 策略给出的股票池外标的
 
     @property
     def final_equity(self) -> float:
@@ -87,7 +88,8 @@ class BacktestEngine:
                  config: BacktestConfig, lot_size: int = 100,
                  enforce_limit: bool = True,
                  enforce_suspension: bool = True,
-                 validate: bool = True) -> None:
+                 validate: bool = True,
+                 max_participation_rate: float = 0.0) -> None:
         self.provider = provider
         self.strategy = strategy
         self.universe_builder = universe_builder
@@ -98,6 +100,7 @@ class BacktestEngine:
         self.enforce_limit = enforce_limit
         self.enforce_suspension = enforce_suspension
         self.validate = validate
+        self.max_participation_rate = max_participation_rate
 
     # ---- 启动阶段：数据准备与校验 ----
     def _prepare_data(self, start, end):
@@ -162,7 +165,13 @@ class BacktestEngine:
         return merged.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
 
     def _require_limit_columns(self, bars: pd.DataFrame) -> None:
-        """enforce_limit 打开但没有涨跌停价 -> 启动即失败（不允许静默失效）。"""
+        """enforce_limit 打开时，涨跌停价的**逐行**缺失必须显式暴露。
+
+        只检查"整列是否全空"是不够的：单行 NaN 会让 execution 里的
+        ``pd.notna(limit_up)`` 为假，从而静默跳过该笔约束（历史缺陷）。
+        无涨跌幅的合法场景（注册制新股上市前 5 日）请用 ``limit_exempt`` 显式标注，
+        不要靠留空来表达。
+        """
         if not self.enforce_limit:
             return
         missing = [c for c in ("limit_up", "limit_down") if c not in bars.columns]
@@ -172,10 +181,19 @@ class BacktestEngine:
                 "涨跌停约束无法执行——请提供 limit_up/limit_down 列，"
                 "或在配置中显式设置 market_rules.consider_limit_up_down=false。"
                 "不要用 pre_close*10% 自行推算：ST/创业板/科创板/北交所规则不同。")
-        if not bars["limit_up"].notna().any() or not bars["limit_down"].notna().any():
-            raise DataValidationError(
-                "enforce_limit=True 但 bars 的 limit_up/limit_down 全为空值，"
-                "涨跌停约束无法执行。请补齐数据或关闭 consider_limit_up_down。")
+        exempt = bars["limit_exempt"].astype(bool) if "limit_exempt" in bars.columns else None
+        for col in ("limit_up", "limit_down"):
+            na = bars[col].isna()
+            if exempt is not None:
+                na &= ~exempt
+            n_na = int(na.sum())
+            if n_na:
+                raise DataValidationError(
+                    f"enforce_limit=True 但 bars.{col} 有 {n_na} 行为空值"
+                    f"（例如 {bars.loc[na, 'symbol'].head(3).tolist()}）。"
+                    "留空会被当成「没有涨跌停」而静默放行。若无涨跌幅是规则本身"
+                    "（如注册制新股上市前 5 日），请把 limit_exempt 标为 true；"
+                    "否则按数据缺失处理并补齐。")
 
     # ---- 主循环 ----
     def run(self) -> BacktestResult:
@@ -195,7 +213,8 @@ class BacktestEngine:
         simulator = ExecutionSimulator(
             self.cost_model, lot_size=self.lot_size,
             enforce_limit=self.enforce_limit,
-            enforce_suspension=self.enforce_suspension)
+            enforce_suspension=self.enforce_suspension,
+            max_participation_rate=self.max_participation_rate)
 
         last_prices: dict[str, float] = {}
         pending_weights: Optional[dict[str, float]] = None
@@ -204,6 +223,7 @@ class BacktestEngine:
         equity_records: list[tuple[pd.Timestamp, float]] = []
         position_rows: list[dict] = []
         trade_rows: list[dict] = []
+        violation_rows: list[dict] = []
         turnover_records: dict[pd.Timestamp, float] = {}
         buy_turnover_records: dict[pd.Timestamp, float] = {}
         sell_turnover_records: dict[pd.Timestamp, float] = {}
@@ -238,7 +258,8 @@ class BacktestEngine:
                     trade_rows.append({
                         "trade_date": d, "symbol": f.symbol,
                         "direction": f.direction, "shares": f.shares,
-                        "price": f.price, "cost": f.cost, "note": f.note})
+                        "price": f.price, "cost": f.cost, "note": f.note,
+                        "capped": bool(f.capped)})
                     if f.direction == "buy":
                         day_buy += f.shares * f.price
                     else:
@@ -253,11 +274,16 @@ class BacktestEngine:
                     cost_records[d] = day_cost
                 pending_weights = None
 
-            # --- 收盘估值（收盘价缺失则沿用最近价） ---
+            # --- 收盘估值（停牌日不用当日价，缺失则沿用最近价） ---
+            # 停牌日数据商可能仍给一根"理论价" bar；直接拿来估值会让净值凭空跳变
+            # （实测过停牌日 OHLC 翻倍 -> 权益一天 +100%）。交易被拦住了，涨跌没被拦住。
             if not day_bars.empty:
-                for sym, px in day_bars.set_index("symbol")["close"].items():
-                    if pd.notna(px):
-                        last_prices[sym] = float(px)
+                px_mask = day_bars["close"].notna()
+                if "is_suspended" in day_bars.columns:
+                    px_mask &= ~day_bars["is_suspended"].astype(bool)
+                for sym, px in zip(day_bars.loc[px_mask, "symbol"],
+                                   day_bars.loc[px_mask, "close"]):
+                    last_prices[str(sym)] = float(px)
             equity = state.market_value(last_prices)
             equity_records.append((d, equity))
             for sym, pos in sorted(state.positions.items()):
@@ -272,12 +298,23 @@ class BacktestEngine:
             if d in signal_dates:
                 hist = bars.loc[bars["trade_date"] <= d]
                 universe = self.universe_builder.get_universe(d)
+                warnings.extend(getattr(self.universe_builder, "warnings", []) or [])
                 target = self.strategy.generate_target(d, hist, universe)
-                pending_weights = build_target_weights(target.weights,
+                weights, violations = self._enforce_universe(target.weights, universe)
+                for sym, w in violations:
+                    violation_rows.append(
+                        {"trade_date": d, "symbol": sym, "weight": w})
+                if violations:
+                    warnings.append(
+                        f"universe: {pd.Timestamp(d).date()} 策略给出 "
+                        f"{len(violations)} 个股票池外的标的"
+                        f"（例如 {[s for s, _ in violations][:5]}），已被引擎拦截，"
+                        f"未下单。明细见 universe_violations.csv。")
+                pending_weights = build_target_weights(weights,
                                                        self.portfolio_rules)
             prev_equity = equity
 
-        warnings.extend(getattr(self.universe_builder, "warnings", []) or [])
+        warnings.extend(self.universe_builder.finalize_warnings())
 
         equity_curve = pd.Series(dict(equity_records), name="equity")
         equity_curve.index.name = "trade_date"
@@ -288,7 +325,9 @@ class BacktestEngine:
         trades = pd.DataFrame(
             trade_rows,
             columns=["trade_date", "symbol", "direction", "shares", "price",
-                     "cost", "note"])
+                     "cost", "note", "capped"])
+        violations = pd.DataFrame(
+            violation_rows, columns=["trade_date", "symbol", "weight"])
         benchmark = self._load_benchmark(bars, cfg.benchmark)
 
         return BacktestResult(
@@ -303,9 +342,35 @@ class BacktestEngine:
             buy_turnover=pd.Series(buy_turnover_records, name="buy_turnover"),
             sell_turnover=pd.Series(sell_turnover_records, name="sell_turnover"),
             validation_warnings=list(dict.fromkeys(warnings)),
+            universe_violations=violations,
         )
 
     # ---- 辅助 ----
+    @staticmethod
+    def _enforce_universe(weights, universe) -> tuple[dict[str, float], list[tuple[str, float]]]:
+        """把策略给的目标权重与当日股票池求交。
+
+        机制层拦截：策略即使返回了宇宙外的代码（例如被剔除的 ST、科创板、
+        北交所），引擎也**不会下单**，并留下可审计的违规明细。
+        这层放在引擎里而不是指望策略自觉——股票池是"能买什么"的定义，
+        不是给策略的参考意见。
+        """
+        allowed = {str(s) for s in (universe or ())}
+        clean: dict[str, float] = {}
+        violations: list[tuple[str, float]] = []
+        for sym, w in dict(weights or {}).items():
+            sym_s = str(sym)
+            try:
+                weight = float(w)
+            except (TypeError, ValueError):
+                continue
+            if weight <= 0:
+                continue
+            if sym_s not in allowed:
+                violations.append((sym_s, weight))
+            else:
+                clean[sym_s] = weight
+        return clean, sorted(violations)
     @staticmethod
     def _tradeable_symbols(day_bars: pd.DataFrame, price_col: str) -> set[str]:
         """当日可用于定仓的标的：有行情、未停牌、参考价为正。"""

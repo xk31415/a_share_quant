@@ -114,7 +114,8 @@ def main() -> None:
         config=config,
         lot_size=mr.get("lot_size", 100),
         enforce_limit=mr.get("consider_limit_up_down", True),
-        enforce_suspension=mr.get("consider_suspension", True))
+        enforce_suspension=mr.get("consider_suspension", True),
+        max_participation_rate=float(mr.get("max_participation_rate", 0.0)))
 
     result = engine.run()
     # 引擎自身也会做校验（覆盖编程式调用路径）；这里把全量数据校验的告警一并打印，
@@ -148,6 +149,9 @@ def main() -> None:
                                                 index_label="trade_date")
     result.trades.to_csv(out_dir / "trades.csv", index=False)
     result.positions.to_csv(out_dir / "positions.csv", index=False)
+    if result.universe_violations is not None and not result.universe_violations.empty:
+        result.universe_violations.to_csv(out_dir / "universe_violations.csv",
+                                          index=False)
     result.turnover.rename("turnover").to_csv(out_dir / "turnover.csv",
                                               index_label="trade_date")
     result.costs.rename("costs").to_csv(out_dir / "costs.csv",
@@ -159,9 +163,15 @@ def main() -> None:
         out_dir / "annual_returns.csv", index_label="year")
     monthly_returns(result.equity_curve).rename("monthly_return").to_csv(
         out_dir / "monthly_returns.csv", index_label="month")
+    report = full_report(result, industry_map=industry_map)
+    # 一次实验要在磁盘上自我说明：校验告警与行业数据来源都进结果，
+    # 不能只在终端闪一下（否则忽略返回值时，坏数据看起来像正常回测）。
+    report["validation_warnings"] = list(result.validation_warnings)
+    report["industry_source"] = industry_source or "none"
+    report["n_universe_violations"] = int(len(result.universe_violations)) \
+        if result.universe_violations is not None else 0
     with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
-        json.dump(full_report(result, industry_map=industry_map), f,
-                  ensure_ascii=False, indent=2, default=str)
+        json.dump(report, f, ensure_ascii=False, indent=2, default=str)
     with open(out_dir / "cost_contribution.json", "w", encoding="utf-8") as f:
         json.dump(cost_contribution(result), f, ensure_ascii=False, indent=2,
                   default=str)
@@ -187,6 +197,8 @@ def main() -> None:
         benchmark=config.benchmark,
         result_path=str(out_dir),
         git_commit=git_commit(root),
+        validation_warnings=list(result.validation_warnings),
+        industry_source=industry_source or "none",
         notes=("synthetic random-walk data — framework smoke test only, "
                "NOT real market data" if "synthetic" in str(data_dir).lower() else ""))
     save_experiment(record, root / "experiments")

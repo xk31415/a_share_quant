@@ -1,9 +1,13 @@
 """生成合成数据，用于框架冒烟测试。
 
 !!! 警告 !!!
-本脚本生成的是随机游走假数据（SYN 前缀、人为构造的退市/ST/停牌窗口），
+本脚本生成的是随机游走假数据（人为构造的退市/ST/停牌窗口），
 仅用于验证代码链路（数据读取/股票池/调仓/T+1/成本/净值/绩效），
 不代表任何真实市场，严禁用于得出研究结论。
+
+代码前缀刻意覆盖各板块，用来验证 universe.yaml 的板块白名单：
+  600xxx 沪市主板 / 000xxx 002xxx 深市主板 / 300xxx 创业板 —— 应可交易
+  688xxx 科创板 / 830799 430001 北交所 / 000300 指数 —— 应被白名单剔除
 
 用法：
     python scripts/generate_synthetic_data.py [--out data/interim/synthetic]
@@ -16,6 +20,20 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# 板块混合：24 只可交易 + 6 只应被白名单/显式剔除排除
+SYMBOLS_TRADEABLE = (
+    [f"600{i:03d}" for i in range(1, 9)]      # 沪市主板
+    + [f"000{i:03d}" for i in range(1, 9)]    # 深市主板
+    + [f"002{i:03d}" for i in range(1, 5)]    # 深市主板（原中小板）
+    + [f"300{i:03d}" for i in range(1, 5)]    # 创业板
+)
+SYMBOLS_EXCLUDED = (
+    [f"688{i:03d}" for i in range(1, 4)]      # 科创板
+    + ["830799", "430001"]                    # 北交所
+    + ["000300"]                              # 沪深300 指数（非证券）
+)
+SYMBOLS = SYMBOLS_TRADEABLE + SYMBOLS_EXCLUDED
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(
@@ -23,7 +41,6 @@ def main() -> None:
     ap.add_argument("--out", default="data/interim/synthetic")
     ap.add_argument("--start", default="2021-01-04")
     ap.add_argument("--end", default="2023-12-29")
-    ap.add_argument("--n-symbols", type=int, default=30)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -31,8 +48,8 @@ def main() -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     cal = pd.bdate_range(args.start, args.end)
-    n = args.n_symbols
-    symbols = [f"SYN{i:04d}" for i in range(1, n + 1)]
+    symbols = list(SYMBOLS)
+    n = len(symbols)
 
     bar_rows, inst_rows, status_rows = [], [], []
     # 合成行业分类（静态，仅用于验证"行业暴露"指标链路；真实数据需按历史快照提供）

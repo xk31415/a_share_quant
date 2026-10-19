@@ -83,7 +83,10 @@ class LocalFileProvider(DataProvider):
                 if path.suffix == ".parquet":
                     df = pd.read_parquet(path)
                 else:
-                    df = pd.read_csv(path)
+                    # symbol 必须按字符串读入：A 股代码有前导零（000001、000300），
+                    # 交给 pandas 推断类型会把 000001 读成 1，与 instruments 对不上，
+                    # 板块前缀匹配也会全部失效。
+                    df = pd.read_csv(path, dtype={"symbol": str})
                 if self.use_cache:
                     self._cache[name] = df
                 return df
@@ -130,6 +133,7 @@ class LocalFileProvider(DataProvider):
         if missing:
             raise KeyError(f"instruments missing required columns: {missing}")
         out = df.copy()
+        out["symbol"] = out["symbol"].astype(str)
         out["list_date"] = pd.to_datetime(out["list_date"])
         out["delist_date"] = pd.to_datetime(out["delist_date"])
         if self.use_cache:
@@ -147,6 +151,7 @@ class LocalFileProvider(DataProvider):
                 raise KeyError(f"status missing required columns: {missing}")
             out = df.copy()
             out["trade_date"] = pd.to_datetime(out["trade_date"])
+            out["symbol"] = out["symbol"].astype(str)
             out["is_st"] = coerce_bool(out["is_st"])
             out["is_suspended"] = coerce_bool(out["is_suspended"])
             if self.use_cache:

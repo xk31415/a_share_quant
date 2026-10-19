@@ -23,9 +23,10 @@ costs:
   slippage_rate: 0.0005        # 滑点（按参考价向不利方向偏移的比例）
 
 market_rules:
-  consider_limit_up_down: true # 是否模拟涨跌停无法成交（bars 必须提供 limit_up/limit_down，否则启动即报错）
+  consider_limit_up_down: true # 是否模拟涨跌停无法成交（bars 必须逐行提供 limit_up/limit_down，否则启动即报错）
   consider_suspension: true    # 是否模拟停牌无法成交（以 status 表为权威来源）
   lot_size: 100                # A 股一手股数
+  max_participation_rate: 0.10 # 单笔成交不超过当日成交量的比例（容量约束；0 = 不限制）
 
 # 数据目录由命令行 --data-dir 指定（默认 data/interim/synthetic）。
 # 接入真实数据：--data-dir data/processed

@@ -29,6 +29,7 @@ BAR_OPTIONAL_COLUMNS: tuple[str, ...] = (
     "pre_close",           # 昨收（原始价）
     "limit_up",            # 涨停价（原始价）
     "limit_down",          # 跌停价（原始价）
+    "limit_exempt",        # 当日无涨跌幅限制（如注册制新股上市前 5 日）
     "is_suspended",        # 当日是否停牌
     "is_st",               # 当日是否 ST
     "industry",            # 行业分类（历史快照）
@@ -115,7 +116,7 @@ def coerce_bars(df: pd.DataFrame) -> pd.DataFrame:
     for col in BAR_OPTIONAL_COLUMNS:
         if col not in out.columns:
             continue
-        if col.startswith("is_"):
+        if col.startswith("is_") or col == "limit_exempt":
             out[col] = coerce_bool(out[col])
         elif col not in ("industry",):
             out[col] = pd.to_numeric(out[col], errors="coerce")

@@ -52,6 +52,8 @@ class ExperimentRecord:
     created_at: str = field(
         default_factory=lambda: dt.datetime.now().isoformat(timespec="seconds"))
     notes: str = ""
+    validation_warnings: list[str] = field(default_factory=list)
+    industry_source: str = ""
 
 
 def save_experiment(record: ExperimentRecord,

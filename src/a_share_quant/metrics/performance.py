@@ -254,6 +254,8 @@ def summarize(result: "BacktestResult") -> dict[str, Any]:
         "n_filled_trades": int((trades["shares"] > 0).sum()) if has_trades else 0,
         "n_blocked_trades": int(
             (~trades["note"].eq("filled")).sum()) if has_trades else 0,
+        "n_capped_trades": int(trades["capped"].sum())
+        if has_trades and "capped" in trades.columns else 0,
         "avg_turnover_per_rebalance": (
             float(result.turnover.mean()) if result.turnover is not None
             and len(result.turnover) else 0.0),

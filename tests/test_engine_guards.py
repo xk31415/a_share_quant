@@ -89,7 +89,10 @@ def test_validation_can_be_disabled_explicitly():
     dates = pd.bdate_range("2021-01-04", periods=6)
     provider = make_provider(dates, ["AAA"])
     result = _engine(provider, validate=False).run()
-    assert result.validation_warnings == []
+    # validate=False 关的是数据校验；股票池的运行期诊断（例如未配板块白名单）
+    # 仍会保留，因此这里只断言"数据校验类"告警不再出现。
+    assert not any("survivorship" in w or "NaN" in w
+                   for w in result.validation_warnings)
 
 
 # ---------- 暖机期 ----------

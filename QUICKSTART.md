@@ -33,7 +33,7 @@
 ```bash
 cd /d/a_share_quant
 "C:\Users\67478\.workbuddy\binaries\python\envs\default\Scripts\python.exe" -m pytest
-# -> 90 passed
+# -> 100 passed
 ```
 
 只跑某一类：
@@ -143,6 +143,15 @@ cd /d/a_share_quant
 | `calendar.csv` | `trade_date` |
 
 建议的可选列（有了才能启用更多约束/因子）：`adj_close, pre_close, limit_up, limit_down, industry, market_cap`。
+
+> **`limit_up/limit_down` 现在是强约束**：`consider_limit_up_down: true` 时，
+> 这两列缺列、或任意一行留空，引擎都会启动失败——留空等于放弃该笔的涨跌停判断。
+> 确实没有涨跌幅的日子（注册制新股上市前 5 日）请标 `limit_exempt: true`。
+
+> **板块白名单**：`config/universe.yaml` 的 `allowed_prefixes` 默认只放行沪深主板
+> 与创业板，科创板(688/689)、北交所(43x/83x/87x/92x)、B 股(200/900) 会被剔除。
+> 你的数据里如果还有 `000300` 这类指数代码，记得放进 `excluded_symbols`。
+> 引擎会强制把策略目标与股票池求交，池外代码买不进去，明细见 `universe_violations.csv`。
 
 **接入前必须确认的三件事**（这是框架唯一无法自己察觉的隐患）：
 
@@ -278,7 +287,7 @@ python -c "import a_share_quant; print(a_share_quant.__version__)"
 | 回测 · 等权基准（合成数据） | 最常用，跑完整回测 |
 | 回测 · 真实数据（data/processed） | 接入真实数据后用这个 |
 | Python · 当前文件 | 调试你正在写的脚本 |
-| pytest · 全部测试 | 断点调试 90 个测试 |
+| pytest · 全部测试 | 断点调试 100 个测试 |
 | pytest · 当前文件 | 只跑光标所在的测试文件 |
 | 生成合成数据 | 重新生成合成数据 |
 
@@ -305,7 +314,7 @@ result.trades[result.trades["note"] != "filled"]     # 看所有被拦截的成�
 
 装好 Python 插件后，左侧出现**烧杯图标**（Testing）：
 
-- 会列出 90 个测试，可以单跑、单挑一个调试；
+- 会列出 100 个测试，可以单跑、单挑一个调试；
 - 改完代码自动重新发现；
 - 建议先跑 `tests/test_no_lookahead.py` —— 它专门抓未来函数，动过因子或引擎就该跑它。
 

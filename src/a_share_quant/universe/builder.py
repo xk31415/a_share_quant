@@ -21,12 +21,20 @@ from ..data.loader import DataProvider
 
 @dataclass(frozen=True)
 class UniverseRules:
-    """股票池过滤规则（全部按 as_of 时间点求值）。"""
+    """股票池过滤规则（全部按 as_of 时间点求值）。
+
+    allowed_prefixes：可交易板块白名单，按证券代码前缀匹配（例如 ``"600"``）。
+        ``None`` 表示不限制——**但默认配置应当显式给出白名单**，否则科创板
+        （688/689）、北交所（43x/83x/87x/92x）、B 股（200/900）会一起入池。
+    excluded_symbols：显式剔除的代码，用于基准指数代码误入证券表等情况。
+    """
 
     min_list_days: int = 60            # 上市满 N 个交易日（剔除次新股）
     exclude_st: bool = True            # 剔除当日 ST/*ST
     exclude_suspended: bool = True     # 剔除当日停牌
     exclude_delisted: bool = True      # 剔除已退市（delist_date <= as_of）
+    allowed_prefixes: Optional[Sequence[str]] = None   # 可交易板块（代码前缀白名单）
+    excluded_symbols: Optional[Sequence[str]] = None   # 显式剔除的代码
     index_membership: Optional[str] = None   # 预留：限定指数成分（需成分历史）
     min_market_cap: Optional[float] = None   # 预留：最小市值（需市值历史）
     max_market_cap: Optional[float] = None   # 预留：最大市值
@@ -43,9 +51,10 @@ class UniverseRules:
             raw = yaml.safe_load(f) or {}
         kwargs: dict = {}
         simple = {"min_list_days", "exclude_st", "exclude_suspended",
-                  "exclude_delisted", "index_membership"}
+                  "exclude_delisted", "index_membership", "allowed_prefixes",
+                  "excluded_symbols"}
         for key in simple:
-            if key in raw:
+            if key in raw and raw[key] is not None:
                 kwargs[key] = raw[key]
         mc = raw.get("market_cap") or {}
         if mc.get("min") is not None:
@@ -77,6 +86,31 @@ class UniverseBuilder:
         self._provider = provider
         self._rules = rules
         self.warnings: list[str] = []
+        self._warned: set[str] = set()
+        self.board_excluded: set[str] = set()
+        self.explicit_excluded: set[str] = set()
+
+    def _warn_once(self, key: str, message: str) -> None:
+        """同类告警整个回测只报一次（否则每个调仓日刷一行）。"""
+        if key in self._warned:
+            return
+        self._warned.add(key)
+        self.warnings.append(message)
+
+    def finalize_warnings(self) -> list[str]:
+        """回测结束时汇总"被剔除的代码"，避免只报告首次调仓那天的情况。"""
+        out: list[str] = []
+        if self.board_excluded:
+            out.append(
+                f"universe: 板块白名单 {list(self._rules.allowed_prefixes or ())} 全区间共"
+                f"剔除 {len(self.board_excluded)} 个代码"
+                f"（例如 {sorted(self.board_excluded)[:5]}）。若有本该可交易的标的，"
+                f"请检查 universe.yaml 的 allowed_prefixes。")
+        if self.explicit_excluded:
+            out.append(
+                f"universe: 按 excluded_symbols 全区间剔除 "
+                f"{sorted(self.explicit_excluded)}。")
+        return out
 
     @property
     def rules(self) -> UniverseRules:
@@ -123,6 +157,25 @@ class UniverseBuilder:
             mask &= inst["delist_date"].isna() | (inst["delist_date"] > ts)
         candidates = sorted(inst.loc[mask, "symbol"].astype(str).tolist())
 
+        # --- 板块白名单：按代码前缀过滤 ---
+        # 机制层拦截，不依赖策略"记得不用"科创板/北交所/B 股/指数代码。
+        prefixes = tuple(str(p) for p in (rules.allowed_prefixes or ()))
+        if prefixes:
+            dropped_board = [s for s in candidates if not s.startswith(prefixes)]
+            candidates = [s for s in candidates if s.startswith(prefixes)]
+            self.board_excluded.update(dropped_board)
+        else:
+            self._warn_once(
+                "no_prefixes",
+                "universe: 未配置 allowed_prefixes（板块白名单），科创板(688/689)、"
+                "北交所(43x/83x/87x/92x)、B 股(200/900) 与指数代码都可能入池。"
+                "真实数据回测请在 universe.yaml 显式配置。")
+        excluded = {str(s) for s in (rules.excluded_symbols or ())}
+        if excluded:
+            dropped_explicit = [s for s in candidates if s in excluded]
+            self.explicit_excluded.update(dropped_explicit)
+            candidates = [s for s in candidates if s not in excluded]
+
         if rules.exclude_st or rules.exclude_suspended:
             status = self._provider.get_status(hist[0], ts)
             last = latest_known(status, ts)
@@ -131,7 +184,8 @@ class UniverseBuilder:
                 susp_map = dict(zip(last["symbol"].astype(str), last["is_suspended"].astype(bool)))
                 missing = [s for s in candidates if s not in st_map]
                 if missing:
-                    self.warnings.append(
+                    self._warn_once(
+                        "missing_status",
                         f"status 表在 {ts.date()} 缺少 {len(missing)} 个候选标的的记录"
                         f"（例如 {missing[:5]}），这些标的被按“非 ST、非停牌”放行。"
                         f"请确认状态表覆盖完整，否则 ST/停牌过滤会漏。")
@@ -141,13 +195,15 @@ class UniverseBuilder:
                     and not (rules.exclude_suspended and susp_map.get(s, False))
                 ]
             elif candidates:
-                self.warnings.append(
+                self._warn_once(
+                    "empty_status",
                     f"status 表在 {ts.date()} 为空，ST/停牌过滤未生效"
                     f"（{len(candidates)} 个候选标的全部放行）。")
 
         if rules.min_avg_daily_amount is not None:
             lookback = max(1, rules.liquidity_lookback_days)
-            start = hist[max(0, len(hist) - lookback - 1)]
+            # 闭区间 [start, ts] 恰好 lookback 个交易日（原实现多取了 1 天）
+            start = hist[max(0, len(hist) - lookback)]
             bars = self._provider.get_bars(start, ts)
             if not bars.empty:
                 avg = bars.groupby("symbol")["amount"].mean()
