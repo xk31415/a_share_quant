@@ -45,6 +45,7 @@ a_share_quant/
 ├── tests/                   # pytest 测试（含未来函数专项测试）
 ├── scripts/                 # 合成数据生成、基准回测入口
 ├── notebooks/ experiments/ results/ reports/
+│   └── review/              # 交叉审查协议与台账（见 reports/review/PROTOCOL.md）
 ```
 
 ## 3. 安装
