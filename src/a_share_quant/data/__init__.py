@@ -1,6 +1,15 @@
 """数据层：schema 规范、数据加载、质量校验与 point-in-time 查询。"""
 from .asof import latest_known
 from .loader import DataProvider, LocalFileProvider
+from .builders import (
+    DEFAULT_BOARDS,
+    BuildReport,
+    assemble,
+    classify_board,
+    select_boards,
+    self_check,
+    split_symbol,
+)
 from .schema import (
     BAR_OPTIONAL_COLUMNS,
     BAR_REQUIRED_COLUMNS,
@@ -25,4 +34,11 @@ __all__ = [
     "PRICE_USAGE_POLICY",
     "coerce_bars",
     "coerce_bool",
+    "BuildReport",
+    "assemble",
+    "self_check",
+    "split_symbol",
+    "classify_board",
+    "select_boards",
+    "DEFAULT_BOARDS",
 ]

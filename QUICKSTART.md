@@ -33,7 +33,7 @@
 ```bash
 cd /d/a_share_quant
 "C:\Users\67478\.workbuddy\binaries\python\envs\default\Scripts\python.exe" -m pytest
-# -> 115 passed
+# -> 128 passed
 ```
 
 只跑某一类：
@@ -126,6 +126,34 @@ cd /d/a_share_quant
 ---
 
 ## 5. 换成你自己的数据
+
+### 5.1 从掘金 / QMT 一条命令拉数据
+
+```bash
+# 掘金（推荐）：token 走环境变量，一次拿齐价格/ST/停牌/涨跌停
+set GM_TOKEN=your_token
+python scripts/build_dataset.py --source gm --start 2020-01-01 --end 2024-12-31
+
+# 先小样本验证链路（3 只股票 1 年）
+python scripts/build_dataset.py --source gm --start 2023-01-01 --end 2023-12-31 \
+    --limit-symbols 600000,000001,300001 --min-symbols-per-day 1
+
+# QMT 降级源：日线没有历史 ST 与历史涨跌停价，需放宽校验
+python scripts/build_dataset.py --source qmt --allow-missing-limits
+```
+
+产物直接落在 `data/processed/`，四张表齐备。脚本内置六条硬校验，任一不过直接报错：
+
+1. `symbol` 必须是 6 位字符串（前导零不能被吃掉）
+2. `instruments` 里必须有已退市证券（否则幸存者偏差）
+3. 涨跌停价逐行覆盖（`limit_exempt` 之外不许为空）
+4. **复权因子 `k = adj_close/close` 单调不减**——k 下降基本等于拿到的是前复权
+5. 每个交易日的证券数不能异常瘦（拉取中断的典型症状）
+6. 停牌标记与成交量自洽
+
+SDK 升级导致字段名变化时，先用 `--probe` 看它到底返回了什么。
+
+### 5.2 手工准备数据（用别的源）
 
 把规范文件放到 **`data/processed/`**（默认读取目录），然后：
 
@@ -289,7 +317,7 @@ python -c "import a_share_quant; print(a_share_quant.__version__)"
 | 回测 · 等权基准（合成数据） | 最常用，跑完整回测 |
 | 回测 · 真实数据（data/processed） | 接入真实数据后用这个 |
 | Python · 当前文件 | 调试你正在写的脚本 |
-| pytest · 全部测试 | 断点调试 115 个测试 |
+| pytest · 全部测试 | 断点调试 128 个测试 |
 | pytest · 当前文件 | 只跑光标所在的测试文件 |
 | 生成合成数据 | 重新生成合成数据 |
 
@@ -316,7 +344,7 @@ result.trades[result.trades["note"] != "filled"]     # 看所有被拦截的成�
 
 装好 Python 插件后，左侧出现**烧杯图标**（Testing）：
 
-- 会列出 115 个测试，可以单跑、单挑一个调试；
+- 会列出 128 个测试，可以单跑、单挑一个调试；
 - 改完代码自动重新发现；
 - 建议先跑 `tests/test_no_lookahead.py` —— 它专门抓未来函数，动过因子或引擎就该跑它。
 

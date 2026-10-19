@@ -1,0 +1,287 @@
+"""把外部数据源（掘金 / QMT）的原始表装配成引擎认识的四张表。
+
+设计原则：
+  * 这一层是**纯函数**，不 import 任何 SDK，便于离线单测；
+  * SDK 调用留在 ``scripts/build_dataset.py`` 的 Source 适配器里；
+  * 硬校验不过就 raise，不产出"看起来能跑"的数据集。
+
+产出四张表（列名与 ``data/schema.py`` 对齐）：
+  bars         trade_date, symbol, open, high, low, close, volume, amount,
+               pre_close, adj_close, limit_up, limit_down, limit_exempt,
+               is_st, is_suspended
+  instruments  symbol, exchange, name, list_date, delist_date
+  status       trade_date, symbol, is_st, is_suspended
+  calendar     trade_date
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable, Sequence
+
+import pandas as pd
+
+from .validation import DataValidationError
+
+# 板块判定：(交易所, 代码前缀) -> 板块
+_BOARD_RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("SHSE", ("600", "601", "603", "605"), "main_sh"),
+    ("SHSE", ("688", "689"), "star"),
+    ("SZSE", ("000", "001", "002", "003"), "main_sz"),
+    ("SZSE", ("300", "301"), "chinext"),
+    ("BJSE", ("43", "83", "87", "92"), "bse"),
+)
+
+BOARD_ALIASES = {
+    "main": ("main_sh", "main_sz"),
+    "main_sh": ("main_sh",),
+    "main_sz": ("main_sz",),
+    "chinext": ("chinext",),
+    "star": ("star",),
+    "bse": ("bse",),
+}
+
+DEFAULT_BOARDS = ("main_sh", "main_sz", "chinext")
+
+
+def split_symbol(raw: str) -> tuple[str, str]:
+    """把 ``SHSE.600000`` / ``600000.SH`` / ``600000`` 拆成 (代码, 交易所)。"""
+    text = str(raw).strip().upper()
+    if "." in text:
+        left, right = text.split(".", 1)
+        if left in ("SHSE", "SZSE", "BJSE", "SH", "SZ", "BJ"):
+            return right, _norm_exchange(left)
+        return left, _norm_exchange(right)
+    return text, ""
+
+
+def _norm_exchange(tag: str) -> str:
+    return {"SH": "SHSE", "SZ": "SZSE", "BJ": "BJSE"}.get(tag, tag)
+
+
+def classify_board(symbol: str, exchange: str = "") -> str:
+    """按交易所 + 代码前缀判定板块；判定不出返回 ``unknown``。"""
+    sym = str(symbol)
+    ex = _norm_exchange(str(exchange).upper()) if exchange else ""
+    for rule_ex, prefixes, board in _BOARD_RULES:
+        if ex and rule_ex != ex:
+            continue
+        if sym.startswith(prefixes):
+            return board
+    # 交易所缺失时按前缀唯一映射（SHSE/SZSE 的 000 前缀会冲突，只能靠 exchange）
+    return "unknown"
+
+
+def is_index(symbol: str, exchange: str = "") -> bool:
+    """粗判指数：沪市 000xxx、深市 399xxx。"""
+    sym, ex = str(symbol), _norm_exchange(str(exchange).upper())
+    return (ex == "SHSE" and sym.startswith("000")) or \
+           (ex == "SZSE" and sym.startswith("399"))
+
+
+def select_boards(instruments: pd.DataFrame, boards: Sequence[str]) -> pd.DataFrame:
+    """按板块白名单筛证券。``boards`` 用 ``BOARD_ALIASES`` 的键。"""
+    wanted: set[str] = set()
+    for b in boards:
+        if b not in BOARD_ALIASES:
+            raise ValueError(f"unknown board {b!r}, expected one of {list(BOARD_ALIASES)}")
+        wanted.update(BOARD_ALIASES[b])
+    out = instruments.copy()
+    out["board"] = [classify_board(s, e) for s, e in zip(out["symbol"], out["exchange"])]
+    out = out[out["board"].isin(wanted)]
+    return out.drop(columns=["board"]).reset_index(drop=True)
+
+
+@dataclass
+class BuildReport:
+    bars: pd.DataFrame
+    instruments: pd.DataFrame
+    status: pd.DataFrame
+    calendar: pd.DataFrame
+    warnings: list[str]
+
+
+def _as_date(df: pd.DataFrame, col: str = "trade_date") -> pd.DataFrame:
+    out = df.copy()
+    out[col] = pd.to_datetime(out[col]).dt.normalize()
+    return out
+
+
+def assemble(bars_raw: pd.DataFrame, bars_post: pd.DataFrame,
+             status_raw: pd.DataFrame, instruments: pd.DataFrame,
+             calendar: Sequence, boards: Sequence[str] = DEFAULT_BOARDS,
+             limit_symbols: Iterable[str] | None = None) -> BuildReport:
+    """装配四张表。
+
+    参数
+    ----
+    bars_raw   原始价行情：trade_date, symbol, open, high, low, close, volume, amount, pre_close
+    bars_post  后复权行情：trade_date, symbol, adj_close
+    status_raw 逐日状态：trade_date, symbol, is_st, is_suspended, limit_up, limit_down
+    instruments symbol, exchange, name, list_date, delist_date
+    calendar   交易日序列
+    boards     板块白名单
+    limit_symbols 只保留这些代码（小样本调试用）
+    """
+    warnings: list[str] = []
+    inst = instruments.copy()
+    inst["symbol"] = inst["symbol"].astype(str)
+    inst["exchange"] = inst.get("exchange", "").astype(str) if "exchange" in inst else ""
+    if "list_date" in inst.columns:
+        inst["list_date"] = pd.to_datetime(inst["list_date"])
+    if "delist_date" in inst.columns:
+        inst["delist_date"] = pd.to_datetime(inst["delist_date"])
+
+    # 指数（如 SHSE.000300）不是可交易证券，先剔除；板块白名单再筛一次
+    index_mask = [is_index(s, e) for s, e in zip(inst["symbol"], inst["exchange"])]
+    if any(index_mask):
+        warnings.append(f"instruments 中剔除 {sum(index_mask)} 个指数代码（如 SHSE.000300）")
+        inst = inst[~pd.Series(index_mask, index=inst.index)]
+    inst = select_boards(inst, boards)
+
+    keep = set(inst["symbol"])
+    if limit_symbols is not None:
+        keep &= {str(s) for s in limit_symbols}
+    if not keep:
+        raise DataValidationError("筛选后没有任何证券，请检查 --boards / --limit-symbols")
+
+    bars = _as_date(bars_raw)
+    bars["symbol"] = bars["symbol"].astype(str)
+    bars = bars[bars["symbol"].isin(keep)]
+    adj = _as_date(bars_post)
+    adj["symbol"] = adj["symbol"].astype(str)
+    adj = adj[adj["symbol"].isin(keep)]
+    bars = bars.merge(adj[["trade_date", "symbol", "adj_close"]],
+                      on=["trade_date", "symbol"], how="left")
+
+    status = _as_date(status_raw)
+    status["symbol"] = status["symbol"].astype(str)
+    status = status[status["symbol"].isin(keep)].copy()
+
+    # 涨跌停价 <= 0 表示当日无涨跌幅限制（新股/特殊情形）：
+    # 记 limit_exempt=True 并把价格置空，执行层据此跳过约束。
+    # 注意：**缺失（NaN）与"无限制"是两回事**——NaN 不豁免，交给自检报错。
+    for col in ("limit_up", "limit_down"):
+        if col not in status.columns:
+            status[col] = float("nan")
+        status[col] = pd.to_numeric(status[col], errors="coerce")
+    no_limit = (status["limit_up"] <= 0) | (status["limit_down"] <= 0)
+    status.loc[no_limit, ["limit_up", "limit_down"]] = float("nan")
+    status["limit_exempt"] = no_limit
+
+    merged = bars.merge(
+        status[["trade_date", "symbol", "is_st", "is_suspended",
+                "limit_up", "limit_down", "limit_exempt"]],
+        on=["trade_date", "symbol"], how="left")
+
+    # 有 bar 但在状态表里找不到 -> 视为数据缺口，严格标记以便自检拦截
+    missing_status = int(merged["limit_exempt"].isna().sum())
+    if missing_status:
+        warnings.append(
+            f"{missing_status} 行行情在状态表中没有对应记录（涉及 "
+            f"{merged.loc[merged['limit_exempt'].isna(), 'symbol'].nunique()} 只证券）。"
+            f"状态表必须逐日覆盖，否则 ST/停牌/涨跌停都会失真。")
+    for col in ("is_st", "is_suspended"):
+        merged[col] = merged[col].fillna(False).astype(bool)
+    merged["limit_exempt"] = merged["limit_exempt"].fillna(False).astype(bool)
+
+    if "pre_close" not in merged.columns:
+        merged["pre_close"] = merged.groupby("symbol")["close"].shift(1)
+
+    bars_out = merged.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+    for col in ("open", "high", "low", "close", "volume", "amount",
+                "pre_close", "adj_close", "limit_up", "limit_down"):
+        if col in bars_out.columns:
+            bars_out[col] = pd.to_numeric(bars_out[col], errors="coerce")
+    bars_out = bars_out.loc[:, [
+        "trade_date", "symbol", "open", "high", "low", "close", "volume",
+        "amount", "pre_close", "adj_close", "limit_up", "limit_down",
+        "limit_exempt", "is_st", "is_suspended"]]
+
+    status_out = merged[["trade_date", "symbol", "is_st", "is_suspended"]] \
+        .drop_duplicates().sort_values(["trade_date", "symbol"]).reset_index(drop=True)
+
+    cal = pd.DataFrame({"trade_date": pd.to_datetime(list(calendar))}).drop_duplicates() \
+        .sort_values("trade_date").reset_index(drop=True)
+
+    inst_out = inst.loc[:, [c for c in
+                            ("symbol", "exchange", "name", "list_date", "delist_date")
+                            if c in inst.columns]].reset_index(drop=True)
+
+    return BuildReport(bars_out, inst_out, status_out, cal, warnings)
+
+
+# ---------------- 硬校验 ----------------
+
+K_TOL = 1e-6
+
+
+def self_check(report: BuildReport, allow_missing_limits: bool = False,
+               min_symbols_per_day: int = 100) -> list[str]:
+    """六条硬校验。不通过直接 raise，返回可容忍的告警列表。"""
+    warnings: list[str] = list(report.warnings)
+    bars, inst, cal = report.bars, report.instruments, report.calendar
+
+    # 1) symbol 必须是字符串且 6 位
+    if bars["symbol"].dtype != object and not pd.api.types.is_string_dtype(bars["symbol"]):
+        raise DataValidationError("bars.symbol 不是字符串类型，前导零已丢失")
+    bad = bars.loc[~bars["symbol"].str.fullmatch(r"\d{6}"), "symbol"].unique()
+    if len(bad):
+        raise DataValidationError(
+            f"bars.symbol 有 {len(bad)} 个不是 6 位数字（例如 {list(bad)[:5]}）")
+
+    # 2) 退市股必须存在（幸存者偏差的最低保障）
+    if "delist_date" not in inst.columns or inst["delist_date"].notna().sum() == 0:
+        raise DataValidationError(
+            "instruments 中没有任何已退市证券。这样的数据集会产生幸存者偏差，"
+            "必须包含退市股（list_status/已退市标记）。")
+
+    # 3) 涨跌停价覆盖
+    if not allow_missing_limits:
+        missing = bars["limit_up"].isna() | bars["limit_down"].isna()
+        missing &= ~bars["limit_exempt"].astype(bool)
+        if missing.any():
+            raise DataValidationError(
+                f"{int(missing.sum())} 行行情缺少涨跌停价且未标记 limit_exempt。"
+                "请补数据，或用 --allow-missing-limits 并在配置里关闭 "
+                "market_rules.consider_limit_up_down。")
+
+    # 4) 复权因子 k = adj_close/close 必须单调不减（后复权的判据）
+    if bars["adj_close"].notna().any():
+        k = (bars["adj_close"] / bars["close"]).replace([float("inf")], pd.NA)
+        frame = pd.DataFrame({"symbol": bars["symbol"], "trade_date": bars["trade_date"],
+                              "k": k}).dropna()
+        frame = frame.sort_values(["symbol", "trade_date"])
+        drop = frame.groupby("symbol")["k"].diff()
+        offenders = frame.loc[drop < -K_TOL, "symbol"].unique()
+        if len(offenders):
+            raise DataValidationError(
+                f"{len(offenders)} 只证券的 adj_close/close 出现下降（例如 "
+                f"{list(offenders)[:5]}）。后复权因子应单调不减——这通常意味着"
+                "数据源给的是前复权，或复权价与原始价没有按同一时点对齐。")
+
+    # 5) 每个交易日不该只剩零星几只（拉取中断的典型症状）
+    per_day = bars.groupby("trade_date")["symbol"].nunique()
+    thin = per_day[per_day < min_symbols_per_day]
+    if len(thin):
+        warnings.append(
+            f"{len(thin)} 个交易日的证券数少于 {min_symbols_per_day}"
+            f"（最少的 {int(thin.min())} 只，例如 {thin.idxmin().date()}），"
+            f"请确认是否拉取中断；小样本调试可用 --min-symbols-per-day 1")
+
+    # 6) 停牌标记与行情是否自洽
+    susp = bars[bars["is_suspended"].astype(bool)]
+    if len(susp):
+        traded = susp[susp["volume"].fillna(0) > 0]
+        if len(traded):
+            warnings.append(
+                f"{len(traded)} 行标了停牌却仍有成交量（例如 "
+                f"{traded['symbol'].iloc[0]} {traded['trade_date'].iloc[0].date()}），"
+                f"请确认 is_suspended 的定义")
+
+    # 日历覆盖
+    outside = bars.loc[~bars["trade_date"].isin(set(cal["trade_date"])), "trade_date"]
+    if len(outside):
+        raise DataValidationError(
+            f"{len(outside)} 行行情的日期不在交易日历中（例如 {outside.iloc[0].date()}）")
+
+    return warnings
