@@ -132,24 +132,26 @@ class ExecutionSimulator:
             row = row.iloc[0]
         return row
 
-    def _volume_cap(self, row, lot_size: int = 1) -> Optional[int]:
-        """单笔可成交股数上限。
+    def _volume_cap(self, row) -> Optional[int]:
+        """当日可成交股数上限（**未取整**）。
 
         返回值：
           * ``None`` —— 未启用（``max_participation_rate <= 0``）
           * ``-1``   —— 当日成交量缺失（NaN），无法判断容量，调用方必须拦截
-          * ``>=0``  —— 上限股数（已按 ``lot_size`` 向下取整）
+          * ``>=0``  —— 上限股数
 
-        ``volume`` 是必填列，缺失属于数据异常；不能当作"没有上限"放行
-        （历史缺陷：NaN 时容量约束静默消失，99,000 股照买）。
+        刻意不在这里按整手取整：是否取整取决于"上限有没有真正绑定"。
+        若上限 >= 委托股数，委托原样成交（清仓卖零股本就该一次卖掉）；
+        只有上限真的卡住委托时，才把成交股数压到整手——否则会把
+        本可成交的零股清仓截成整手、留下残仓（F-15）。
+        ``volume`` 是必填列，缺失属于数据异常，不能当作"没有上限"放行。
         """
         if self.max_participation_rate <= 0:
             return None
         vol = row.get("volume")
         if vol is None or pd.isna(vol):
             return -1
-        cap = int(float(vol) * self.max_participation_rate)
-        return max(cap // lot_size * lot_size, 0)
+        return max(int(float(vol) * self.max_participation_rate), 0)
 
     def execute(self, orders: Sequence[Order], exec_day_bars: pd.DataFrame,
                 portfolio: PortfolioState) -> list[Fill]:
@@ -197,16 +199,17 @@ class ExecutionSimulator:
                 fills.append(Fill(od.symbol, "sell", 0, 0.0, 0.0,
                                   "blocked:no_available_shares"))
                 continue
-            # 卖出也按整手取整：持有整百股时，申报数量必须是 100 股整数倍
+            # 卖出也按整手约束：持有整百股时，申报数量必须是 100 股整数倍
             #（上证函〔2014〕301 号第一条（一）、深证会〔2014〕72 号）。
-            cap = self._volume_cap(row, self.lot_size)
+            # 注意：只有上限真的卡住委托时才取整；能一次卖完的零股清仓不受影响。
+            cap = self._volume_cap(row)
             if cap == -1:
                 fills.append(Fill(od.symbol, "sell", 0, 0.0, 0.0,
                                   "blocked:no_volume_data"))
                 continue
             capped = cap is not None and shares > cap
             if capped:
-                shares = cap
+                shares = (cap // self.lot_size) * self.lot_size
                 if shares <= 0:
                     fills.append(Fill(od.symbol, "sell", 0, 0.0, 0.0,
                                       "blocked:volume"))
@@ -243,7 +246,7 @@ class ExecutionSimulator:
                     fills.append(Fill(od.symbol, "buy", 0, 0.0, 0.0,
                                       "blocked:limit_up"))
                     continue
-            cap = self._volume_cap(row, self.lot_size)
+            cap = self._volume_cap(row)
             if cap == -1:
                 fills.append(Fill(od.symbol, "buy", 0, 0.0, 0.0,
                                   "blocked:no_volume_data"))
@@ -274,8 +277,8 @@ class ExecutionSimulator:
                 turnover = shares * price
                 cost = self.cost_model.buy_cost(turnover)
             if shares <= 0:
-                fills.append(Fill(od.symbol, "buy", 0, 0.0, 0.0,
-                                  "blocked:insufficient_cash"))
+                reason = "blocked:volume" if volume_bound else "blocked:insufficient_cash"
+                fills.append(Fill(od.symbol, "buy", 0, 0.0, 0.0, reason))
                 continue
             portfolio.buy(od.symbol, shares, price, cost)
             cash -= turnover + cost

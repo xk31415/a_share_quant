@@ -321,6 +321,7 @@ note 分布: filled 401 / blocked:no_bar 14 / blocked:suspended 2
 | F-12 | parquet 整型 `symbol` 前导零丢失，白名单下宇宙为空 | 数值类型直接报错 | `test_parquet_integer_symbol_rejected` |
 | F-13 | 现金缩放被记成成交量截断 | `capped` 只在成交量上限绑定时为真 | `test_cash_scaling_is_not_marked_capped` |
 | F-14 | 全样本校验告警只打印不落盘 | 落盘改用全样本+窗口去重 | 人工核对 `metrics.json` |
+| F-15 | 卖出上限先取整再比较，截断本可一次成交的零股清仓 | 上限返回未取整值，仅在真绑定时取整 | 3 条零股清仓测试 |
 | F-10 | 容量上限用全日成交量，文档未说明 | README / settings / QUICKSTART 三处口径统一 | — |
 
 **F-09 是一次判定反转**：我最初判"不成立"，理由是 A 股卖出不受整手约束；Grok 拿出
@@ -328,7 +329,7 @@ note 分布: filled 401 / blocked:no_bar 14 / blocked:suspended 2
 100 股或其整数倍，不得拆分成任何形式的零股申报卖出"——我漏看了这条解释性通知，
 改判成立并修掉。
 
-测试 **100 → 106 passed**。基线回测数字与修复前逐位一致（这批不改变合成数据的成交路径）。
+测试 **100 → 109 passed**。基线回测数字与修复前逐位一致（这批不改变合成数据的成交路径）。
 
 **仍未修**：D 组 F-01（公司行动估值）、E 组 F-02（卖单续挂 + 退市清算）、
 F 组 F-03～F-06（symbol 后缀、税率日程、等权截断、基准超额），等用户定优先级。

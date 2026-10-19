@@ -312,3 +312,39 @@ def test_parquet_integer_symbol_rejected(tmp_path=None):
 
     with pytest.raises(ValueError, match="前导零"):
         LocalFileProvider(root).get_bars("2021-01-04", "2021-01-10")
+
+
+# ---------- 零股清仓不被容量上限误伤（F-15）----------
+
+def _sell_with_cap(held: int, order: int, volume: float) -> tuple:
+    sim = ExecutionSimulator(CostModel(commission_min=0.0, stamp_duty_rate=0.0,
+                                       slippage_rate=0.0),
+                             lot_size=100, max_participation_rate=0.10)
+    state = PortfolioState(1_000_000)
+    state.start_of_day()
+    state.buy("600000", held, 10.0, 0.0)
+    state.start_of_day()
+    row = pd.DataFrame([{"symbol": "600000", "open": 10.0, "close": 10.0,
+                         "volume": volume, "limit_up": 11.0, "limit_down": 9.0,
+                         "is_suspended": False}])
+    fill = sim.execute([Order("600000", "sell", order)], row, state)[0]
+    left = state.positions["600000"].shares if "600000" in state.positions else 0
+    return fill.shares, fill.capped, left
+
+
+def test_odd_lot_clearance_is_not_truncated_by_cap():
+    """持仓 1050 清仓、上限恰好 1050 时应全部卖出，不能被整手取整截成 1000。"""
+    shares, capped, left = _sell_with_cap(1050, 1050, 10500.0)
+    assert (shares, capped, left) == (1050, False, 0)
+
+
+def test_pure_odd_lot_clearance_not_blocked():
+    """纯零股 50 股清仓、上限 80 时应成交，不能因取整成 0 而被拦。"""
+    shares, capped, left = _sell_with_cap(50, 50, 800.0)
+    assert (shares, capped, left) == (50, False, 0)
+
+
+def test_cap_that_truly_binds_still_rounds_down():
+    """上限真的卡住时才取整：1050 清仓、上限 1000 -> 卖 1000、留 50。"""
+    shares, capped, left = _sell_with_cap(1050, 1050, 10000.0)
+    assert (shares, capped, left) == (1000, True, 50)
