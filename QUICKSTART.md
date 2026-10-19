@@ -33,7 +33,7 @@
 ```bash
 cd /d/a_share_quant
 "C:\Users\67478\.workbuddy\binaries\python\envs\default\Scripts\python.exe" -m pytest
-# -> 100 passed
+# -> 115 passed
 ```
 
 只跑某一类：
@@ -289,7 +289,7 @@ python -c "import a_share_quant; print(a_share_quant.__version__)"
 | 回测 · 等权基准（合成数据） | 最常用，跑完整回测 |
 | 回测 · 真实数据（data/processed） | 接入真实数据后用这个 |
 | Python · 当前文件 | 调试你正在写的脚本 |
-| pytest · 全部测试 | 断点调试 100 个测试 |
+| pytest · 全部测试 | 断点调试 115 个测试 |
 | pytest · 当前文件 | 只跑光标所在的测试文件 |
 | 生成合成数据 | 重新生成合成数据 |
 
@@ -316,7 +316,7 @@ result.trades[result.trades["note"] != "filled"]     # 看所有被拦截的成�
 
 装好 Python 插件后，左侧出现**烧杯图标**（Testing）：
 
-- 会列出 100 个测试，可以单跑、单挑一个调试；
+- 会列出 115 个测试，可以单跑、单挑一个调试；
 - 改完代码自动重新发现；
 - 建议先跑 `tests/test_no_lookahead.py` —— 它专门抓未来函数，动过因子或引擎就该跑它。
 

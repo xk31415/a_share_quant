@@ -212,6 +212,30 @@ class BacktestEngine:
                     "（如注册制新股上市前 5 日），请把 limit_exempt 标为 true；"
                     "否则按数据缺失处理并补齐。")
 
+    def _attach_adj_factor(self, bars: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+        """按 (symbol) 生成复权因子列 ``adj_factor = adj_close / close``。
+
+        估值时用 ``k_t / adj_ref`` 抵消除权除息的价格跳空；缺 ``adj_close`` 时
+        全部记为 1（即按原始价估值），并**显式告警**——否则真实数据回测的净值
+        会在每个除权日凭空腰斩，且看起来像正常下跌。
+        """
+        out = bars.copy()
+        warnings: list[str] = []
+        if "adj_close" not in out.columns:
+            out["adj_factor"] = 1.0
+            warnings.append(
+                "公司行动：bars 无 adj_close 列，净值按原始价估值。"
+                "10 送 10 等除权日中持仓市值会凭空腰斩，除权日收益不可信。"
+                "接入真实数据时请提供后复权收盘价。")
+            return out, warnings
+        close = pd.to_numeric(out["close"], errors="coerce")
+        adj = pd.to_numeric(out["adj_close"], errors="coerce")
+        k = (adj / close).where((close > 0) & (adj > 0))
+        # 单日缺失沿用前值，避免因子断点造成估值跳变
+        out["adj_factor"] = (
+            k.groupby(out["symbol"]).ffill().bfill().fillna(1.0).astype(float))
+        return out, warnings
+
     # ---- 主循环 ----
     def run(self) -> BacktestResult:
         cfg = self.config
@@ -222,6 +246,8 @@ class BacktestEngine:
 
         bars, warnings = self._prepare_data(trading_days[0], trading_days[-1])
         bars = bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+        bars, adj_warnings = self._attach_adj_factor(bars)
+        warnings.extend(adj_warnings)
         bars_by_date = {ts: g for ts, g in bars.groupby("trade_date")}
         signal_dates = set(rebalance_dates(trading_days, cfg.rebalance_frequency))
         warnings.extend(self._check_warmup(trading_days, signal_dates))
@@ -234,6 +260,7 @@ class BacktestEngine:
             max_participation_rate=self.max_participation_rate)
 
         last_prices: dict[str, float] = {}
+        last_k: dict[str, float] = {}
         pending_weights: Optional[dict[str, float]] = None
         prev_equity = cfg.initial_capital
 
@@ -249,6 +276,15 @@ class BacktestEngine:
         for d in trading_days:
             day_bars = bars_by_date.get(d, bars.iloc[0:0])
 
+            # --- 先更新当日复权因子（停牌日不更新，与价格同口径） ---
+            if not day_bars.empty:
+                k_mask = day_bars["adj_factor"].notna()
+                if "is_suspended" in day_bars.columns:
+                    k_mask &= ~day_bars["is_suspended"].astype(bool)
+                for sym, kv in zip(day_bars.loc[k_mask, "symbol"],
+                                   day_bars.loc[k_mask, "adj_factor"]):
+                    last_k[str(sym)] = float(kv)
+
             # --- 开盘前：T+1 释放昨日及更早持有的份额 ---
             state.start_of_day()
 
@@ -263,11 +299,11 @@ class BacktestEngine:
                 # 导致每次调仓都现金不足、大量买单被缩减。
                 tradeable = self._tradeable_symbols(day_bars, cfg.execution_price)
                 sizing_equity = self._sizing_equity(state, prev_equity,
-                                                    tradeable, last_prices)
+                                                    tradeable, last_prices, last_k)
                 orders = generate_orders(pending_weights, state, sizing_equity,
                                          ref_prices, self.lot_size,
                                          cash_buffer=cfg.cash_buffer)
-                fills = simulator.execute(orders, day_bars, state)
+                fills = simulator.execute(orders, day_bars, state, last_k)
                 day_buy = 0.0
                 day_sell = 0.0
                 day_cost = 0.0
@@ -301,15 +337,16 @@ class BacktestEngine:
                 for sym, px in zip(day_bars.loc[px_mask, "symbol"],
                                    day_bars.loc[px_mask, "close"]):
                     last_prices[str(sym)] = float(px)
-            equity = state.market_value(last_prices)
+            equity = state.market_value(last_prices, last_k)
             equity_records.append((d, equity))
             for sym, pos in sorted(state.positions.items()):
                 px = last_prices.get(sym, pos.avg_cost)
+                value = state.position_value(sym, px, last_k.get(sym, 1.0))
                 position_rows.append({
                     "trade_date": d, "symbol": sym, "shares": pos.shares,
                     "available_shares": pos.available_shares,
                     "avg_cost": round(pos.avg_cost, 6),
-                    "weight": (pos.shares * px / equity) if equity > 0 else 0.0})
+                    "weight": (value / equity) if equity > 0 else 0.0})
 
             # --- 信号日收盘：生成次日执行的目标权重 ---
             if d in signal_dates:
@@ -401,17 +438,20 @@ class BacktestEngine:
     @staticmethod
     def _sizing_equity(state: PortfolioState, equity: float,
                        tradeable: set[str],
-                       last_prices: dict[str, float]) -> float:
+                       last_prices: dict[str, float],
+                       last_k: dict[str, float] | None = None) -> float:
         """扣除无法交易持仓后的定仓基数。
 
         停牌/退市股卖不掉，这部分市值不能再拿去开新仓；若不扣除，
         目标权重会按"包含冻结市值"的总权益分配，每次调仓都现金不足。
         """
+        k_map = last_k or {}
         locked = 0.0
         for sym, pos in state.positions.items():
             if sym in tradeable:
                 continue
-            locked += pos.shares * float(last_prices.get(sym, pos.avg_cost))
+            px = float(last_prices.get(sym, pos.avg_cost))
+            locked += state.position_value(sym, px, k_map.get(sym, 1.0))
         if locked <= 0:
             return float(equity)
         return max(float(equity) - locked, 0.0)

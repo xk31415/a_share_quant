@@ -25,7 +25,7 @@ BAR_REQUIRED_COLUMNS: dict[str, str] = {
 }
 
 BAR_OPTIONAL_COLUMNS: tuple[str, ...] = (
-    "adj_close",           # 后复权收盘价：仅用于信号/因子计算
+    "adj_close",           # 后复权收盘价：信号/因子 + 估值还原（k = adj_close/close）
     "pre_close",           # 昨收（原始价）
     "limit_up",            # 涨停价（原始价）
     "limit_down",          # 跌停价（原始价）
@@ -66,8 +66,10 @@ class PriceUsagePolicy:
     """复权价 / 原始价用途的**声明性说明**（见 README「数据模型」一节）。
 
     注意：这是一个常量，**不参与运行时强制**。真正的保证来自约定——
-    因子只读 ``adj_close``，成交模拟只读 ``open``，涨跌停只看原始价。
-    新增代码请遵守本声明，不要把它当成运行时会自动拦截的检查器。
+    因子只读 ``adj_close``；成交、涨跌停、整手只用原始价；
+    估值用 ``adj_close/close`` 得到的复权因子还原创除权跳空（见
+    ``PortfolioState.position_value``）。新增代码请遵守本声明，
+    不要把它当成运行时会自动拦截的检查器。
     """
 
     signal_columns: tuple[str, ...] = ("adj_close",)          # 因子/信号默认输入（后复权）

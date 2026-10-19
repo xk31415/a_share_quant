@@ -154,8 +154,14 @@ class ExecutionSimulator:
         return max(int(float(vol) * self.max_participation_rate), 0)
 
     def execute(self, orders: Sequence[Order], exec_day_bars: pd.DataFrame,
-                portfolio: PortfolioState) -> list[Fill]:
-        """撮合订单。exec_day_bars 为成交日行情（long format）。"""
+                portfolio: PortfolioState,
+                adj_factors: Optional[Mapping[str, float]] = None) -> list[Fill]:
+        """撮合订单。exec_day_bars 为成交日行情（long format）。
+
+        ``adj_factors`` 为当日各标的的复权因子（``adj_close/close``），
+        买入时记入持仓作为估值基准；缺省视为 1（无公司行动）。
+        """
+        k_map = adj_factors or {}
         if exec_day_bars is None or exec_day_bars.empty:
             return [Fill(o.symbol, o.direction, 0, 0.0, 0.0,
                          o.reason or "blocked:no_bar") for o in orders]
@@ -280,7 +286,8 @@ class ExecutionSimulator:
                 reason = "blocked:volume" if volume_bound else "blocked:insufficient_cash"
                 fills.append(Fill(od.symbol, "buy", 0, 0.0, 0.0, reason))
                 continue
-            portfolio.buy(od.symbol, shares, price, cost)
+            portfolio.buy(od.symbol, shares, price, cost,
+                          adj_factor=k_map.get(od.symbol, 1.0))
             cash -= turnover + cost
             fills.append(Fill(od.symbol, "buy", shares, price, cost, "filled",
                               capped=volume_bound))

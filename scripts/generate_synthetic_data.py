@@ -74,26 +74,37 @@ def main() -> None:
         if not active:
             continue
         mu, sigma = float(rng.uniform(-0.0005, 0.0008)), float(rng.uniform(0.012, 0.025))
-        prev_close = None
+        # 一只老股做 2:1 送转（检验公司行动估值）：原始价腰斩、复权价连续
+        split_date = cal[int(len(cal) * 0.5)] if i == 9 else None
+        split_ratio = 2.0 if split_date is not None else 1.0
+        prev_raw, prev_cum = None, 1.0
         for d in active:
-            open_px = 50.0 if prev_close is None else prev_close * float(np.exp(rng.normal(0, 0.006)))
+            cum = split_ratio if (split_date is not None and d >= split_date) else 1.0
+            if prev_raw is None:
+                prev_raw = 50.0 / cum
+            else:
+                # 除权日把"昨收"换算到今天的价格基准（10 送 10 -> 昨收减半）
+                prev_raw = prev_raw * prev_cum / cum
+            open_px = prev_raw * float(np.exp(rng.normal(0, 0.006)))
             close = open_px * float(np.exp(rng.normal(mu, sigma)))
             high = max(open_px, close) * float(np.exp(abs(rng.normal(0, 0.004))))
             low = min(open_px, close) * float(np.exp(-abs(rng.normal(0, 0.004))))
             volume = float(rng.uniform(5e5, 2e7))
-            pre_close = prev_close if prev_close is not None else open_px
+            pre_close = prev_raw
             bar_rows.append({
                 "trade_date": d.date().isoformat(), "symbol": sym,
                 "open": round(open_px, 2), "high": round(high, 2),
                 "low": round(low, 2), "close": round(close, 2),
                 "volume": round(volume), "amount": round(volume * (open_px + close) / 2, 2),
-                "adj_close": round(close, 4),       # 无公司行动 -> 复权价=原始价
+                # 后复权价 = 原始价 × 累计送转比例；无公司行动时与 close 严格相等，
+                # 否则会给每只股票注入 ±0.02% 的假除权噪声。
+                "adj_close": round(close, 2) * cum,
                 "pre_close": round(pre_close, 2),
                 "limit_up": round(pre_close * 1.10, 2),
                 "limit_down": round(pre_close * 0.90, 2),
                 "is_suspended": False, "is_st": False,
             })
-            prev_close = close
+            prev_raw, prev_cum = close, cum
         # 状态表：1 只 ST 窗口、1 只停牌窗口（默认正常）
         # 注意：必须选样本前上市的老股（i < 20），否则这些标的的上市日晚于
         # 窗口起点，ST/停牌标记永远不会被写入——曾经的静默缺陷。
