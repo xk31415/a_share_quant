@@ -26,7 +26,10 @@ market_rules:
   consider_limit_up_down: true # 是否模拟涨跌停无法成交（bars 必须逐行提供 limit_up/limit_down，否则启动即报错）
   consider_suspension: true    # 是否模拟停牌无法成交（以 status 表为权威来源）
   lot_size: 100                # A 股一手股数
-  max_participation_rate: 0.10 # 单笔成交不超过当日成交量的比例（容量约束；0 = 不限制）
+  max_participation_rate: 0.10 # 单笔成交不超过「成交日全日成交量」的比例（0 = 不限制）。
+                               # 口径说明：这是事后容量代理，不是开盘时点可成交量——
+                               # 开盘时拿不到全日量，只能用它做上限估计。
+                               # 注意：库默认 0（关闭），只有本文件与基线脚本会开。
 
 # 数据目录由命令行 --data-dir 指定（默认 data/interim/synthetic）。
 # 接入真实数据：--data-dir data/processed

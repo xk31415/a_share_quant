@@ -202,11 +202,14 @@ class UniverseBuilder:
 
         if rules.min_avg_daily_amount is not None:
             lookback = max(1, rules.liquidity_lookback_days)
-            # 闭区间 [start, ts] 恰好 lookback 个交易日（原实现多取了 1 天）
+            # 窗口恰好 lookback 个交易日；分母用交易日数，而不是"有 bar 的行数"，
+            # 否则窗口内缺 bar（停牌/数据缺口）的标的分母变小、单日放量即可过阈值。
             start = hist[max(0, len(hist) - lookback)]
+            n_days = max(1, len(hist) - max(0, len(hist) - lookback))
             bars = self._provider.get_bars(start, ts)
             if not bars.empty:
-                avg = bars.groupby("symbol")["amount"].mean()
+                total = bars.groupby("symbol")["amount"].sum()
+                avg = total / n_days
                 candidates = [
                     s for s in candidates
                     if s in avg.index and float(avg.loc[s]) >= rules.min_avg_daily_amount

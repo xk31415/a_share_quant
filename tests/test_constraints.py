@@ -9,6 +9,8 @@ import pytest
 
 from a_share_quant.backtest import BacktestConfig, BacktestEngine
 from a_share_quant.backtest.costs import CostModel
+from a_share_quant.backtest.execution import ExecutionSimulator, Order
+from a_share_quant.backtest.positions import PortfolioState
 from a_share_quant.data.validation import DataValidationError
 from a_share_quant.portfolio import PortfolioRules
 from a_share_quant.strategies import Strategy, TargetPortfolio
@@ -27,6 +29,21 @@ class Fixed(Strategy):
 
     def generate_target(self, as_of, bars, universe):
         return TargetPortfolio(as_of=pd.Timestamp(as_of).normalize(), weights=dict(self._w))
+
+
+class Seq(Strategy):
+    """按信号次序切换目标，用于构造"先建仓再变目标"的场景。"""
+
+    name = "seq"
+
+    def __init__(self, targets):
+        self._targets = list(targets)
+        self._n = 0
+
+    def generate_target(self, as_of, bars, universe):
+        w = self._targets[min(self._n, len(self._targets) - 1)]
+        self._n += 1
+        return TargetPortfolio(as_of=pd.Timestamp(as_of).normalize(), weights=dict(w))
 
 
 def _engine(provider, strategy, rules=None, **kw):
@@ -187,3 +204,111 @@ def test_target_without_bar_records_blocked():
     assert not aaa.empty, "目标内缺行情的标的必须留下 0 股记录"
     assert (aaa["note"] == "blocked:no_bar").all()
     assert (aaa["shares"] == 0).all()
+
+
+def test_target_without_bar_direction_follows_intent():
+    """已持仓 + 缺行情 -> 记卖单；未持仓 + 缺行情 -> 记买单（F-07）。"""
+    dates = pd.bdate_range("2021-01-04", "2021-01-29")
+    bars = make_bars(dates, ["AAA", "BBB"])
+    missing = pd.Timestamp("2021-01-18")
+    bars = bars.drop(index=bars.index[(bars.symbol == "AAA")
+                                      & (bars.trade_date == missing)])
+    provider = make_provider(dates, ["AAA", "BBB"], bars=bars)
+    engine = BacktestEngine(
+        provider=provider,
+        strategy=Seq([{"AAA": 1.0}, {"AAA": 0.01, "BBB": 0.99}]),
+        universe_builder=UniverseBuilder(provider, UniverseRules(min_list_days=0)),
+        portfolio_rules=PortfolioRules(max_positions=2, max_weight_per_stock=1.0),
+        cost_model=CostModel(slippage_rate=0.0),
+        config=BacktestConfig("2021-01-04", "2021-01-29", "W"))
+    result = engine.run()
+    gap = result.trades[(result.trades.symbol == "AAA")
+                        & (result.trades.trade_date == missing)]
+    assert len(gap) == 1
+    assert gap.iloc[0]["direction"] == "sell"
+    assert gap.iloc[0]["note"] == "blocked:no_bar"
+
+
+def test_volume_nan_blocks_when_cap_enabled():
+    dates = pd.bdate_range("2021-01-04", periods=6)
+    bars = make_bars(dates, ["AAA"])
+    bars["volume"] = float("nan")
+    provider = make_provider(dates, ["AAA"], bars=bars)
+    with pytest.raises(DataValidationError, match="volume"):
+        _engine(provider, Fixed({"AAA": 1.0}), max_participation_rate=0.10).run()
+
+
+def test_sell_volume_cap_rounded_to_lot():
+    """卖出上限也按整手取整：持有整百股时申报数量必须是 100 股整数倍（F-09）。"""
+    sim = ExecutionSimulator(CostModel(commission_min=0.0, stamp_duty_rate=0.0,
+                                       slippage_rate=0.0),
+                             lot_size=100, max_participation_rate=0.10)
+    state = PortfolioState(100_000)
+    state.start_of_day()
+    state.buy("600000", 1000, 10.0, 0.0)
+    state.start_of_day()
+    row = pd.DataFrame([{"symbol": "600000", "open": 10.0, "close": 10.0,
+                         "volume": 2500.0, "limit_up": 11.0, "limit_down": 9.0,
+                         "is_suspended": False}])
+    fills = sim.execute([Order("600000", "sell", 500)], row, state)
+    assert fills[0].shares == 200          # int(2500*0.1)=250 -> 向下取整到 200
+    assert fills[0].capped is True
+    assert state.positions["600000"].shares == 800
+
+
+def test_cash_scaling_is_not_marked_capped():
+    """现金不足造成的缩量不应记成成交量截断（F-13）。"""
+    sim = ExecutionSimulator(CostModel(commission_min=0.0, stamp_duty_rate=0.0,
+                                       slippage_rate=0.0),
+                             lot_size=100, max_participation_rate=0.10)
+    state = PortfolioState(5_000)
+    row = pd.DataFrame([{"symbol": "600000", "open": 10.0, "close": 10.0,
+                         "volume": 1_000_000.0, "limit_up": 11.0, "limit_down": 9.0,
+                         "is_suspended": False}])
+    fills = sim.execute([Order("600000", "buy", 2000)], row, state)
+    assert fills[0].shares == 400          # 现金 5000 / 10
+    assert fills[0].capped is False        # 上限 100,000 股，未绑定
+
+
+def test_liquidity_filter_divides_by_trading_days():
+    """流动性均值分母是交易日数：单日放量不能顶过阈值（F-11）。"""
+    dates = pd.bdate_range("2021-01-04", periods=5)
+    rows = [{"trade_date": d, "symbol": "FULL", "open": 10.0, "high": 10.5,
+             "low": 9.5, "close": 10.0, "volume": 1e6, "amount": 100.0,
+             "adj_close": 10.0, "limit_up": 11.0, "limit_down": 9.0}
+            for d in dates]
+    rows.append({"trade_date": dates[-1], "symbol": "GAP", "open": 10.0,
+                 "high": 10.5, "low": 9.5, "close": 10.0, "volume": 1e6,
+                 "amount": 600.0, "adj_close": 10.0,
+                 "limit_up": 11.0, "limit_down": 9.0})
+    bars = pd.DataFrame(rows)
+    provider = make_provider(dates, ["FULL", "GAP"], bars=bars)
+    universe = UniverseBuilder(
+        provider, UniverseRules(min_list_days=0, min_avg_daily_amount=200,
+                                liquidity_lookback_days=5)).get_universe(dates[-1])
+    assert universe == []      # GAP: 600/5=120 < 200；FULL: 100 < 200
+
+
+def test_parquet_integer_symbol_rejected(tmp_path=None):
+    """parquet 里 symbol 是数值类型 -> 直接报错，不让前导零静默丢失（F-12）。"""
+    import tempfile
+    from pathlib import Path
+
+    from a_share_quant.data.loader import LocalFileProvider
+
+    root = Path(tempfile.mkdtemp())
+    dates = pd.bdate_range("2021-01-04", periods=3)
+    bars = make_bars(dates, ["X"])
+    bars["symbol"] = 1
+    bars.to_parquet(root / "bars.parquet", index=False)
+    pd.DataFrame([{"symbol": 1, "name": "a",
+                   "list_date": pd.Timestamp("2020-01-01"),
+                   "delist_date": pd.NaT}]).to_parquet(root / "instruments.parquet",
+                                                       index=False)
+    pd.DataFrame([{"trade_date": d, "symbol": 1, "is_st": False,
+                   "is_suspended": False} for d in dates]).to_parquet(
+        root / "status.parquet", index=False)
+    pd.DataFrame({"trade_date": dates}).to_csv(root / "calendar.csv", index=False)
+
+    with pytest.raises(ValueError, match="前导零"):
+        LocalFileProvider(root).get_bars("2021-01-04", "2021-01-10")

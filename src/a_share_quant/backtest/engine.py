@@ -122,7 +122,24 @@ class BacktestEngine:
                 status=status if status is not None and not status.empty else None,
                 calendar=calendar))
             self._require_limit_columns(bars)
+            self._require_volume_for_cap(bars)
         return bars, warnings
+
+    def _require_volume_for_cap(self, bars: pd.DataFrame) -> None:
+        """启用成交量上限时，volume 不允许有缺失。
+
+        ``volume`` 是必填列，NaN 属于数据异常。若放行，执行层只能把该笔
+        当成"没有上限"处理（历史缺陷：99,000 股照买、``capped=False``），
+        容量约束就这么静默消失了。
+        """
+        if self.max_participation_rate <= 0:
+            return
+        n_na = int(bars["volume"].isna().sum())
+        if n_na:
+            raise DataValidationError(
+                f"max_participation_rate={self.max_participation_rate} 已启用成交量上限，"
+                f"但 bars.volume 有 {n_na} 行为空值，无法判断单笔可成交量。"
+                "请补齐成交量，或把 market_rules.max_participation_rate 设为 0 关闭该约束。")
 
     def _load_status(self, start, end) -> Optional[pd.DataFrame]:
         try:

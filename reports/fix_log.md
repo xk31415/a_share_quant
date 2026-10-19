@@ -308,4 +308,31 @@ note 分布: filled 401 / blocked:no_bar 14 / blocked:suspended 2
 
 ---
 
+## 九、第三轮：交叉审查（与 Grok）确认后的修复
+
+`reports/review/` 下的两轮审查（R01/R02）就 14 条达成一致，本轮修 A/B/C 组：
+
+| 条目 | 问题 | 改动 | 回归测试 |
+|---|---|---|---|
+| F-07 | 目标内缺行情时把减仓记成 0 股**买单**，且不生成卖单 | 按持仓方向记 sell/buy | `test_target_without_bar_direction_follows_intent` |
+| F-08 | `volume` 为 NaN 时成交量上限静默关闭（99,000 股照买） | 启动报错 + `blocked:no_volume_data` | `test_volume_nan_blocks_when_cap_enabled` |
+| F-09 | 卖出上限按 `lot_size=1` 截断，产出 250 股这类非整百申报 | 卖出上限也按整手取整 | `test_sell_volume_cap_rounded_to_lot` |
+| F-11 | 流动性均值分母是「有 bar 的行数」，单日放量可过阈值 | 分母改为交易日数 | `test_liquidity_filter_divides_by_trading_days` |
+| F-12 | parquet 整型 `symbol` 前导零丢失，白名单下宇宙为空 | 数值类型直接报错 | `test_parquet_integer_symbol_rejected` |
+| F-13 | 现金缩放被记成成交量截断 | `capped` 只在成交量上限绑定时为真 | `test_cash_scaling_is_not_marked_capped` |
+| F-14 | 全样本校验告警只打印不落盘 | 落盘改用全样本+窗口去重 | 人工核对 `metrics.json` |
+| F-10 | 容量上限用全日成交量，文档未说明 | README / settings / QUICKSTART 三处口径统一 | — |
+
+**F-09 是一次判定反转**：我最初判"不成立"，理由是 A 股卖出不受整手约束；Grok 拿出
+上证函〔2014〕301 号第一条（一）——"持有…100 股或其整数倍的，卖出申报数量应当为
+100 股或其整数倍，不得拆分成任何形式的零股申报卖出"——我漏看了这条解释性通知，
+改判成立并修掉。
+
+测试 **100 → 106 passed**。基线回测数字与修复前逐位一致（这批不改变合成数据的成交路径）。
+
+**仍未修**：D 组 F-01（公司行动估值）、E 组 F-02（卖单续挂 + 退市清算）、
+F 组 F-03～F-06（symbol 后缀、税率日程、等权截断、基准超额），等用户定优先级。
+
+---
+
 *回测结果不代表未来收益。本项目用于研究，不构成投资建议。*

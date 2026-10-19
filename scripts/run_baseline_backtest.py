@@ -166,7 +166,8 @@ def main() -> None:
     report = full_report(result, industry_map=industry_map)
     # 一次实验要在磁盘上自我说明：校验告警与行业数据来源都进结果，
     # 不能只在终端闪一下（否则忽略返回值时，坏数据看起来像正常回测）。
-    report["validation_warnings"] = list(result.validation_warnings)
+    report["validation_warnings"] = list(all_warnings)
+    report["validation_warnings_source"] = "full_sample + backtest_window（已去重）"
     report["industry_source"] = industry_source or "none"
     report["n_universe_violations"] = int(len(result.universe_violations)) \
         if result.universe_violations is not None else 0
@@ -197,7 +198,7 @@ def main() -> None:
         benchmark=config.benchmark,
         result_path=str(out_dir),
         git_commit=git_commit(root),
-        validation_warnings=list(result.validation_warnings),
+        validation_warnings=list(all_warnings),
         industry_source=industry_source or "none",
         notes=("synthetic random-walk data — framework smoke test only, "
                "NOT real market data" if "synthetic" in str(data_dir).lower() else ""))

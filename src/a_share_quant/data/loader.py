@@ -82,6 +82,13 @@ class LocalFileProvider(DataProvider):
             if path.exists():
                 if path.suffix == ".parquet":
                     df = pd.read_parquet(path)
+                    # 前导零一旦以数值类型写进 parquet 就无法还原（000001 -> 1）。
+                    # 这里显式拒绝，而不是让代码变成 "1" 后在白名单里静默消失。
+                    if "symbol" in df.columns and pd.api.types.is_numeric_dtype(df["symbol"]):
+                        raise ValueError(
+                            f"{path.name} 的 symbol 列是数值类型 "
+                            f"({df['symbol'].dtype})，A 股代码的前导零已丢失"
+                            f"（000001 会变成 1）。请把 symbol 写成字符串后重新导出。")
                 else:
                     # symbol 必须按字符串读入：A 股代码有前导零（000001、000300），
                     # 交给 pandas 推断类型会把 000001 读成 1，与 instruments 对不上，

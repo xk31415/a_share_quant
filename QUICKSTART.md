@@ -181,6 +181,7 @@ from a_share_quant.universe.builder import UniverseBuilder, UniverseRules
 class TopNMomentum(Strategy):
     """20 日动量前 N 名等权持有。"""
     name = "topn_momentum_20d"
+    warmup = 20          # 声明暖机期：窗口不够时引擎会告警，而不是静默空仓
 
     def __init__(self, top_n: int = 5):
         self.factor = Momentum(window=20)
@@ -207,6 +208,7 @@ engine = BacktestEngine(
     cost_model=CostModel(),
     config=BacktestConfig(start_date="2021-01-04", end_date="2023-12-29",
                           rebalance_frequency="M"),
+    max_participation_rate=0.10,   # 库默认 0（关闭）；基线脚本从 settings.yaml 读 0.10
 )
 print(summarize(engine.run()))
 ```
