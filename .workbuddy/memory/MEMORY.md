@@ -10,11 +10,24 @@
 
 ## 工作流程
 
-- 改代码后必须跑 `python -m pytest`（当前 90 passed），失败不许报完成。
+- 改代码后必须跑 `python -m pytest`（当前 100 passed），失败不许报完成。
 - 涉及口径变更（换手率、净值、指标定义）必须同步更新 README 的限制清单
   与 `reports/`，禁止只改代码不改文档——这个项目最忌"文档说 A、代码做 B"。
 - 静默失效优先于崩溃处理：缺数据要显式 raise 或 warn，不接受默认放行。
 - 修完一批问题写 `reports/fix_log.md`，按"问题 → 改动 → 验证"三段式，附前后数字对比。
+
+## 交叉审查协议（与 Grok，2026-10-19 起）
+
+- 规则文件 `reports/review/PROTOCOL.md`，状态源 `reports/review/LEDGER.md`，
+  轮次文件 `reports/review/rounds/R<nn>-{grok,claude}.md`。
+- **文件所有权硬规则**：Grok 只写自己的 `R<nn>-grok.md`；我写代码 + `R<nn>-claude.md`
+  + `LEDGER.md`。双方都改同一文件会冲突，所以永不交叉写。
+- 每条发现必须给 `reviewed_commit` + 行号 + **该行代码原文**（防行号漂移），
+  外加可证伪断言；没有断言的一律标「存疑」。
+- 两轮为限，第三轮只处理 blocking；「存疑」清零才算共识；仍存疑转「待真实数据」，
+  写进 README 限制清单，不阻塞修复。
+- 只对齐事实判定，严重度由用户拍板，不争论定级。
+- 达成一致之前**不改代码**。
 
 ## 环境
 
