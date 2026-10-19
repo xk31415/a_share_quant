@@ -157,3 +157,70 @@ def test_self_check_passes_on_clean_dataset():
     raw, post, status, inst, dates = _frames()
     report = assemble(raw, post, status, inst, dates)
     self_check(report, min_symbols_per_day=1)       # 不抛异常即通过
+
+
+# ---------- 涨跌停规则表 ----------
+
+def test_limit_ratio_by_board_and_st():
+    from a_share_quant.data.builders import limit_ratio
+    assert limit_ratio("600000", "SHSE", "2023-06-01", False) == 0.10
+    assert limit_ratio("600000", "SHSE", "2023-06-01", True) == 0.05    # ST ±5%
+    assert limit_ratio("000001", "SZSE", "2023-06-01", False) == 0.10
+    # 创业板注册制改革：2020-08-24 前后 10% -> 20%
+    assert limit_ratio("300001", "SZSE", "2020-08-21", False) == 0.10
+    assert limit_ratio("300001", "SZSE", "2020-08-24", False) == 0.20
+    assert limit_ratio("300001", "SZSE", "2023-06-01", True) == 0.20    # 创业板 ST 仍 20%
+    assert limit_ratio("688001", "SHSE", "2023-06-01", False) == 0.20
+
+
+def _limit_frames(pre_close=10.0, close=10.5, is_st=False, days=4):
+    dates = pd.bdate_range("2024-01-02", periods=days)
+    bars = pd.DataFrame({
+        "trade_date": dates, "symbol": "600000", "open": close, "high": close,
+        "low": close, "close": close, "volume": 1e6, "amount": close * 1e6,
+        "pre_close": pre_close, "adj_close": close, "limit_up": float("nan"),
+        "limit_down": float("nan"), "limit_exempt": False,
+        "is_st": is_st, "is_suspended": False,
+    })
+    inst = pd.DataFrame([{"symbol": "600000", "exchange": "SHSE", "name": "x",
+                          "list_date": pd.Timestamp("2010-01-01"),
+                          "delist_date": pd.NaT}])
+    cal = pd.DataFrame({"trade_date": dates})
+    return bars, inst, cal
+
+
+def test_derive_limits_uses_rule_table():
+    from a_share_quant.data.builders import derive_limits
+    bars, inst, cal = _limit_frames(pre_close=10.0, close=10.5)
+    out, _ = derive_limits(bars, inst, cal)
+    assert out["limit_up"].iloc[0] == pytest.approx(11.0)
+    assert out["limit_down"].iloc[0] == pytest.approx(9.0)
+    assert not out["limit_exempt"].any()
+
+
+def test_derive_limits_st_narrows_band():
+    from a_share_quant.data.builders import derive_limits
+    bars, inst, cal = _limit_frames(pre_close=10.0, close=10.4, is_st=True)
+    out, _ = derive_limits(bars, inst, cal)
+    assert out["limit_up"].iloc[0] == pytest.approx(10.5)   # ST +5%
+
+
+def test_derive_limits_rejects_price_beyond_limit():
+    """收盘价越过推算出的涨停 -> 规则表或 is_st 有误，必须报错而不是放宽约束。"""
+    from a_share_quant.data.builders import derive_limits
+    bars, inst, cal = _limit_frames(pre_close=10.0, close=11.5)
+    with pytest.raises(DataValidationError, match="涨跌停"):
+        derive_limits(bars, inst, cal)
+
+
+def test_derive_limits_exempts_new_listing():
+    """注册制新股上市前 5 个交易日不设涨跌幅 -> limit_exempt。"""
+    from a_share_quant.data.builders import derive_limits
+    bars, inst, cal = _limit_frames(pre_close=10.0, close=10.2, days=4)
+    inst.loc[0, "list_date"] = pd.Timestamp("2024-01-02")
+    inst.loc[0, "exchange"] = "SZSE"
+    inst.loc[0, "symbol"] = "300001"
+    bars["symbol"] = "300001"
+    out, warnings = derive_limits(bars, inst, cal)
+    assert out["limit_exempt"].all()
+    assert any("无涨跌幅限制" in w for w in warnings)

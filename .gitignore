@@ -16,7 +16,7 @@ venv/
 # 数据目录：只保留目录结构，不提交数据本体
 data/raw/*
 data/interim/*
-data/processed/*
+data/processed*/*
 data/metadata/*
 !data/raw/.gitkeep
 !data/interim/.gitkeep

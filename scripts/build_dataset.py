@@ -251,6 +251,130 @@ class QmtSource:
         return out
 
 
+# ---------------------------------------------------------------- baostock
+class BaostockSource:
+    """baostock（免费）。有逐日 isST / tradestatus / 后复权，无历史涨跌停价。
+
+    涨跌停由 ``builders.derive_limits`` 按交易所规则推算，并用"收盘价不得越过
+    涨跌停"反查规则表是否写错。
+    """
+
+    name = "baostock"
+    RAW_FIELDS = ("date,open,high,low,close,preclose,volume,amount,"
+                  "tradestatus,isST,pctChg")
+
+    def __init__(self) -> None:
+        import baostock as bs
+        self.bs = bs
+        lg = bs.login()
+        if str(lg.error_code) != "0":
+            raise SystemExit(f"baostock 登录失败：{lg.error_msg}")
+        self._ex: dict[str, str] = {}
+
+    def close(self) -> None:
+        try:
+            self.bs.logout()
+        except Exception:
+            pass
+
+    # -- 探针 --
+    def probe(self) -> None:
+        rs = self.bs.query_stock_basic()
+        print("stock_basic fields:", rs.fields)
+        rs = self.bs.query_history_k_data_plus(
+            "sh.600000", self.RAW_FIELDS, start_date="2024-01-02",
+            end_date="2024-01-05", frequency="d", adjustflag="3")
+        print("bars fields:", rs.fields)
+        while rs.next():
+            print(" ", rs.get_row_data())
+        rs = self.bs.query_trade_dates(start_date="2024-01-02", end_date="2024-01-05")
+        print("trade_dates fields:", rs.fields)
+
+    # -- 取数 --
+    def calendar(self, start: str, end: str) -> list[str]:
+        rs = self.bs.query_trade_dates(start_date=start, end_date=end)
+        if str(rs.error_code) != "0":
+            raise SystemExit(f"交易日历查询失败：{rs.error_msg}")
+        out = []
+        while rs.next():
+            row = dict(zip(rs.fields, rs.get_row_data()))
+            if row["is_trading_day"] == "1":
+                out.append(row["calendar_date"])
+        return out
+
+    def instruments(self) -> pd.DataFrame:
+        rs = self.bs.query_stock_basic()
+        rows = []
+        while rs.next():
+            row = dict(zip(rs.fields, rs.get_row_data()))
+            if row["type"] != "1":          # 1=股票；2=指数，4/5=其它
+                continue
+            if not row["code"].startswith(("sh.", "sz.")):
+                continue
+            sym, ex = split_symbol(row["code"])
+            self._ex[sym] = ex
+            rows.append({
+                "symbol": sym, "exchange": ex, "name": row["code_name"],
+                "list_date": pd.to_datetime(row["ipoDate"], errors="coerce"),
+                "delist_date": pd.to_datetime(row["outDate"], errors="coerce"),
+            })
+        return pd.DataFrame(rows)
+
+    def fetch_all(self, symbols: list[str], start: str, end: str):
+        raw_parts, post_parts, status_parts = [], [], []
+        total = len(symbols)
+        for n, sym in enumerate(symbols, 1):
+            code = f"{'sh' if self._ex.get(sym) == 'SHSE' else 'sz'}.{sym}"
+            rs = self.bs.query_history_k_data_plus(
+                code, self.RAW_FIELDS, start_date=start, end_date=end,
+                frequency="d", adjustflag="3")
+            if str(rs.error_code) != "0":
+                print(f"[warn] {code} 行情查询失败：{rs.error_msg}")
+                continue
+            rows = []
+            while rs.next():
+                rows.append(dict(zip(rs.fields, rs.get_row_data())))
+            if not rows:
+                continue
+            df = pd.DataFrame(rows)
+            df["trade_date"] = pd.to_datetime(df["date"])
+            df["symbol"] = sym
+            for col in ("open", "high", "low", "close", "preclose", "volume", "amount"):
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            st = pd.DataFrame({
+                "trade_date": df["trade_date"], "symbol": sym,
+                "is_st": df["isST"] == "1",
+                "is_suspended": df["tradestatus"] == "0",
+                "limit_up": float("nan"), "limit_down": float("nan"),
+            })
+            status_parts.append(st)
+            priced = df[df["close"].notna()][
+                ["trade_date", "symbol", "open", "high", "low", "close",
+                 "volume", "amount", "preclose"]].rename(
+                columns={"preclose": "pre_close"})
+            raw_parts.append(priced)
+
+            rs2 = self.bs.query_history_k_data_plus(
+                code, "date,close", start_date=start, end_date=end,
+                frequency="d", adjustflag="1")
+            rows2 = []
+            while rs2.next():
+                rows2.append(dict(zip(rs2.fields, rs2.get_row_data())))
+            if rows2:
+                d2 = pd.DataFrame(rows2)
+                d2["trade_date"] = pd.to_datetime(d2["date"])
+                d2["symbol"] = sym
+                d2["adj_close"] = pd.to_numeric(d2["close"], errors="coerce")
+                post_parts.append(d2[["trade_date", "symbol", "adj_close"]])
+
+            if n % 50 == 0 or n == total:
+                print(f"  {n}/{total} 只", flush=True)
+
+        cat = lambda parts, cols=None: (pd.concat(parts, ignore_index=True)  # noqa: E731
+                                        if parts else pd.DataFrame())
+        return cat(raw_parts), cat(post_parts), cat(status_parts)
+
+
 # ---------------------------------------------------------------- 落地
 def write_tables(report: BuildReport, out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
@@ -269,7 +393,7 @@ def write_tables(report: BuildReport, out: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--source", choices=["gm", "qmt"], default="gm")
+    ap.add_argument("--source", choices=["baostock", "gm", "qmt"], default="baostock")
     ap.add_argument("--start", default="2020-01-01")
     ap.add_argument("--end", default="2024-12-31")
     ap.add_argument("--out", default=str(PROJECT_ROOT / "data" / "processed"))
@@ -283,7 +407,7 @@ def main() -> None:
     ap.add_argument("--probe", action="store_true", help="只打印 SDK 返回的字段")
     args = ap.parse_args()
 
-    source = GmSource() if args.source == "gm" else QmtSource()
+    source = {"baostock": BaostockSource, "gm": GmSource, "qmt": QmtSource}[args.source]()
     if args.probe:
         source.probe()
         return
@@ -306,17 +430,30 @@ def main() -> None:
     print(f"      白名单 {boards} 内 {len(symbols)} 只")
 
     print("[3/4] 行情与状态")
-    bars_raw, bars_post = source.bars(symbols, args.start, args.end)
-    status = source.status(symbols, args.start, args.end)
+    if hasattr(source, "fetch_all"):
+        bars_raw, bars_post, status = source.fetch_all(symbols, args.start, args.end)
+    else:
+        bars_raw, bars_post = source.bars(symbols, args.start, args.end)
+        status = source.status(symbols, args.start, args.end)
     print(f"      bars {len(bars_raw)} 行 / 后复权 {len(bars_post)} 行 / 状态 {len(status)} 行")
 
     print("[4/4] 装配与校验")
     report = assemble(bars_raw, bars_post, status, instruments, calendar,
                       boards=boards,
                       limit_symbols=set(symbols) if args.limit_symbols else None)
+
+    # 数据源不给涨跌停价时按规则表推算（baostock / QMT 都属此类）
+    if report.bars["limit_up"].isna().all() and not args.allow_missing_limits:
+        print("      源未提供涨跌停价，按交易所规则推算")
+        from a_share_quant.data.builders import derive_limits
+        report.bars, w = derive_limits(report.bars, report.instruments, report.calendar)
+        report.warnings.extend(w)
+
     warnings = self_check(report, allow_missing_limits=args.allow_missing_limits,
                           min_symbols_per_day=args.min_symbols_per_day)
     write_tables(report, Path(args.out))
+    if hasattr(source, "close"):
+        source.close()
 
     for w in warnings:
         print(f"[warn] {w}")

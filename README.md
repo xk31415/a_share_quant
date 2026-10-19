@@ -84,7 +84,7 @@ pip install -e ".[dev]"
 python -m pytest tests/
 ```
 
-128 个测试覆盖：
+133 个测试覆盖：
 - 日期对齐、交易日历（`test_dates.py`）；
 - 数据 schema 与校验，含**幸存者偏差哨兵**（`test_data.py`）；
 - 因子计算正确性（`test_factors.py`）；
@@ -97,7 +97,7 @@ python -m pytest tests/
   停牌日估值冻结、逐行涨跌停缺失必须报错、`limit_exempt` 豁免、成交量上限、
   目标内缺行情必须留痕；
 - **数据装配**（`test_dataset_build.py`）：板块判定、指数剔除、状态/涨跌停合并、
-  六条自检各自能拦住对应坏数据；
+  涨跌停规则表（含创业板改革与 ST 收窄）、六条自检各自能拦住对应坏数据；
 - **公司行动**（`test_corporate_actions.py`）：10 送 10 与现金分红的除权日收益≈0、
   除权后涨跌按复权口径计量、缺 `adj_close` 必须告警、无公司行动时等价于原始价；
 - **未来函数专项**（`tests/test_no_lookahead.py`）：
@@ -280,16 +280,17 @@ experiment_id、策略名、数据版本指纹、股票池规则、区间、频�
 接入任何外部数据源前，必须先明确：数据源是什么、覆盖范围、是否包含退市股、
 是否包含历史股票池信息、复权方式、财务数据公告日、授权限制——然后再决定。
 
-数据准备已经脚本化：`scripts/build_dataset.py --source gm|qmt`，产出四张表并执行
+数据准备已经脚本化：`scripts/build_dataset.py --source baostock|gm|qmt`（默认 baostock，
+免费、无需 token、含退市股），产出四张表并执行
 六条硬校验（退市股必须存在、涨跌停逐行覆盖、`symbol` 必须字符串、
 **复权因子 k 单调不减**、每日证券数、停牌标记自洽）。校验不过直接报错，
 不产出"看起来能跑"的数据集。
 
 ## 14. 下一步建议（按优先级）
 
-1. **接入真实数据源**（最高优先级）：掘金 token 走 `GM_TOKEN`，
-   `python scripts/build_dataset.py --source gm --start 2020-01-01 --end 2024-12-31`，
-   先小样本验证再全量；
+1. **接入真实数据源**（最高优先级）：`pip install baostock` 后
+   `python scripts/build_dataset.py --source baostock --start 2020-01-01 --end 2024-12-31`，
+   先小样本验证再全量；涨跌停价由规则表推算并自检；
 2. 用真实数据重跑等权基准，检查成本/换手/涨跌停拦截比例是否合理；
 3. 增加基于真实财务数据（带公告日）的 Value/Quality 因子；
 4. 实现周度/月度调仓下的因子排序选股策略（而非等权）；

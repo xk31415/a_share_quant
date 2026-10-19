@@ -197,8 +197,11 @@ def assemble(bars_raw: pd.DataFrame, bars_post: pd.DataFrame,
         "amount", "pre_close", "adj_close", "limit_up", "limit_down",
         "limit_exempt", "is_st", "is_suspended"]]
 
-    status_out = merged[["trade_date", "symbol", "is_st", "is_suspended"]] \
-        .drop_duplicates().sort_values(["trade_date", "symbol"]).reset_index(drop=True)
+    # 状态表直接来自源表，不经过 bars 合并——停牌日往往没有行情行，
+    # 若从 merged 取会把这些天丢掉，股票池的"剔除停牌"就失效了。
+    status_out = status[["trade_date", "symbol", "is_st", "is_suspended"]] \
+        .drop_duplicates() \
+        .sort_values(["trade_date", "symbol"]).reset_index(drop=True)
 
     cal = pd.DataFrame({"trade_date": pd.to_datetime(list(calendar))}).drop_duplicates() \
         .sort_values("trade_date").reset_index(drop=True)
@@ -213,6 +216,100 @@ def assemble(bars_raw: pd.DataFrame, bars_post: pd.DataFrame,
 # ---------------- 硬校验 ----------------
 
 K_TOL = 1e-6
+
+# 创业板注册制改革：2020-08-24 起涨跌幅由 10% 放宽到 20%
+CHINEXT_REFORM = pd.Timestamp("2020-08-24")
+NEW_LISTING_EXEMPT_DAYS = 5   # 注册制新股上市前 5 个交易日无涨跌幅限制
+
+
+def limit_ratio(symbol: str, exchange: str, trade_date, is_st: bool) -> float | None:
+    """当日涨跌幅比例。返回 ``None`` 表示当日无涨跌幅限制（由调用方按上市天数判断）。
+
+    规则表（只覆盖本项目允许的板块）：
+      * 主板（沪 600/601/603/605、深 000/001/002/003）：10%，ST 5%
+      * 创业板（300/301）：2020-08-24 起 20%，之前 10%（ST 同样 20%）
+      * 科创板 20%、北交所 30%（默认白名单不含，仅兜底）
+    """
+    board = classify_board(symbol, exchange)
+    ts = pd.Timestamp(trade_date)
+    if board == "main_sh" or board == "main_sz":
+        return 0.05 if is_st else 0.10
+    if board == "chinext":
+        return 0.20 if ts >= CHINEXT_REFORM else 0.10
+    if board == "star":
+        return 0.20
+    if board == "bse":
+        return 0.30
+    return None
+
+
+def derive_limits(bars: pd.DataFrame, instruments: pd.DataFrame,
+                  calendar: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """按规则表生成 ``limit_up / limit_down / limit_exempt``。
+
+    数据源（baostock / QMT）不给历史涨跌停价，只能按交易所规则推算。
+    推算结果用**当日收盘价不得越过涨跌停**来自检——表写错（例如把 ST 当普通股）
+    会立刻暴露，而不是悄悄放宽约束。
+
+    已知近似（写进 README 限制清单）：
+      * 注册制新股上市前 5 个交易日无涨跌幅 -> ``limit_exempt=True``
+      * 退市整理期首日无涨跌幅，本函数按普通涨跌幅处理
+    """
+    warnings: list[str] = []
+    out = bars.copy()
+    cal = pd.DatetimeIndex(sorted(pd.to_datetime(calendar["trade_date"]).unique()))
+    cal_pos = {d: i for i, d in enumerate(cal)}
+
+    need = out[["trade_date", "symbol", "is_st"]].copy()
+    inst = instruments.set_index("symbol")
+    list_dates = inst["list_date"] if "list_date" in inst.columns else pd.Series(dtype="datetime64[ns]")
+
+    ratios, exempt = [], []
+    for sym, ts, is_st in zip(need["symbol"], need["trade_date"], need["is_st"]):
+        ex = inst["exchange"].get(sym, "") if "exchange" in inst.columns else ""
+        r = limit_ratio(sym, ex, ts, bool(is_st))
+        if r is None:
+            exempt.append(True)
+            ratios.append(r)
+            continue
+        ld = list_dates.get(sym, pd.NaT) if len(list_dates) else pd.NaT
+        if pd.notna(ld) and (ts - pd.Timestamp(ld)).days <= 10:
+            # 上市 10 个自然日内，用交易日序号判断是否处于"前 5 日无限制"窗口
+            i_ts, i_ld = cal_pos.get(pd.Timestamp(ts)), cal_pos.get(pd.Timestamp(ld))
+            if i_ts is not None and i_ld is not None and i_ts - i_ld < NEW_LISTING_EXEMPT_DAYS:
+                exempt.append(True)
+                ratios.append(r)
+                continue
+        exempt.append(False)
+        ratios.append(r)
+
+    out["_ratio"] = ratios
+    out["limit_exempt"] = exempt
+    pre = pd.to_numeric(out["pre_close"], errors="coerce")
+    out["limit_up"] = (pre * (1 + out["_ratio"])).round(2)
+    out["limit_down"] = (pre * (1 - out["_ratio"])).round(2)
+    out.loc[out["limit_exempt"], ["limit_up", "limit_down"]] = float("nan")
+
+    # 自检：收盘价不得越过推算出的涨跌停（容忍 1 分钱取整）
+    live = ~out["limit_exempt"]
+    over_up = live & (out["close"] > out["limit_up"] + 0.011)
+    over_down = live & (out["close"] < out["limit_down"] - 0.011)
+    n_bad = int((over_up | over_down).sum())
+    if n_bad:
+        sample = out.loc[over_up | over_down, ["trade_date", "symbol", "close",
+                                               "limit_up", "limit_down"]].head(3)
+        raise DataValidationError(
+            f"{n_bad} 行的收盘价超出按规则表推算的涨跌停（例如 "
+            f"{sample.to_dict('records')}）。说明涨跌幅规则表或 is_st 标记有误，"
+            "不要带着错误的涨跌停价跑回测。")
+
+    n_exempt = int(out["limit_exempt"].sum())
+    if n_exempt:
+        warnings.append(
+            f"{n_exempt} 行按「无涨跌幅限制」处理（注册制新股上市前 "
+            f"{NEW_LISTING_EXEMPT_DAYS} 个交易日），这些行不参与涨跌停拦截")
+    out = out.drop(columns=["_ratio"])
+    return out, warnings
 
 
 def self_check(report: BuildReport, allow_missing_limits: bool = False,

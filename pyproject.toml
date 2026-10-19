@@ -22,6 +22,11 @@ dev = [
     "pytest>=7.0",
     "pyarrow>=14.0",  # 仅在使用 parquet 数据文件时需要
 ]
+# 数据源适配（scripts/build_dataset.py 按需 import，缺了不影响回测）
+data = [
+    "baostock>=0.8",  # 免费，含退市股与逐日 ST/停牌，推荐
+    "pyarrow>=14.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
