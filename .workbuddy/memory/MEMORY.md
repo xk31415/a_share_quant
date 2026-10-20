@@ -77,6 +77,9 @@
 - `--cash`（现金余额）优先于 `--capital`：总资产 = 现金 + 持仓市值，
   让用户手算总资产是最容易错的输入。
 - `live/*/`（每日委托单）不入库，`live/sample.json` 入库。
+- 每日更新用 `scripts/update_dataset.py`（只补尾部 5 个交易日），**不要每天全量重建**。
+  合并必须按 `(trade_date, symbol)` 精确覆盖：按日期整段截断会删掉停牌股的旧记录，
+  只追加则让新旧口径混表。实测与全量重建逐行一致（bars 数值差 3.6e-12）。
 
 ## 代码习惯（吃过亏的）
 
@@ -89,6 +92,7 @@
 ## 环境
 
 - 解释器：`C:\Users\67478\.workbuddy\binaries\python\envs\default\Scripts\python.exe`
+- 拉数据用 `C:\Program Files\Python314\python.exe`（gm 装在这里，已补装 pyarrow 26.0.0）
 - 仓库：https://github.com/xk31415/a_share_quant （origin 走 SSH）
 - 沙箱默认拒绝读 `~/.ssh`，`git push` / `ls-remote` 需 `dangerouslyDisableSandbox`；
   被拒后不要重试等价命令，直接让用户自己推。

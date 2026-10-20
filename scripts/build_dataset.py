@@ -100,6 +100,14 @@ class GmSource:
         return f"{ex}.{sym}"
 
     # -- 探针 --
+    def seed_exchange(self, mapping) -> None:
+        """预填「代码 -> 交易所」映射。
+
+        增量更新时不必再拉一次全市场截面：``instruments.parquet`` 里已经有
+        exchange 列，直接灌进 ``_ex`` 就够 ``_gm_symbol`` 用了。
+        """
+        self._ex.update({str(k): str(v) for k, v in mapping.items()})
+
     def probe(self) -> None:
         from gm.api import get_trading_dates, get_instruments, get_history_instruments, history
         print("trading_dates:", get_trading_dates(exchange="SHSE",
@@ -163,7 +171,15 @@ class GmSource:
                              calendar: list[str]) -> pd.DataFrame:
         """用 get_symbols 的月度截面还原 is_st（按日期向后填充）。"""
         from gm.api import get_symbols
-        dates = list(calendar)[::21]          # 约每月一次
+        # 约每月一次；**再补上窗口最后一天**——否则最后一个月用的是最多
+        # 21 天前的快照，而 ST 判定直接影响涨跌停幅度（5% vs 10%）与是否入池。
+        cal = [str(x)[:10] for x in calendar]
+        dates = set(cal[::21])
+        # 只有"已经过完的那一天"才值得加：当天未收盘时 get_symbols 的
+        # is_st 会返回全 False，用它覆盖会让 ST 判定整段失效。
+        if cal and cal[-1] < pd.Timestamp.today().strftime("%Y-%m-%d"):
+            dates.add(cal[-1])
+        dates = sorted(dates)
         frames = []
         for day in dates:
             try:

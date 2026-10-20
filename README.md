@@ -86,7 +86,7 @@ pip install -e ".[dev]"
 python -m pytest tests/
 ```
 
-181 个测试覆盖：
+192 个测试覆盖：
 - 日期对齐、交易日历（`test_dates.py`）；
 - 数据 schema 与校验，含**幸存者偏差哨兵**（`test_data.py`）；
 - 因子计算正确性（`test_factors.py`）；
@@ -108,6 +108,9 @@ python -m pytest tests/
 - **实盘信号**（`test_live_signal.py`）：整手买入、卖出整手但清仓可带零股、
   小额不下单、停牌持仓冻结且占仓位、样本外持仓清仓、重复跑零订单（幂等）、
   样本按名次补位；
+- **增量更新**（`test_incremental.py`）：按 (trade_date, symbol) 精确覆盖、
+  窗口内停牌股的旧记录必须保留、重复更新幂等、每日证券数腰斩要报错、
+  写盘原子性；
 - **公司行动**（`test_corporate_actions.py`）：10 送 10 与现金分红的除权日收益≈0、
   除权后涨跌按复权口径计量、缺 `adj_close` 必须告警、无公司行动时等价于原始价；
 - **未来函数专项**（`tests/test_no_lookahead.py`）：
@@ -358,6 +361,8 @@ experiment_id、策略名、数据版本指纹、股票池规则、区间、频�
 >
 > 执行流程已经脚本化：
 > ```bash
+> # 每个交易日 15:30 后补数据（只拉最近 5 个交易日，1~3 分钟）
+> python scripts/update_dataset.py --data-dir data/processed_2025_2026
 > # 只做一次，冻结样本（之后永不重抽）
 > python scripts/live_signal.py --data-dir data/processed_2025_2026 \
 >     --create-sample --n 100 --pool 1000

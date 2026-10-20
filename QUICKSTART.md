@@ -492,9 +492,21 @@ python scripts/live_signal.py --data-dir data/processed_2025_2026 \
 
 ### 10.4 收盘后到下单
 
-1. 15:30 后更新数据；
-2. 跑脚本拿 `orders.csv`；
-3. **先卖后买**（A 股卖出资金当日可买入）；
+```bash
+# 1) 15:30 后补数据：只拉最近几天，1~3 分钟（不是 20 分钟全量重建）
+python scripts/update_dataset.py --data-dir data/processed_2025_2026
+
+# 2) 出单
+python scripts/live_signal.py --data-dir data/processed_2025_2026 \\
+    --cash 110000 --holdings live/holdings.csv --position 0.40
+```
+
+3. **先卖后买**（A 股卖出资金当日可买入），按 `orders.csv` 顺序执行；
 4. 成交后更新 `live/holdings.csv`，下次调用要读它。
+
+> 增量更新默认回退 5 个交易日重取，用来覆盖数据源对最近几天的修订；
+> 按 (trade_date, symbol) 精确覆盖，停牌股的旧记录不会丢。
+> 实测与全量重建逐行一致（bars 索引相同、数值差 3.6e-12），
+> 唯一不同的是 5 只股票在窗口内撤销了 ST——增量版用的截面更新，更准。
 
 > `live/` 下的每日委托单不入库（个人交易记录）；`sample.json` 入库（组合身份）。
