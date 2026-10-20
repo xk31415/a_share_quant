@@ -12,6 +12,7 @@ from typing import Sequence
 import pandas as pd
 
 from .base import Strategy, TargetPortfolio
+from .filters import liquid_symbols
 
 
 def _stable_key(symbol: str, seed: int = 0) -> str:
@@ -43,15 +44,23 @@ class EqualWeightStrategy(Strategy):
 
     name = "equal_weight"
 
-    def __init__(self, max_positions: int = 20, seed: int = 0) -> None:
+    def __init__(self, max_positions: int = 20, seed: int = 0,
+                 liquidity_pct: float | None = None) -> None:
         if max_positions < 1:
             raise ValueError("max_positions must be >= 1")
         self.max_positions = max_positions
         self.seed = int(seed)
+        # 只保留成交额最高的前 liquidity_pct；None = 不限制。
+        # 用来给"因子组合"提供同流动性档的等权对照（默认不变，输出逐位一致）。
+        self.liquidity_pct = liquidity_pct
 
     def generate_target(self, as_of, bars: pd.DataFrame,
                         universe: Sequence[str]) -> TargetPortfolio:
-        picked = sorted(universe, key=lambda s: _stable_key(s, self.seed))[: self.max_positions]
+        pool = universe
+        if self.liquidity_pct is not None:
+            allow = liquid_symbols(bars, as_of, universe, self.liquidity_pct)
+            pool = [s for s in universe if str(s) in allow]
+        picked = sorted(pool, key=lambda s: _stable_key(s, self.seed))[: self.max_positions]
         ts = pd.Timestamp(as_of).normalize()
         if not picked:
             return TargetPortfolio(as_of=ts, weights={})

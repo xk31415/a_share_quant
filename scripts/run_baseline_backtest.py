@@ -38,6 +38,7 @@ from a_share_quant.research.experiments import (
     save_experiment,
 )
 from a_share_quant.strategies.equal_weight import EqualWeightStrategy
+from a_share_quant.strategies.low_vol import LowVolatility
 from a_share_quant.strategies.momentum import TopNMomentum
 from a_share_quant.universe.builder import UniverseBuilder, UniverseRules
 
@@ -62,7 +63,9 @@ def main() -> None:
     ap.add_argument("--freq", default=None, choices=["D", "W", "M"])
     ap.add_argument("--out", default="results")
     ap.add_argument("--strategy", default="equal_weight",
-                    choices=["equal_weight", "momentum"])
+                    choices=["equal_weight", "momentum", "low_vol"])
+    ap.add_argument("--liquidity", type=float, default=None,
+                    help="只保留成交额最高的这个比例的股票（0.33 = 前 1/3）")
     ap.add_argument("--seed", type=int, default=0, help="等权基准的抽样种子（换一批股票）")
     ap.add_argument("--window", type=int, default=None, help="动量/反转回看窗口")
     ap.add_argument("--skip", type=int, default=None, help="跳过最近 N 个交易日")
@@ -99,14 +102,19 @@ def main() -> None:
     uni_cfg = root / args.universe_config
     rules = (UniverseRules.from_yaml(uni_cfg) if uni_cfg.exists()
              else UniverseRules())
-    if args.strategy == "momentum":
+    if args.strategy == "low_vol":
+        strategy = LowVolatility(top_n=pf.get("max_positions", 20),
+                                 window=int(args.window or 60),
+                                 liquidity_pct=args.liquidity)
+    elif args.strategy == "momentum":
         strategy = TopNMomentum(top_n=pf.get("max_positions", 20),
                                 window=int(args.window or bt.get("momentum_window", 60)),
                                 skip=int(args.skip if args.skip is not None else bt.get("momentum_skip", 5)),
                                 reverse=bool(args.reverse))
     else:
         strategy = EqualWeightStrategy(max_positions=pf.get("max_positions", 20),
-                                      seed=int(args.seed))
+                                       seed=int(args.seed),
+                                       liquidity_pct=args.liquidity)
     cost_model = CostModel(
         commission_rate=cost_cfg.get("commission_rate", 0.00025),
         commission_min=cost_cfg.get("commission_min", 5.0),
@@ -214,6 +222,7 @@ def main() -> None:
                     "window": getattr(strategy, "window", None),
                     "skip": getattr(strategy, "skip", None),
                     "seed": getattr(strategy, "seed", None),
+                    "liquidity_pct": getattr(strategy, "liquidity_pct", None),
                     "max_weight_per_stock": pf.get("max_weight_per_stock", 0.10),
                     "execution_price": config.execution_price,
                     "lot_size": mr.get("lot_size", 100)},

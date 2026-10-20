@@ -36,7 +36,7 @@ a_share_quant/
 │   ├── data/                # schema、loader（DataProvider 接口）、validation、asof
 │   ├── universe/            # 动态股票池（point-in-time）
 │   ├── factors/             # 因子框架 + 示例因子（动量/波动率/成交额）
-│   ├── strategies/          # 策略接口 + 等权基准策略
+│   ├── strategies/          # 策略接口 + 等权基准 / 动量 / 低波（含流动性过滤）
 │   ├── portfolio/           # 目标权重构建（数量/单票上限）
 │   ├── backtest/            # 引擎、执行模拟、成本、持仓（T+1）
 │   ├── metrics/             # 绩效指标（收益/风险/回撤/换手/分解报表）
@@ -84,7 +84,7 @@ pip install -e ".[dev]"
 python -m pytest tests/
 ```
 
-133 个测试覆盖：
+154 个测试覆盖：
 - 日期对齐、交易日历（`test_dates.py`）；
 - 数据 schema 与校验，含**幸存者偏差哨兵**（`test_data.py`）；
 - 因子计算正确性（`test_factors.py`）；
@@ -98,6 +98,10 @@ python -m pytest tests/
   目标内缺行情必须留痕；
 - **数据装配**（`test_dataset_build.py`）：板块判定、指数剔除、状态/涨跌停合并、
   涨跌停规则表（含创业板改革与 ST 收窄）、六条自检各自能拦住对应坏数据；
+- **策略**（`test_strategies.py`/`test_momentum_strategy.py`/`test_low_vol_strategy.py`）：
+  散列抽样与 `seed=0` 可复现性、动量 skip 段、防未来函数、低波的流动性过滤；
+- **基准与超额**（`test_benchmark.py`）：指数代码与个股代码撞车时必须以
+  `benchmark.csv` 为准；
 - **公司行动**（`test_corporate_actions.py`）：10 送 10 与现金分红的除权日收益≈0、
   除权后涨跌按复权口径计量、缺 `adj_close` 必须告警、无公司行动时等价于原始价；
 - **未来函数专项**（`tests/test_no_lookahead.py`）：
@@ -308,9 +312,15 @@ experiment_id、策略名、数据版本指纹、股票池规则、区间、频�
    `python scripts/build_dataset.py --source baostock --start 2020-01-01 --end 2024-12-31`，
    先小样本验证再全量；涨跌停价由规则表推算并自检；
 2. 用真实数据重跑等权基准，检查成本/换手/涨跌停拦截比例是否合理；
-3. 增加基于真实财务数据（带公告日）的 Value/Quality 因子；
-4. 实现周度/月度调仓下的因子排序选股策略（而非等权）；
+3. **补估值/股息数据**：现在"低波"组合实质是银行+公用+铁路，分不清低波异象
+   与红利风格；gm 的 `get_instruments` 有 `pe_ttm/pb`，股息率需另找；
+4. **把容量约束做进选股环节**：`max_participation_rate` 目前只在撮合时拦截，
+   选股阶段仍会挑出"买了但买不够"的标的；
 5. 加入行业暴露、交易成本贡献等更细的组合归因。
+
+> 因子研究已经脚本化：`python scripts/factor_research.py --data-dir data/processed`
+> 输出 IC、十分档多空、以及**流动性三档内的长仓绝对收益**。
+> 不分流动性档的因子结论一律不可信——低流动 1/3 等权 24%/年、高流动 1/3 只有 0.3%。
 
 ## 15. 第一阶段纪律（禁止事项）
 

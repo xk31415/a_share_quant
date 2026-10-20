@@ -207,6 +207,34 @@ SDK 升级导致字段名变化时，先用 `--probe` 看它到底返回了什�
 2. `adj_close` 是后复权价吗？信号用复权价、成交用原始价，搞反了结果全错。
 3. 财务数据带 `announce_date` 吗？没有就无法防止财务数据的未来函数。
 
+### 5.3 跑策略与因子研究
+
+```bash
+# 等权基准（散列抽样 50 只）——注意这是"等权口径"，不是策略
+python scripts/run_baseline_backtest.py --data-dir data/processed \
+    --start 2020-01-01 --end 2024-12-31 --benchmark 000852
+
+# 12-1 动量（--reverse 选动量最弱的一批）
+python scripts/run_baseline_backtest.py --data-dir data/processed \
+    --start 2020-01-01 --end 2024-12-31 --strategy momentum --reverse --benchmark 000852
+
+# 低波：--liquidity 0.33 表示只在成交额最高的 1/3 里选（最可交易的区间）
+python scripts/run_baseline_backtest.py --data-dir data/processed \
+    --start 2020-01-01 --end 2024-12-31 --strategy low_vol --liquidity 0.33 --benchmark 000852
+
+# 因子研究：IC、十分档多空、流动性三档内的长仓绝对收益
+python scripts/factor_research.py --data-dir data/processed
+```
+
+**评估纪律**（这几条是踩坑换来的，见 `reports/strategy_log.md`）：
+
+1. 绝对收益先比**全宇宙等权**（2020-2024 为 8.72%/年），比不过就是没做选择；
+2. 因子有效性必须看**同流动性档内的等权对照**——低流动 1/3 等权 24%/年，
+   高流动 1/3 只有 0.3%，不分档会把流动性溢价当成 alpha；
+3. 只做多的策略要报**长仓绝对收益**，光看多空价差没有用（A 股不能便捷做空）；
+4. 基准必须从 `benchmark.csv` 读：`000905`/`000852` 与厦门港务/石化机械撞车，
+   按代码在 `bars` 里匹配会读到个股价格。
+
 ---
 
 ## 6. 写自己的策略
