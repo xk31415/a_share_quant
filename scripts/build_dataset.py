@@ -23,7 +23,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import multiprocessing as mp
 import os
+import pickle
 import sys
 import time
 from pathlib import Path
@@ -155,7 +158,43 @@ class GmSource:
             "delist_date": delisted,
         })
 
-    def fetch_all(self, symbols: list[str], start: str, end: str):
+    def _attach_st_snapshots(self, status: pd.DataFrame,
+                             calendar: list[str]) -> pd.DataFrame:
+        """用 get_symbols 的月度截面还原 is_st（按日期向后填充）。"""
+        from gm.api import get_symbols
+        dates = list(calendar)[::21]          # 约每月一次
+        frames = []
+        for day in dates:
+            try:
+                snap = get_symbols(sec_type1=1010, sec_type2=101001, trade_date=day,
+                                   skip_st=False, skip_suspended=False, df=True)
+            except Exception as exc:
+                print(f"[warn] ST 截面 {day} 失败：{str(exc)[:60]}", flush=True)
+                continue
+            if snap is None or len(snap) == 0 or "is_st" not in snap.columns:
+                continue
+            syms = [split_symbol(x) for x in snap["symbol"]]
+            frames.append(pd.DataFrame({
+                "trade_date": pd.Timestamp(day),
+                "symbol": [s for s, _ in syms],
+                "is_st_snap": snap["is_st"].fillna(False).astype(bool),
+            }))
+            print(f"  ST 截面 {day}: {len(snap)} 只，"
+                  f"ST {int(snap['is_st'].sum())} 只", flush=True)
+        if not frames:
+            print("[warn] 未取到 ST 截面，is_st 一律按 False 处理（ST 过滤将失效）",
+                  flush=True)
+            status["is_st"] = False
+            return status
+        snaps = pd.concat(frames, ignore_index=True).sort_values(
+            ["trade_date", "symbol"])
+        out = pd.merge_asof(status.sort_values(["trade_date", "symbol"]), snaps,
+                            on="trade_date", by="symbol", direction="backward")
+        out["is_st"] = out["is_st_snap"].fillna(False).astype(bool)
+        return out.drop(columns=["is_st_snap"])
+
+    def fetch_all(self, symbols: list[str], start: str, end: str,
+                  calendar: list[str] | None = None):
         from gm.api import ADJUST_NONE, get_history_instruments, history
         raw_parts, stat_parts = [], []
         total = len(symbols)
@@ -199,6 +238,13 @@ class GmSource:
             "limit_down": pd.to_numeric(status_raw["lower_limit"], errors="coerce"),
             "adj_factor": pd.to_numeric(status_raw["adj_factor"], errors="coerce"),
         })
+
+        # is_st 用 get_symbols 的月度快照还原（按日期向后填充）。
+        # 官方 is_st 只在截面接口里有，逐日接口不返回；月度粒度意味着 ST
+        # 状态最多滞后约一个月——只影响"是否把该股排除出池"，涨跌停价用的是
+        # 官方值，不受影响。
+        if calendar:
+            status = self._attach_st_snapshots(status, list(calendar))
 
         if not raw_parts:
             return pd.DataFrame(), pd.DataFrame(), status
@@ -353,10 +399,13 @@ class BaostockSource:
         self._ex: dict[str, str] = {}
 
     def close(self) -> None:
+        if getattr(self, "_closed", False):
+            return
         try:
             self.bs.logout()
         except Exception:
             pass
+        self._closed = True
 
     # -- 探针 --
     def probe(self) -> None:
@@ -424,10 +473,10 @@ class BaostockSource:
         print(f"[warn] {code} 查询失败（已重试 4 次）：{err}")
         return None
 
-    def fetch_all(self, symbols: list[str], start: str, end: str):
+    def fetch_chunk(self, symbols: list[str], start: str, end: str):
+        """抓一小批（不打印进度），供断点续传的分片调用。"""
         raw_parts, post_parts, status_parts = [], [], []
-        total = len(symbols)
-        for n, sym in enumerate(symbols, 1):
+        for sym in symbols:
             code = f"{'sh' if self._ex.get(sym) == 'SHSE' else 'sz'}.{sym}"
             rs = self._query(code, self.RAW_FIELDS, start, end, "3")
             if rs is None:
@@ -442,18 +491,16 @@ class BaostockSource:
             df["symbol"] = sym
             for col in ("open", "high", "low", "close", "preclose", "volume", "amount"):
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-            st = pd.DataFrame({
+            status_parts.append(pd.DataFrame({
                 "trade_date": df["trade_date"], "symbol": sym,
                 "is_st": df["isST"] == "1",
                 "is_suspended": df["tradestatus"] == "0",
                 "limit_up": float("nan"), "limit_down": float("nan"),
-            })
-            status_parts.append(st)
-            priced = df[df["close"].notna()][
+            }))
+            raw_parts.append(df[df["close"].notna()][
                 ["trade_date", "symbol", "open", "high", "low", "close",
                  "volume", "amount", "preclose"]].rename(
-                columns={"preclose": "pre_close"})
-            raw_parts.append(priced)
+                columns={"preclose": "pre_close"}))
 
             rs2 = self._query(code, "date,close", start, end, "1")
             rows2 = []
@@ -466,15 +513,99 @@ class BaostockSource:
                 d2["adj_close"] = pd.to_numeric(d2["close"], errors="coerce")
                 post_parts.append(d2[["trade_date", "symbol", "adj_close"]])
 
-            if n % 50 == 0 or n == total:
-                print(f"  {n}/{total} 只", flush=True)
+        cat = lambda parts: (pd.concat(parts, ignore_index=True)  # noqa: E731
+                             if parts else pd.DataFrame())
+        return cat(raw_parts), cat(post_parts), cat(status_parts)
 
-        cat = lambda parts, cols=None: (pd.concat(parts, ignore_index=True)  # noqa: E731
-                                        if parts else pd.DataFrame())
+    def fetch_all(self, symbols: list[str], start: str, end: str,
+                  cache_dir: Path | None = None, chunk_size: int = 100,
+                  chunk_timeout: int = 1200):
+        """分片抓取 + 断点续传。
+
+        每片存一个 pickle；重跑时已存在的片直接复用。每个片在**子进程**里跑，
+        超时直接杀掉重试——baostock 偶发卡死会把整个进程挂在一次查询上，
+        没有看门狗的话无人值守跑一晚上也可能停在第一只股票。
+        """
+        chunks = [symbols[i:i + chunk_size] for i in range(0, len(symbols), chunk_size)]
+        total = len(chunks)
+        cache = cache_dir
+        if cache is not None:
+            cache.mkdir(parents=True, exist_ok=True)
+            # baostock 同一台机器只认一个会话，父进程占着连接会让子进程的
+            # login 卡死（表现为整片超时）。分片跑之前先登出。
+            self.close()
+
+        raw_parts, post_parts, status_parts = [], [], []
+        t_start = time.time()
+        done_before = 0
+        for idx, chunk in enumerate(chunks, 1):
+            key = hashlib.sha1(
+                f"{start}|{end}|{'|'.join(chunk)}".encode()).hexdigest()[:16]
+            path = cache / f"bs_{key}.pkl" if cache is not None else None
+            if path is not None and path.exists():
+                with open(path, "rb") as fh:
+                    blob = pickle.load(fh)
+                done_before += 1
+            else:
+                blob = None
+                if path is None:      # 没给缓存目录：进程内直接跑，没有超时保护
+                    raw, post, st = self.fetch_chunk(chunk, start, end)
+                    blob = {"raw": raw, "post": post, "status": st}
+                for attempt in (1, 2):
+                    if path is None:
+                        break
+                    if path.exists():
+                        path.unlink()
+                    p = mp.Process(target=_bs_chunk_worker,
+                                   args=(chunk, start, end, str(path), self._ex))
+                    p.start()
+                    p.join(chunk_timeout)
+                    if p.is_alive():
+                        p.terminate()
+                        p.join(10)
+                        print(f"[warn] 第 {idx}/{total} 片超时（第 {attempt} 次），重试",
+                              flush=True)
+                        continue
+                    if path.exists():
+                        with open(path, "rb") as fh:
+                            blob = pickle.load(fh)
+                    break
+                if blob is None:
+                    print(f"[warn] 第 {idx}/{total} 片失败，跳过", flush=True)
+                    continue
+
+            raw_parts.append(blob["raw"])
+            post_parts.append(blob["post"])
+            status_parts.append(blob["status"])
+            elapsed = time.time() - t_start
+            done = idx
+            rate = elapsed / max(done - done_before, 1)
+            eta = rate * (total - done)
+            print(f"  {done}/{total} 片  {elapsed / 60:.1f}min 已用  "
+                  f"预计剩余 {eta / 60:.0f}min", flush=True)
+
+        cat = lambda parts: (pd.concat(parts, ignore_index=True)  # noqa: E731
+                             if parts else pd.DataFrame())
+        if done_before:
+            print(f"  （复用缓存 {done_before} 片）", flush=True)
         return cat(raw_parts), cat(post_parts), cat(status_parts)
 
 
 # ---------------------------------------------------------------- 落地
+def _bs_chunk_worker(codes, start, end, out_path, ex_map) -> None:
+    """子进程：抓一片并存成 pickle（先写 .tmp 再原子替换）。"""
+    src = BaostockSource()
+    src._ex = dict(ex_map)
+    try:
+        raw, post, st = src.fetch_chunk(codes, start, end)
+        tmp = f"{out_path}.tmp"
+        with open(tmp, "wb") as fh:
+            pickle.dump({"raw": raw, "post": post, "status": st}, fh)
+        os.replace(tmp, out_path)
+    finally:
+        src.close()
+
+
 def write_tables(report: BuildReport, out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
     try:
@@ -503,6 +634,10 @@ def main() -> None:
     ap.add_argument("--allow-missing-limits", action="store_true",
                     help="允许涨跌停价缺失（对应配置里关闭 consider_limit_up_down）")
     ap.add_argument("--min-symbols-per-day", type=int, default=100)
+    ap.add_argument("--chunk-size", type=int, default=100,
+                    help="baostock 每片股票数（断点续传的粒度）")
+    ap.add_argument("--chunk-timeout", type=int, default=1200,
+                    help="单片超时秒数，超时杀掉重试（baostock 偶发卡死）")
     ap.add_argument("--probe", action="store_true", help="只打印 SDK 返回的字段")
     args = ap.parse_args()
 
@@ -529,7 +664,17 @@ def main() -> None:
     print(f"      白名单 {boards} 内 {len(symbols)} 只")
 
     print("[3/4] 行情与状态")
-    if hasattr(source, "fetch_all"):
+    out_root = Path(args.out)
+    if isinstance(source, BaostockSource):
+        # baostock 慢且会卡死，走分片 + 断点续传 + 子进程超时
+        bars_raw, bars_post, status = source.fetch_all(
+            symbols, args.start, args.end,
+            cache_dir=out_root / ".cache", chunk_size=args.chunk_size,
+            chunk_timeout=args.chunk_timeout)
+    elif isinstance(source, GmSource):
+        bars_raw, bars_post, status = source.fetch_all(
+            symbols, args.start, args.end, calendar=calendar)
+    elif hasattr(source, "fetch_all"):
         bars_raw, bars_post, status = source.fetch_all(symbols, args.start, args.end)
     else:
         bars_raw, bars_post = source.bars(symbols, args.start, args.end)
