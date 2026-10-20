@@ -12,7 +12,7 @@ backtest:
   execution_price: "open"      # t 日收盘生成信号，t+1 以该价格撮合（open=开盘价）
 
 portfolio:
-  max_positions: 20            # 最大持仓数量
+  max_positions: 50            # 最大持仓数量（基准用 50：单只 2 万，最低佣金 5 元约 2.5bp）
   max_weight_per_stock: 0.10   # 单只股票最大权重
   cash_buffer: 0.01            # 建仓预留现金比例（覆盖佣金/印花税/滑点，避免末位买单被饿死）
 

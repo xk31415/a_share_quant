@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Sequence
 
 import pandas as pd
@@ -13,10 +14,20 @@ import pandas as pd
 from .base import Strategy, TargetPortfolio
 
 
-class EqualWeightStrategy(Strategy):
-    """对当日股票池等权配置；超过 max_positions 时按字典序截断。
+def _stable_key(symbol: str) -> str:
+    """与运行环境无关的稳定散列（Python 内置 hash 每个进程会变）。"""
+    return hashlib.sha1(str(symbol).encode()).hexdigest()
 
-    说明：更合理的截断方式是按流动性/市值排序；此处刻意保持最简，
+
+class EqualWeightStrategy(Strategy):
+    """对当日股票池等权配置；超过 max_positions 时用**稳定散列**抽样。
+
+    为什么不用字典序：在 4700 只的真实宇宙里 ``sorted(universe)[:20]`` 永远取
+    代码最小的 20 只（000001~000030），基准会退化成"最小代码 20 只等权"，
+    收益与市场无关。改用 ``sha1(symbol)`` 排序后截断，等价于**无放回随机抽样**，
+    但对同一份股票池结果固定、跨机器可复现。
+
+    说明：更合理的基准是按市值/流动性加权；此处只保证"无偏且可复现"，
     因为该策略只为框架冒烟测试服务。
     """
 
@@ -29,7 +40,7 @@ class EqualWeightStrategy(Strategy):
 
     def generate_target(self, as_of, bars: pd.DataFrame,
                         universe: Sequence[str]) -> TargetPortfolio:
-        picked = sorted(universe)[: self.max_positions]
+        picked = sorted(universe, key=_stable_key)[: self.max_positions]
         ts = pd.Timestamp(as_of).normalize()
         if not picked:
             return TargetPortfolio(as_of=ts, weights={})
