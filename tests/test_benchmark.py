@@ -51,3 +51,23 @@ def test_no_benchmark_means_no_keys():
     s = summarize(_run(with_benchmark=False))
     assert "excess_cumulative_return" not in s
     assert "tracking_error" not in s
+
+
+def test_benchmark_prefers_file_over_colliding_stock_symbol():
+    """000852 既是中证1000 指数也是石化机械，必须先读 benchmark.csv。"""
+    from a_share_quant.backtest.engine import BacktestEngine
+
+    class _FakeProvider:
+        def get_benchmark(self, code):
+            idx = pd.to_datetime(["2024-01-02", "2024-01-03"])
+            return pd.Series([6000.0, 6060.0], index=idx, name=code)
+
+    eng = BacktestEngine(provider=_FakeProvider(), strategy=None,
+                         universe_builder=None, portfolio_rules=None,
+                         cost_model=None,
+                         config=BacktestConfig("2024-01-02", "2024-01-03", "M"))
+    bars = pd.DataFrame({
+        "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+        "symbol": ["000852", "000852"], "close": [10.0, 10.5]})
+    series = eng._load_benchmark(bars, "000852")
+    assert series.iloc[0] == 6000.0, "读到了个股价格，说明又按代码撞车了"

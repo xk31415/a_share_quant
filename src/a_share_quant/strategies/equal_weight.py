@@ -14,9 +14,19 @@ import pandas as pd
 from .base import Strategy, TargetPortfolio
 
 
-def _stable_key(symbol: str) -> str:
-    """与运行环境无关的稳定散列（Python 内置 hash 每个进程会变）。"""
-    return hashlib.sha1(str(symbol).encode()).hexdigest()
+def _stable_key(symbol: str, seed: int = 0) -> str:
+    """与运行环境无关的稳定散列（Python 内置 hash 每个进程会变）。
+
+    ``seed`` 用来换一批抽样：换个 seed 等价于"再随机抽一次"，
+    可以检验基准收益里有多少来自运气。
+
+    **seed=0 必须沿用最初的 ``sha1(symbol)``**，否则给 key 加个前缀就会
+    静默换掉整个种子 0 的持仓，历史实验（如 EXP-20261020-202913）再也复现不了。
+    这个坑踩过一次：加 seed 支持后种子 0 的年化从 9.15% 变成 4.55%，
+    而代码"看起来"只是多了一个默认参数。
+    """
+    payload = f"{seed}:{symbol}" if seed else str(symbol)
+    return hashlib.sha1(payload.encode()).hexdigest()
 
 
 class EqualWeightStrategy(Strategy):
@@ -33,14 +43,15 @@ class EqualWeightStrategy(Strategy):
 
     name = "equal_weight"
 
-    def __init__(self, max_positions: int = 20) -> None:
+    def __init__(self, max_positions: int = 20, seed: int = 0) -> None:
         if max_positions < 1:
             raise ValueError("max_positions must be >= 1")
         self.max_positions = max_positions
+        self.seed = int(seed)
 
     def generate_target(self, as_of, bars: pd.DataFrame,
                         universe: Sequence[str]) -> TargetPortfolio:
-        picked = sorted(universe, key=_stable_key)[: self.max_positions]
+        picked = sorted(universe, key=lambda s: _stable_key(s, self.seed))[: self.max_positions]
         ts = pd.Timestamp(as_of).normalize()
         if not picked:
             return TargetPortfolio(as_of=ts, weights={})

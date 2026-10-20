@@ -63,6 +63,9 @@ def main() -> None:
     ap.add_argument("--out", default="results")
     ap.add_argument("--strategy", default="equal_weight",
                     choices=["equal_weight", "momentum"])
+    ap.add_argument("--seed", type=int, default=0, help="等权基准的抽样种子（换一批股票）")
+    ap.add_argument("--window", type=int, default=None, help="动量/反转回看窗口")
+    ap.add_argument("--skip", type=int, default=None, help="跳过最近 N 个交易日")
     ap.add_argument("--reverse", action="store_true",
                     help="动量策略反向：选动量最弱的一批（反转）")
     ap.add_argument("--benchmark", default=None,
@@ -98,11 +101,12 @@ def main() -> None:
              else UniverseRules())
     if args.strategy == "momentum":
         strategy = TopNMomentum(top_n=pf.get("max_positions", 20),
-                                window=int(bt.get("momentum_window", 60)),
-                                skip=int(bt.get("momentum_skip", 5)),
+                                window=int(args.window or bt.get("momentum_window", 60)),
+                                skip=int(args.skip if args.skip is not None else bt.get("momentum_skip", 5)),
                                 reverse=bool(args.reverse))
     else:
-        strategy = EqualWeightStrategy(max_positions=pf.get("max_positions", 20))
+        strategy = EqualWeightStrategy(max_positions=pf.get("max_positions", 20),
+                                      seed=int(args.seed))
     cost_model = CostModel(
         commission_rate=cost_cfg.get("commission_rate", 0.00025),
         commission_min=cost_cfg.get("commission_min", 5.0),
@@ -209,6 +213,7 @@ def main() -> None:
                     "strategy": getattr(strategy, "name", type(strategy).__name__),
                     "window": getattr(strategy, "window", None),
                     "skip": getattr(strategy, "skip", None),
+                    "seed": getattr(strategy, "seed", None),
                     "max_weight_per_stock": pf.get("max_weight_per_stock", 0.10),
                     "execution_price": config.execution_price,
                     "lot_size": mr.get("lot_size", 100)},

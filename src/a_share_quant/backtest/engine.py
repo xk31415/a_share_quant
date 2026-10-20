@@ -519,9 +519,23 @@ class BacktestEngine:
 
     def _load_benchmark(self, bars: pd.DataFrame,
                         benchmark: Optional[str]) -> Optional[pd.Series]:
-        """基准价格序列：优先从行情里找，其次读 provider 的 benchmark.csv。"""
+        """基准价格序列。
+
+        **优先读 benchmark.csv**，只有在没有该文件时才退回 bars 里按代码找。
+        顺序很重要：A 股指数代码与股票代码会撞车——000852 既是中证1000 指数，
+        也是石化机械（深市）；000905 既是中证500 也是厦门港务。
+        先查 bars 会把个股当成基准，超额和跟踪误差全错（踩过）。
+        """
         if not benchmark:
             return None
+        getter = getattr(self.provider, "get_benchmark", None)
+        if getter is not None:
+            try:
+                series = getter(benchmark)
+            except Exception:
+                series = None
+            if series is not None and len(series) > 1:
+                return series
         if "symbol" in bars.columns:
             col = "adj_close" if "adj_close" in bars.columns else "close"
             bench = bars.loc[bars["symbol"] == benchmark,
@@ -530,12 +544,4 @@ class BacktestEngine:
                 series = bench.set_index("trade_date").sort_index().iloc[:, 0]
                 series.name = benchmark
                 return series
-        # 基准指数通常不在 bars 里（没有证券基本信息、不参与选股），
-        # 由 build_dataset --benchmark 单独写成 benchmark.csv。
-        getter = getattr(self.provider, "get_benchmark", None)
-        if getter is None:
-            return None
-        try:
-            return getter(benchmark)
-        except Exception:
-            return None
+        return None
