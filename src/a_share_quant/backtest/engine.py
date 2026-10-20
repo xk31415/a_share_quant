@@ -36,7 +36,7 @@ from ..strategies.base import Strategy
 from ..universe.builder import UniverseBuilder
 from ..utils.dates import RebalanceFrequency, rebalance_dates
 from .costs import CostModel
-from .execution import ExecutionSimulator, generate_orders
+from .execution import ExecutionSimulator, Order, generate_orders
 from .positions import PortfolioState
 
 
@@ -262,6 +262,16 @@ class BacktestEngine:
         last_prices: dict[str, float] = {}
         last_k: dict[str, float] = {}
         pending_weights: Optional[dict[str, float]] = None
+        # 未成交的卖单（股数），次日继续挂；这是 F-02 的修复：
+        # 卖单被跌停/停牌拦下后不能就这么丢了，否则持仓会一直超配到下一个信号日。
+        pending_sells: dict[str, int] = {}
+        # 退市日：到期仍未清仓的持仓按最后已知价强制清算（F-02 的第二个问题）
+        instruments = self.provider.get_instruments()
+        delist_dates = {}
+        if "delist_date" in instruments.columns:
+            for sym, dd in zip(instruments["symbol"], instruments["delist_date"]):
+                if pd.notna(dd):
+                    delist_dates[str(sym)] = pd.Timestamp(dd).normalize()
         prev_equity = cfg.initial_capital
 
         equity_records: list[tuple[pd.Timestamp, float]] = []
@@ -288,8 +298,24 @@ class BacktestEngine:
             # --- 开盘前：T+1 释放昨日及更早持有的份额 ---
             state.start_of_day()
 
+            # --- 退市清算：已过退市日、当天又无行情的持仓，按最后已知价强平 ---
+            for sym in list(state.positions):
+                dd = delist_dates.get(sym)
+                if dd is None or d < dd:
+                    continue
+                pos = state.positions.get(sym)
+                px = last_prices.get(sym)
+                if pos is None or px is None:
+                    continue          # 从没估过价的（极罕见），留给估值环节报错
+                state.sell(sym, pos.shares, px, 0.0)
+                trade_rows.append({
+                    "trade_date": d, "symbol": sym, "direction": "sell",
+                    "shares": pos.shares, "price": px, "cost": 0.0,
+                    "note": "forced:delisted", "capped": False})
+                pending_sells.pop(sym, None)
+
             # --- 开盘：执行上一信号日生成的目标权重（当日开盘价撮合） ---
-            if pending_weights is not None and not day_bars.empty:
+            if (pending_weights is not None or pending_sells) and not day_bars.empty:
                 ref_prices = (
                     day_bars.set_index("symbol")[cfg.execution_price]
                     .astype(float).to_dict()
@@ -300,10 +326,29 @@ class BacktestEngine:
                 tradeable = self._tradeable_symbols(day_bars, cfg.execution_price)
                 sizing_equity = self._sizing_equity(state, prev_equity,
                                                     tradeable, last_prices, last_k)
-                orders = generate_orders(pending_weights, state, sizing_equity,
-                                         ref_prices, self.lot_size,
-                                         cash_buffer=cfg.cash_buffer)
+                orders = []
+                target = pending_weights or {}
+                if pending_weights is not None:
+                    orders = generate_orders(pending_weights, state, sizing_equity,
+                                             ref_prices, self.lot_size,
+                                             cash_buffer=cfg.cash_buffer)
+                # 补挂上一日没卖掉的（目标里已没有的标的）
+                for sym, sh in list(pending_sells.items()):
+                    if sym in target:
+                        pending_sells.pop(sym, None)      # 新信号接管
+                    elif sym in ref_prices and sh > 0:
+                        # 注意：不能设 reason。Order.reason 的语义是"本来就下不出去"，
+                        # 设了会被执行层当成拒绝单直接跳过（踩过一次）。
+                        orders.append(Order(sym, "sell", int(sh)))
                 fills = simulator.execute(orders, day_bars, state, last_k)
+
+                # 卖单没成交（跌停/停牌/无量/部分成交）就留到下一日继续挂
+                for sym in {o.symbol for o in orders if o.direction == "sell"}:
+                    pos = state.positions.get(sym)
+                    if pos is not None and pos.shares > 0 and sym not in target:
+                        pending_sells[sym] = pos.shares
+                    else:
+                        pending_sells.pop(sym, None)
                 day_buy = 0.0
                 day_sell = 0.0
                 day_cost = 0.0
