@@ -1,0 +1,55 @@
+[warn] warmup: 策略声明暖机期 66 个交易日，但首个信号日（2020-01-23）只有 16 个交易日的行情，前若干次调仓将因因子全为 NaN 而产出空目标（全现金）。请把回测起点前移，或缩短因子窗口。
+
+[experiment] EXP-20261020-212013-9069
+  start                            2020-01-02
+  end                              2024-12-31
+  trading_days                     1212
+  final_equity                     287,313.976425
+  cumulative_return                -0.712686
+  annualized_return                -0.228585
+  annualized_volatility            0.295351
+  sharpe_ratio                     -0.730667
+  maximum_drawdown                 -0.792085
+  calmar_ratio                     -0.288586
+  win_rate_daily                   0.484554
+  n_trade_events                   4084
+  n_filled_trades                  4018
+  n_blocked_trades                 66
+  n_capped_trades                  0
+  avg_turnover_per_rebalance       0.511138
+  total_costs                      30,861.658575
+  avg_holding_period_days          29.781319
+  max_positions_held               50
+  avg_positions_held               47.839365
+  max_single_weight                0.051111
+  first_invested_date              2020-05-06
+  n_cash_only_days                 79
+  cumulative_return_active         -0.719876
+  annualized_return_active         -0.246693
+  annualized_volatility_active     0.305211
+  sharpe_ratio_active              -0.775128
+  cost_pct_of_initial_capital      0.030862
+  annualized_cost_drag             0.006422
+  total_turnover                   31.690582
+  benchmark_symbol                 000852
+  benchmark_cumulative_return      0.071429
+  benchmark_annualized_return      0.014460
+  benchmark_annualized_volatility  0.407638
+  excess_cumulative_return         -0.853693
+  excess_annualized_return         -0.312760
+  tracking_error                   0.414011
+  information_ratio                -0.755440
+  beta                             0.246724
+
+[cost contribution]
+  cost_pct_of_initial_capital      3.086166%
+  annualized_cost_drag             0.642208%
+  cost_bps_per_unit_turnover       14.0002
+
+[result files] D:\a_share_quant\results\EXP-20261020-212013-9069
+
+================================================================
+声明：本次回测使用的数据与结果仅用于验证研究框架，
+回测结果不代表未来收益，本项目用于研究，不构成投资建议。
+在接入真实 A 股历史数据之前，上述数字不具备任何市场含义。
+================================================================

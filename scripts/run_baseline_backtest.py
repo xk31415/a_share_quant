@@ -38,6 +38,7 @@ from a_share_quant.research.experiments import (
     save_experiment,
 )
 from a_share_quant.strategies.equal_weight import EqualWeightStrategy
+from a_share_quant.strategies.momentum import TopNMomentum
 from a_share_quant.universe.builder import UniverseBuilder, UniverseRules
 
 DISCLAIMER = (
@@ -60,6 +61,10 @@ def main() -> None:
     ap.add_argument("--end", default=None)
     ap.add_argument("--freq", default=None, choices=["D", "W", "M"])
     ap.add_argument("--out", default="results")
+    ap.add_argument("--strategy", default="equal_weight",
+                    choices=["equal_weight", "momentum"])
+    ap.add_argument("--reverse", action="store_true",
+                    help="动量策略反向：选动量最弱的一批（反转）")
     ap.add_argument("--benchmark", default=None,
                     help="覆盖配置里的基准代码（如 000300 / 000905 / 000852）")
     args = ap.parse_args()
@@ -91,7 +96,13 @@ def main() -> None:
     uni_cfg = root / args.universe_config
     rules = (UniverseRules.from_yaml(uni_cfg) if uni_cfg.exists()
              else UniverseRules())
-    strategy = EqualWeightStrategy(max_positions=pf.get("max_positions", 20))
+    if args.strategy == "momentum":
+        strategy = TopNMomentum(top_n=pf.get("max_positions", 20),
+                                window=int(bt.get("momentum_window", 60)),
+                                skip=int(bt.get("momentum_skip", 5)),
+                                reverse=bool(args.reverse))
+    else:
+        strategy = EqualWeightStrategy(max_positions=pf.get("max_positions", 20))
     cost_model = CostModel(
         commission_rate=cost_cfg.get("commission_rate", 0.00025),
         commission_min=cost_cfg.get("commission_min", 5.0),
@@ -193,7 +204,11 @@ def main() -> None:
         rebalance_frequency=config.rebalance_frequency,
         transaction_cost=asdict(cost_model),
         slippage=cost_model.slippage_rate,
-        parameters={"max_positions": strategy.max_positions,
+        parameters={"max_positions": getattr(strategy, "max_positions",
+                                              getattr(strategy, "top_n", None)),
+                    "strategy": getattr(strategy, "name", type(strategy).__name__),
+                    "window": getattr(strategy, "window", None),
+                    "skip": getattr(strategy, "skip", None),
                     "max_weight_per_stock": pf.get("max_weight_per_stock", 0.10),
                     "execution_price": config.execution_price,
                     "lot_size": mr.get("lot_size", 100)},
