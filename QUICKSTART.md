@@ -33,7 +33,7 @@
 ```bash
 cd /d/a_share_quant
 "C:\Users\67478\.workbuddy\binaries\python\envs\default\Scripts\python.exe" -m pytest
-# -> 133 passed
+# -> 181 passed
 ```
 
 只跑某一类：
@@ -386,7 +386,7 @@ python -c "import a_share_quant; print(a_share_quant.__version__)"
 | 回测 · 等权基准（合成数据） | 最常用，跑完整回测 |
 | 回测 · 真实数据（data/processed） | 接入真实数据后用这个 |
 | Python · 当前文件 | 调试你正在写的脚本 |
-| pytest · 全部测试 | 断点调试 133 个测试 |
+| pytest · 全部测试 | 断点调试 181 个测试 |
 | pytest · 当前文件 | 只跑光标所在的测试文件 |
 | 生成合成数据 | 重新生成合成数据 |
 
@@ -413,7 +413,7 @@ result.trades[result.trades["note"] != "filled"]     # 看所有被拦截的成�
 
 装好 Python 插件后，左侧出现**烧杯图标**（Testing）：
 
-- 会列出 133 个测试，可以单跑、单挑一个调试；
+- 会列出 181 个测试，可以单跑、单挑一个调试；
 - 改完代码自动重新发现；
 - 建议先跑 `tests/test_no_lookahead.py` —— 它专门抓未来函数，动过因子或引擎就该跑它。
 
@@ -437,3 +437,64 @@ result.trades[result.trades["note"] != "filled"]     # 看所有被拦截的成�
 | `[warn] survivorship: ...` | **认真处理**。数据源可能缺退市股或退市标记 |
 | `NotImplementedError: 市值过滤需要...` | 用了 `universe.yaml` 的预留项但没有对应历史数据 |
 | 控制台卡住没输出 | 数据量太大时引擎是全量预载的，缩小回测区间 |
+
+---
+
+## 10. 实盘信号（`live_signal.py`）
+
+回测跑通之后，出实盘单用的是另一套脚本。它**不做选股**，只把
+「固定样本 + 目标仓位」翻译成委托单——因为三段样本外检验下来
+选股与择时都没过门槛（见 `reports/live_readiness.md`）。
+
+### 10.1 第一次：冻结样本（只做一次）
+
+```bash
+python scripts/live_signal.py --data-dir data/processed_2025_2026 \
+    --create-sample --n 100 --pool 1000
+```
+
+生成 `live/sample.json`，里面是**完整 1000 只的排序**，前 100 只入选。
+
+> 这个文件之后不要再改。股票池每月都在变（新股/退市），若每次重排取前 N，
+> 截断位置会移动，等于每次重新抽一次——组合会被整体换掉。实测年化差 1.8pp，
+> 全是抽样噪声。
+
+### 10.2 每次调仓日：出现单清单
+
+```bash
+python scripts/live_signal.py --data-dir data/processed_2025_2026 \
+    --cash 110000 --holdings live/holdings.csv --position 0.40
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--cash` | 券商里的**可用现金**。总资产 = 现金 + 持仓市值，程序自己算 |
+| `--holdings` | 当前持仓 CSV（`symbol,shares`），不传表示空仓建仓 |
+| `--position` | 目标仓位 w。回撤 ≈ w × 满仓回撤，保守取 0.4 |
+| `--dry-run` | 只看不下单（不写文件） |
+| `--ignore-quarter` | 默认只在 1/4/7/10 月调仓，加它则随时调 |
+
+产出 `live/<日期>/`：
+
+| 文件 | 内容 |
+|---|---|
+| `target.csv` | 目标持仓：代码、参考价、目标股数、权重、当前股数、是否可交易 |
+| `orders.csv` | 下单清单，**只含需要动的**（单笔 < 2000 元不动，省最低佣金） |
+| `summary.json` | 总资产、目标仓位、买卖金额、告警 |
+
+### 10.3 几条会直接亏钱的规则（都有单测）
+
+- 买入必须 100 股整数倍；**卖出也是**，只有清仓能带零股（上证函〔2014〕301 号）
+- 停牌/跌停的持仓**冻结**：算进仓位、不下单（否则会拿它的市值再买一遍别的票）
+- 不在样本内的持仓会被清仓（否则组合慢慢变成"样本 + 一堆历史遗留"）
+- 同一天重复跑必须零订单（幂等）
+- 数据超过 15 天没更新，直接拒绝出信号
+
+### 10.4 收盘后到下单
+
+1. 15:30 后更新数据；
+2. 跑脚本拿 `orders.csv`；
+3. **先卖后买**（A 股卖出资金当日可买入）；
+4. 成交后更新 `live/holdings.csv`，下次调用要读它。
+
+> `live/` 下的每日委托单不入库（个人交易记录）；`sample.json` 入库（组合身份）。

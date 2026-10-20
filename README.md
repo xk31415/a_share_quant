@@ -41,9 +41,11 @@ a_share_quant/
 │   ├── backtest/            # 引擎、执行模拟、成本、持仓（T+1）
 │   ├── metrics/             # 绩效指标（收益/风险/回撤/换手/分解报表）
 │   ├── research/            # 实验记录（元数据 + Git commit）
+│   ├── live/                # 实盘信号（冻结样本 / 整手定量 / 持仓差分）
 │   └── utils/               # 交易日历
 ├── tests/                   # pytest 测试（含未来函数专项测试）
 ├── scripts/                 # 合成数据生成、基准回测入口
+├── live/                    # 实盘：sample.json（冻结样本）+ 每日委托单（不入库）
 ├── notebooks/ experiments/ results/ reports/
 │   └── review/              # 交叉审查协议与台账（见 reports/review/PROTOCOL.md）
 ```
@@ -84,7 +86,7 @@ pip install -e ".[dev]"
 python -m pytest tests/
 ```
 
-158 个测试覆盖：
+181 个测试覆盖：
 - 日期对齐、交易日历（`test_dates.py`）；
 - 数据 schema 与校验，含**幸存者偏差哨兵**（`test_data.py`）；
 - 因子计算正确性（`test_factors.py`）；
@@ -103,6 +105,9 @@ python -m pytest tests/
   容量约束、行业中性选股（含行业只有 1 只时跳过）；
 - **基准与超额**（`test_benchmark.py`）：指数代码与个股代码撞车时必须以
   `benchmark.csv` 为准；
+- **实盘信号**（`test_live_signal.py`）：整手买入、卖出整手但清仓可带零股、
+  小额不下单、停牌持仓冻结且占仓位、样本外持仓清仓、重复跑零订单（幂等）、
+  样本按名次补位；
 - **公司行动**（`test_corporate_actions.py`）：10 送 10 与现金分红的除权日收益≈0、
   除权后涨跌按复权口径计量、缺 `adj_close` 必须告警、无公司行动时等价于原始价；
 - **未来函数专项**（`tests/test_no_lookahead.py`）：
@@ -350,6 +355,16 @@ experiment_id、策略名、数据版本指纹、股票池规则、区间、频�
 
 > **实盘判定见 `reports/live_readiness.md`**：约束、验收门槛、三段对照矩阵，
 > 以及"为什么现在不该拿钱跑任何东西"。
+>
+> 执行流程已经脚本化：
+> ```bash
+> # 只做一次，冻结样本（之后永不重抽）
+> python scripts/live_signal.py --data-dir data/processed_2025_2026 \
+>     --create-sample --n 100 --pool 1000
+> # 每个季度调仓日收盘后
+> python scripts/live_signal.py --data-dir data/processed_2025_2026 \
+>     --cash 110000 --holdings live/holdings.csv --position 0.40
+> ```
 >
 > 因子研究已经脚本化：`python scripts/factor_research.py --data-dir data/processed`
 > 输出 IC、十分档多空、**流动性三档内的长仓绝对收益**、以及**行业中性 IC**。

@@ -29,6 +29,12 @@ experiments/*
 !results/.gitkeep
 !experiments/.gitkeep
 
+# 实盘信号产出：每日的目标持仓与委托单属于本地交易记录，不入库。
+# live/sample.json（冻结样本）要入库——它是组合身份，丢了就复现不了历史。
+live/*/
+live/_test_*
+!live/sample.json
+
 # 编辑器
 .idea/
 .vscode/
