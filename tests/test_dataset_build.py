@@ -224,3 +224,39 @@ def test_derive_limits_exempts_new_listing():
     out, warnings = derive_limits(bars, inst, cal)
     assert out["limit_exempt"].all()
     assert any("无涨跌幅限制" in w for w in warnings)
+
+
+def test_drop_nonmonotonic_k_removes_reset_symbols():
+    """复权因子被数据源重置的标的必须剔除（否则凭空暴跌）。
+
+    实测 gm 在 2018-12-26 把 000022 的 adj_factor 从 3.5265 写成 1.0，
+    当日价格没跳空——不剔除会让该股当日凭空跌 71%。
+    """
+    from a_share_quant.data.builders import drop_nonmonotonic_k
+
+    dates = pd.bdate_range("2024-01-02", periods=4)
+    rows = []
+    for d in dates:
+        rows.append({"trade_date": d, "symbol": "GOOD", "close": 10.0,
+                     "adj_close": 30.0})      # k 恒为 3，正常
+    for i, d in enumerate(dates):
+        k = 3.5265 if i < 2 else 1.0            # k 在第 3 天被重置
+        rows.append({"trade_date": d, "symbol": "BAD", "close": 10.0,
+                     "adj_close": 10.0 * k})
+    bars = pd.DataFrame(rows)
+
+    kept, dropped = drop_nonmonotonic_k(bars)
+    assert dropped == ["BAD"]
+    assert set(kept["symbol"]) == {"GOOD"}
+
+
+def test_drop_nonmonotonic_k_keeps_clean_data():
+    from a_share_quant.data.builders import drop_nonmonotonic_k
+
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    bars = pd.DataFrame([{"trade_date": d, "symbol": "A", "close": 10.0,
+                          "adj_close": 10.0 * (2.0 ** (i / 2))}
+                         for i, d in enumerate(dates)])
+    kept, dropped = drop_nonmonotonic_k(bars)
+    assert dropped == []
+    assert len(kept) == len(bars)

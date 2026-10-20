@@ -225,6 +225,33 @@ def assemble(bars_raw: pd.DataFrame, bars_post: pd.DataFrame,
     return BuildReport(bars_out, inst_out, status_out, cal, warnings)
 
 
+# ---------------- 清理 ----------------
+def drop_nonmonotonic_k(bars: pd.DataFrame,
+                        tol: float | None = None) -> tuple[pd.DataFrame, list[str]]:
+    """剔除复权因子非单调的标的，返回 (清洗后 bars, 被剔除代码)。
+
+    后复权因子 ``k = adj_close / close`` 必须单调不减。出现下降通常意味着
+    数据源把因子**重置**了——实测 gm 在 2018-12-26 把 000022 的因子从 3.53
+    直接写成 1.00（当日价格没有跳空）。这种重置会让该股在重置日凭空跌 71%，
+    之后的收益也全部错位。
+
+    无法可靠修复（不知道正确因子），只能剔除。剔 1~2 只对全样本影响可忽略，
+    留着则会让 IC 与回测出现剧烈假信号。
+    """
+    tol = K_TOL if tol is None else float(tol)
+    if bars["adj_close"].isna().all():
+        return bars, []
+    k = (bars["adj_close"] / bars["close"]).replace([float("inf")], pd.NA)
+    frame = pd.DataFrame({"symbol": bars["symbol"], "trade_date": bars["trade_date"],
+                          "k": k}).dropna()
+    frame = frame.sort_values(["symbol", "trade_date"])
+    diff = frame.groupby("symbol")["k"].diff()
+    offenders = sorted(str(x) for x in frame.loc[diff < -tol, "symbol"].unique())
+    if not offenders:
+        return bars, []
+    return bars[~bars["symbol"].isin(offenders)], offenders
+
+
 # ---------------- 硬校验 ----------------
 
 K_TOL = 1e-6

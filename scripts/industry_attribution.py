@@ -18,30 +18,46 @@ import pandas as pd
 ROOT = Path(r"D:/a_share_quant")
 
 
-def load() -> tuple[pd.DataFrame, pd.DataFrame]:
+def load(min_history: int = 60) -> tuple[pd.DataFrame, pd.DataFrame]:
     b = pd.read_parquet(ROOT / "data" / "processed" / "bars.parquet")
     b["trade_date"] = pd.to_datetime(b["trade_date"])
     b = b[(b["is_suspended"] == False) & b["adj_close"].notna() & (b["adj_close"] > 0)]
     b = b.sort_values(["symbol", "trade_date"])
     b["ret"] = b.groupby("symbol")["adj_close"].pct_change()
-    return b.dropna(subset=["ret"]), pd.read_parquet(
+    b = b.dropna(subset=["ret"])
+
+    # 与引擎的股票池口径对齐：上市未满 min_history 个交易日的次新股不参与。
+    # 不做这一步，行业等权会被 2015 年次新股的连板收益拉高（当年全宇宙等权
+    # +126%，剔除次新后只有 +24%），归因差额会变成假的 -16pp。
+    px = b.pivot_table(index="trade_date", columns="symbol", values="adj_close")
+    hist = px.notna().cumsum()
+    ok = (hist >= min_history).stack()
+    ok.index.names = ["trade_date", "symbol"]
+    keep = ok[ok].index
+    # 用 isin 而不是 .loc：dropna 之后首行收益为 NaN 已被剔除，
+    # 直接用 .loc 会抛 KeyError（那些 (date, symbol) 不在索引里）。
+    b = b.set_index(["trade_date", "symbol"])
+    b = b[b.index.isin(keep)].reset_index()
+    return b, pd.read_parquet(
         ROOT / "data" / "processed" / "instruments.parquet", columns=["symbol", "industry"])
 
 
 def industry_returns(ret: pd.DataFrame, ind: pd.Series) -> pd.DataFrame:
-    """每个行业的等权月度收益（date x industry）。"""
+    """每个行业的等权**月度**收益（date x industry）。
+
+    为什么必须月频：回测是月度调仓。若用"日频等权再按月复利"，会在高离散年份
+    白拿"再平衡红利"——2015 年全宇宙日频等权 +27%，月频只有 +18%，
+    差 9pp 全进了假 alpha。归因必须和回测同一调仓频率。
+    """
     r = ret.copy()
     r["industry"] = r["symbol"].map(ind)
     r = r[r["industry"].notna()]
-    mat = r.pivot_table(index="trade_date", columns="symbol", values="ret")
-    cols = {}
-    for name, g in r.groupby("industry"):
-        syms = [s for s in g["symbol"].unique() if s in mat.columns]
-        if len(syms) < 5:
-            continue
-        cols[name] = mat[syms].mean(axis=1)
-    out = pd.DataFrame(cols)
-    return out.resample("ME").apply(lambda x: (1 + x).prod() - 1).dropna(how="all")
+    r["ym"] = r["trade_date"].dt.to_period("M")
+    # 个股月收益 -> 行业内横截面等权
+    m = (1 + r["ret"]).groupby([r["symbol"], r["industry"], r["ym"]]).prod() - 1
+    out = m.groupby(level=[1, 2]).mean().unstack(level=0)
+    out.index = out.index.to_timestamp("M")
+    return out
 
 
 def annualize(s: pd.Series) -> float:
@@ -52,8 +68,15 @@ def annualize(s: pd.Series) -> float:
 
 
 def main() -> None:
-    exp_dir = sys.argv[1] if len(sys.argv) > 1 else None
-    ret, inst = load()
+    exp_dir = None
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    min_hist = 60
+    for a in sys.argv[1:]:
+        if a.startswith("--min-history="):
+            min_hist = int(a.split("=")[1])
+    if args:
+        exp_dir = args[0]
+    ret, inst = load(min_hist)
     ind = inst.set_index("symbol")["industry"].astype(str)
     iret = industry_returns(ret, ind)
     print(f"行业 {iret.shape[1]} 个，{len(iret)} 个月\n")

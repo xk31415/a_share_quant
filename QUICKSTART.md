@@ -238,6 +238,12 @@ python scripts/run_baseline_backtest.py --data-dir data/processed \
     --start 2020-01-01 --end 2024-12-31 --strategy equal_weight \
     --capital 500000000 --capacity-aum 500000000 --benchmark 000852
 
+# 并排对比多个实验（样本内 / 样本外 / 不同策略）
+python scripts/compare_runs.py --last 6
+
+# 样本外交叉验证：纯收益口径算全宇宙等权，与引擎结果对照
+python scripts/crosscheck_ew.py
+
 # 静态容量估算（乐观上限，真实值以重跑为准）
 python scripts/capacity.py --exp results/EXP-xxxx
 ```

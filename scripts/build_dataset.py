@@ -39,6 +39,7 @@ from a_share_quant.data.builders import (  # noqa: E402
     DEFAULT_BOARDS,
     BuildReport,
     assemble,
+    drop_nonmonotonic_k,
     self_check,
     split_symbol,
 )
@@ -655,6 +656,9 @@ def main() -> None:
                     help="main / chinext / star / bse，逗号分隔")
     ap.add_argument("--limit-symbols", default="",
                     help="只处理这些 6 位代码，逗号分隔（小样本调试）")
+    ap.add_argument("--keep-bad-adjust", action="store_true",
+                    help="不剔除复权因子非单调的标的（默认剔除，因为因子被重置后"
+                         "该股会凭空暴跌）")
     ap.add_argument("--allow-missing-limits", action="store_true",
                     help="允许涨跌停价缺失（对应配置里关闭 consider_limit_up_down）")
     ap.add_argument("--min-symbols-per-day", type=int, default=100)
@@ -740,6 +744,15 @@ def main() -> None:
         from a_share_quant.data.builders import derive_limits
         report.bars, w = derive_limits(report.bars, report.instruments, report.calendar)
         report.warnings.extend(w)
+
+    # 复权因子被数据源重置的标的必须剔除：k 一旦下降，该股在重置日会凭空
+    # 跌 60%~70%，之后的收益全部错位。无法修复（不知道正确因子），只能剔。
+    if not args.keep_bad_adjust:
+        report.bars, dropped = drop_nonmonotonic_k(report.bars)
+        if dropped:
+            report.warnings.append(
+                f"剔除 {len(dropped)} 只复权因子非单调的标的（数据源重置了因子）："
+                f"{dropped[:10]}{'...' if len(dropped) > 10 else ''}")
 
     warnings = self_check(report, allow_missing_limits=args.allow_missing_limits,
                           min_symbols_per_day=args.min_symbols_per_day)
