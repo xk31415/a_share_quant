@@ -86,7 +86,7 @@ pip install -e ".[dev]"
 python -m pytest tests/
 ```
 
-192 个测试覆盖：
+214 个测试覆盖：
 - 日期对齐、交易日历（`test_dates.py`）；
 - 数据 schema 与校验，含**幸存者偏差哨兵**（`test_data.py`）；
 - 因子计算正确性（`test_factors.py`）；
@@ -111,6 +111,9 @@ python -m pytest tests/
 - **增量更新**（`test_incremental.py`）：按 (trade_date, symbol) 精确覆盖、
   窗口内停牌股的旧记录必须保留、重复更新幂等、每日证券数腰斩要报错、
   写盘原子性；
+- **成交对账**（`test_reconcile.py`）：四种成交状态（足额/部分/未成交/超量）、
+  滑点符号（买贵与卖便宜都记正）、无对应委托的成交单列且费用计入总额、
+  超卖与零股卖出告警、持仓偏差按金额排序；
 - **公司行动**（`test_corporate_actions.py`）：10 送 10 与现金分红的除权日收益≈0、
   除权后涨跌按复权口径计量、缺 `adj_close` 必须告警、无公司行动时等价于原始价；
 - **未来函数专项**（`tests/test_no_lookahead.py`）：
@@ -369,6 +372,9 @@ experiment_id、策略名、数据版本指纹、股票池规则、区间、频�
 > # 每个季度调仓日收盘后
 > python scripts/live_signal.py --data-dir data/processed_2025_2026 \
 >     --cash 110000 --holdings live/holdings.csv --position 0.40
+> # 成交后对账，并生成下次要读的持仓表
+> python scripts/reconcile.py --orders live/<日期> --fills fills/<日期>.csv \
+>     --holdings live/holdings.csv --save-holdings live/holdings.csv
 > ```
 >
 > 因子研究已经脚本化：`python scripts/factor_research.py --data-dir data/processed`

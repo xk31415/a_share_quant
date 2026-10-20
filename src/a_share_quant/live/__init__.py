@@ -1,4 +1,14 @@
 """实盘信号层。"""
+from .reconcile import (
+    ReconcileError,
+    aggregate_fills,
+    apply_fills,
+    compare_holdings,
+    match_orders,
+    normalize_fills,
+    normalize_side,
+    summarize,
+)
 from .signal import (
     DEFAULT_LOT_SIZE,
     DEFAULT_MIN_TRADE_VALUE,
@@ -16,11 +26,19 @@ __all__ = [
     "DEFAULT_LOT_SIZE",
     "DEFAULT_MIN_TRADE_VALUE",
     "LivePlan",
+    "ReconcileError",
     "Sample",
+    "aggregate_fills",
+    "apply_fills",
     "build_plan",
+    "compare_holdings",
     "diff_orders",
+    "match_orders",
+    "normalize_fills",
+    "normalize_side",
     "rank_universe",
     "render_text",
     "size_positions",
+    "summarize",
     "write_plan",
 ]

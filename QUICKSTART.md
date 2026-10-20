@@ -510,3 +510,31 @@ python scripts/live_signal.py --data-dir data/processed_2025_2026 \\
 > 唯一不同的是 5 只股票在窗口内撤销了 ST——增量版用的截面更新，更准。
 
 > `live/` 下的每日委托单不入库（个人交易记录）；`sample.json` 入库（组合身份）。
+
+### 10.5 成交对账
+
+下单之后核一遍"实际成交"和"模型要的"差多少：
+
+```bash
+python scripts/reconcile.py --orders live/2026-10-20 \\
+    --fills fills/2026-10-21.csv --holdings live/holdings.csv \\
+    --save-holdings live/holdings.csv
+```
+
+成交表最少四列（`side` 接受 `buy/sell`、`买入/卖出`、`证券买入/证券卖出`）：
+
+```csv
+symbol,side,shares,price,fee
+600519,buy,100,1331.88,33.30
+```
+
+输出三样东西：
+
+| 指标 | 含义 |
+|---|---|
+| 股数成交率 | 委托 vs 实际成交，没成交的要能说出原因 |
+| 加权滑点（bp） | 实际成交价 vs 信号日收盘价，正数=吃亏 |
+| 持仓偏离（元） | 成交后持仓 vs 目标，**这条最重要** |
+
+`--save-holdings` 直接写出下次 `live_signal.py` 要读的持仓表。
+`--holdings` 必须传**成交前**的持仓，传成交后的会把同一批成交算两遍。
