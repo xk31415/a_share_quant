@@ -225,6 +225,14 @@ python scripts/run_baseline_backtest.py --data-dir data/processed \
 # 因子研究：IC、十分档多空、流动性三档内的长仓绝对收益
 python scripts/factor_research.py --data-dir data/processed
 
+# 行业中性低波：每行业取 1 只最低波、跨行业等权（先跑 scripts/fetch_industry.py）
+python scripts/run_baseline_backtest.py --data-dir data/processed \
+    --start 2020-01-01 --end 2024-12-31 --strategy low_vol --industry-neutral \
+    --benchmark 000852
+
+# 行业归因：组合收益里有多少是行业结构、多少是组内选股
+python scripts/industry_attribution.py results/EXP-xxxx
+
 # 容量压力测试：放大本金 + 启用容量约束（选股阶段就只挑买得进的）
 python scripts/run_baseline_backtest.py --data-dir data/processed \
     --start 2020-01-01 --end 2024-12-31 --strategy equal_weight \

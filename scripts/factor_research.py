@@ -93,6 +93,16 @@ def bucket_returns(fac: pd.Series, fwd: pd.Series, n: int) -> list[float]:
     return [float(grp.get(i, np.nan)) for i in range(n)]
 
 
+def industry_neutral(fac: pd.Series, ind: pd.Series) -> pd.Series:
+    """减去同行业中位数。缺失行业的标的不参与（返回 NaN）。"""
+    g = ind.reindex(fac.index)
+    tmp = pd.DataFrame({"v": fac.astype(float), "g": g})
+    ok = tmp["g"].notna() & tmp["v"].notna()
+    med = tmp[ok].groupby("g")["v"].transform("median")
+    out = tmp["v"] - med
+    return out.where(ok)
+
+
 def ann(monthly: float) -> float:
     return (1.0 + monthly) ** 12 - 1.0
 
@@ -105,12 +115,20 @@ def main() -> None:
     args = ap.parse_args()
 
     px, ret, amt = load_matrices(Path(args.data_dir))
+    ind = None
+    inst_path = Path(args.data_dir) / "instruments.parquet"
+    if inst_path.exists():
+        inst = pd.read_parquet(inst_path, columns=["symbol", "industry"])
+        if "industry" in inst.columns and inst["industry"].notna().any():
+            ind = inst.set_index("symbol")["industry"].astype(str)
+            print(f"行业映射 {ind.notna().sum()} 只，{ind.nunique()} 个行业", flush=True)
     dates = px.index[(px.index >= pd.Timestamp(args.start)) & (px.index <= pd.Timestamp(args.end))]
     month_end = pd.Series(1, index=dates).resample("ME").last().dropna().index
     signal = pd.DatetimeIndex([px.index[px.index <= d][-1] for d in month_end])
     print(f"矩阵 {px.shape[0]} 日 x {px.shape[1]} 只，信号日 {len(signal)} 个", flush=True)
 
     ics: dict[str, list[float]] = {k: [] for k in FACTORS}
+    ics_neu: dict[str, list[float]] = {k: [] for k in FACTORS}
     spreads: dict[str, list[float]] = {k: [] for k in FACTORS}
     # 每个流动性三档内：top 分位、bottom 分位、该档等权
     lay: dict[str, list[list[tuple[float, float, float]]]] = {k: [] for k in FACTORS}
@@ -131,6 +149,9 @@ def main() -> None:
 
         for name in FACTORS:
             ics[name].append(spearman(fac[name], fwd))
+            if ind is not None:
+                v_neu = industry_neutral(fac[name], ind)
+                ics_neu[name].append(spearman(v_neu, fwd))
             b = bucket_returns(fac[name], fwd, 10)
             if b:
                 spreads[name].append(b[-1] - b[0])
@@ -148,16 +169,21 @@ def main() -> None:
     print(f"有效区间 {used} 个\n")
 
     print("表 1：原始因子值的预测力（IC 与十分档多空，同号才算单调）")
-    print(f"{'因子':12s} {'IC均值':>8s} {'ICIR':>7s} {'|IC|>0.02占比':>12s} {'十分档多空(年化)':>16s}")
-    print("-" * 62)
+    print(f"{'因子':12s} {'IC均值':>8s} {'ICIR':>7s} {'十分档多空(年化)':>16s} {'行业中性IC':>10s} {'中性ICIR':>8s}")
+    print("-" * 70)
     for name in FACTORS:
         a = np.array([x for x in ics[name] if not np.isnan(x)])
         s = np.array([x for x in spreads[name] if not np.isnan(x)])
         if not len(a):
             continue
         icir = a.mean() / a.std(ddof=1) if a.std(ddof=1) else float("nan")
-        print(f"{name:12s} {a.mean():8.4f} {icir:7.3f} {(np.abs(a) > 0.02).mean():12.1%} "
-              f"{ann(s.mean()):16.2%}")
+        na = np.array([x for x in ics_neu[name] if not np.isnan(x)])
+        if len(na):
+            n_ic, n_icir = na.mean(), (na.mean() / na.std(ddof=1) if na.std(ddof=1) else float("nan"))
+        else:
+            n_ic = n_icir = float("nan")
+        print(f"{name:12s} {a.mean():8.4f} {icir:7.3f} {ann(s.mean()):16.2%} "
+              f"{n_ic:10.4f} {n_icir:8.3f}")
 
     print("\n表 2：流动性三档的等权绝对收益（长仓的对照基准）")
     print(f"{'档位':10s} {'年化':>9s}")

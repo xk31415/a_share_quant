@@ -107,3 +107,48 @@ def test_capacity_default_is_off_and_output_unchanged():
     big = LowVolatility(top_n=2, window=60, capacity_aum=1e8).generate_target(
         dates[-1], bars, universe)
     assert "ILLIQ" not in big.weights
+
+
+def test_industry_neutral_picks_lowest_vol_within_each_industry():
+    """行业中性：每个行业取自己的最低波，不被某一个行业填满。"""
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    rng = np.random.default_rng(11)
+    # B1/B2 在银行（低波），T1/T2 在科技（高波）
+    spec = {"B1": ("BANK", 0.004), "B2": ("BANK", 0.010),
+            "T1": ("TECH", 0.030), "T2": ("TECH", 0.055)}
+    rows = []
+    for sym, (_, sigma) in spec.items():
+        px = 10.0 * np.cumprod(1.0 + rng.normal(0, sigma, len(dates)))
+        for i, d in enumerate(dates):
+            rows.append({"trade_date": d, "symbol": sym, "close": px[i],
+                         "adj_close": px[i], "amount": 1e8})
+    bars = pd.DataFrame(rows)
+
+    # 非中性：会同时选 B1、B2（全池最低波两只都在银行）
+    plain = LowVolatility(top_n=2, window=60).generate_target(
+        dates[-1], bars, list(spec))
+    assert sorted(plain.weights) == ["B1", "B2"]
+
+    # 中性：每个行业各取 1 只
+    ind = {s: g for s, (g, _) in spec.items()}
+    neutral = LowVolatility(top_n=2, window=60, industry_map=ind).generate_target(
+        dates[-1], bars, list(spec))
+    assert sorted(neutral.weights) == ["B1", "T1"], neutral.weights
+    assert all(abs(w - 0.5) < 1e-12 for w in neutral.weights.values())
+
+
+def test_industry_neutral_skips_single_stock_industries():
+    """行业里只有 1 只时谈不上"组内选择"，应跳过。"""
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    rng = np.random.default_rng(3)
+    rows = []
+    for sym, sigma in (("A1", 0.005), ("A2", 0.02)):
+        px = 10.0 * np.cumprod(1.0 + rng.normal(0, sigma, len(dates)))
+        for i, d in enumerate(dates):
+            rows.append({"trade_date": d, "symbol": sym, "close": px[i],
+                         "adj_close": px[i], "amount": 1e8})
+    bars = pd.DataFrame(rows)
+    # A1 独占行业 X（组内没有可比对象），A2 独占行业 Y
+    t = LowVolatility(top_n=2, window=60, industry_map={"A1": "X", "A2": "Y"}) \
+        .generate_target(dates[-1], bars, ["A1", "A2"])
+    assert t.weights == {}

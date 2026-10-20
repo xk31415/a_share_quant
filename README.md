@@ -84,7 +84,7 @@ pip install -e ".[dev]"
 python -m pytest tests/
 ```
 
-154 个测试覆盖：
+158 个测试覆盖：
 - 日期对齐、交易日历（`test_dates.py`）；
 - 数据 schema 与校验，含**幸存者偏差哨兵**（`test_data.py`）；
 - 因子计算正确性（`test_factors.py`）；
@@ -99,7 +99,8 @@ python -m pytest tests/
 - **数据装配**（`test_dataset_build.py`）：板块判定、指数剔除、状态/涨跌停合并、
   涨跌停规则表（含创业板改革与 ST 收窄）、六条自检各自能拦住对应坏数据；
 - **策略**（`test_strategies.py`/`test_momentum_strategy.py`/`test_low_vol_strategy.py`）：
-  散列抽样与 `seed=0` 可复现性、动量 skip 段、防未来函数、低波的流动性过滤；
+  散列抽样与 `seed=0` 可复现性、动量 skip 段、防未来函数、低波的流动性过滤、
+  容量约束、行业中性选股（含行业只有 1 只时跳过）；
 - **基准与超额**（`test_benchmark.py`）：指数代码与个股代码撞车时必须以
   `benchmark.csv` 为准；
 - **公司行动**（`test_corporate_actions.py`）：10 送 10 与现金分红的除权日收益≈0、
@@ -328,8 +329,10 @@ experiment_id、策略名、数据版本指纹、股票池规则、区间、频�
 5. 加入行业暴露、交易成本贡献等更细的组合归因。
 
 > 因子研究已经脚本化：`python scripts/factor_research.py --data-dir data/processed`
-> 输出 IC、十分档多空、以及**流动性三档内的长仓绝对收益**。
-> 不分流动性档的因子结论一律不可信——低流动 1/3 等权 24%/年、高流动 1/3 只有 0.3%。
+> 输出 IC、十分档多空、**流动性三档内的长仓绝对收益**、以及**行业中性 IC**。
+> 两类分层缺一不可：低流动 1/3 等权 24%/年、高流动 1/3 只有 0.3%；
+> 而"全池最低波 50 只"这种选法会被银行填满（30.6% vs 全池 0.96%），
+> 收益 100% 由行业结构解释。归因工具：`scripts/industry_attribution.py`。
 
 ## 15. 第一阶段纪律（禁止事项）
 

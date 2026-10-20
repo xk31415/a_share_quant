@@ -66,6 +66,12 @@ def main() -> None:
                     choices=["equal_weight", "momentum", "low_vol"])
     ap.add_argument("--capital", type=float, default=None,
                     help="初始资金（默认取 settings.yaml，1,000,000）")
+    ap.add_argument("--industry-neutral", action="store_true",
+                    help="低波策略按行业分组选股（每行业取 k 只低波），对冲行业暴露")
+    ap.add_argument("--k-per-industry", type=int, default=1,
+                    help="行业中性时每个行业取几只（默认 1）")
+    ap.add_argument("--max-positions", type=int, default=None,
+                    help="覆盖 settings.yaml 的 max_positions（行业中性需要放宽）")
     ap.add_argument("--capacity-aum", type=float, default=None,
                     help="启用容量约束的 AUM 口径（元）；不传则不启用")
     ap.add_argument("--liquidity", type=float, default=None,
@@ -106,11 +112,27 @@ def main() -> None:
     uni_cfg = root / args.universe_config
     rules = (UniverseRules.from_yaml(uni_cfg) if uni_cfg.exists()
              else UniverseRules())
+    ind_map = None
+    if args.industry_neutral:
+        inst_all = provider.get_instruments()
+        if "industry" not in inst_all.columns or inst_all["industry"].isna().all():
+            raise SystemExit("--industry-neutral 需要 instruments 里有 industry 列"
+                             "（先跑 scripts/fetch_industry.py）")
+        ind_map = dict(zip(inst_all["symbol"].astype(str), inst_all["industry"].astype(str)))
+        print(f"[info] 行业中性选股：{len(ind_map)} 只标的，"
+              f"{len(set(ind_map.values()))} 个行业")
+
+    max_pos = args.max_positions or pf.get("max_positions", 20)
+    if args.industry_neutral and args.max_positions is None:
+        max_pos = max(max_pos, 300)      # 行业中性持仓数由行业数决定，别被 50 截断
+
     if args.strategy == "low_vol":
-        strategy = LowVolatility(top_n=pf.get("max_positions", 20),
+        strategy = LowVolatility(top_n=max_pos,
                                  window=int(args.window or 60),
                                  liquidity_pct=args.liquidity,
-                                 capacity_aum=args.capacity_aum)
+                                 capacity_aum=args.capacity_aum,
+                                 industry_map=ind_map,
+                                 k_per_industry=args.k_per_industry)
     elif args.strategy == "momentum":
         strategy = TopNMomentum(top_n=pf.get("max_positions", 20),
                                 window=int(args.window or bt.get("momentum_window", 60)),
@@ -139,7 +161,7 @@ def main() -> None:
         strategy=strategy,
         universe_builder=UniverseBuilder(provider, rules),
         portfolio_rules=PortfolioRules(
-            max_positions=pf.get("max_positions", 20),
+            max_positions=max_pos,
             max_weight_per_stock=pf.get("max_weight_per_stock", 0.10)),
         cost_model=cost_model,
         config=config,
@@ -231,6 +253,8 @@ def main() -> None:
                     "liquidity_pct": getattr(strategy, "liquidity_pct", None),
                     "capacity_aum": getattr(strategy, "capacity_aum", None),
                     "initial_capital": config.initial_capital,
+                    "industry_neutral": bool(args.industry_neutral),
+                    "k_per_industry": args.k_per_industry if args.industry_neutral else None,
                     "max_weight_per_stock": pf.get("max_weight_per_stock", 0.10),
                     "execution_price": config.execution_price,
                     "lot_size": mr.get("lot_size", 100)},
