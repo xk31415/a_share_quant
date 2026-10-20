@@ -39,3 +39,38 @@ def liquid_symbols(bars: pd.DataFrame, as_of, pool: Iterable[str],
         return set()
     cutoff = avg.quantile(1.0 - liquidity_pct)
     return {str(s) for s in avg[avg >= cutoff].index}
+
+
+def capacity_symbols(bars: pd.DataFrame, as_of, pool: Iterable[str],
+                     aum: float, participation_rate: float,
+                     target_weight: float,
+                     amount_window: int = 20) -> set[str]:
+    """只保留"装得下目标权重"的标的。
+
+    约束：``participation_rate × 20 日均成交额 >= target_weight × AUM``。
+    即"按目标权重买入这一只，不会超过当日成交量的 x%"。
+
+    为什么要在选股阶段做：引擎只在撮合时拦截超量订单，那时已经选完股了，
+    结果就是"选出来一堆买不满的标的"，权重被动偏离、现金闲置。
+    把约束前移到选股，等于先问"这笔钱进得去吗"。
+
+    只在 ``aum`` 明确给出时启用；100 万本金下这个约束几乎不生效，
+    真正有意义的是放大到几千万以上时的压力测试。
+    """
+    if aum <= 0:
+        raise ValueError("aum must be > 0")
+    if not 0 < participation_rate <= 1:
+        raise ValueError("participation_rate must be in (0, 1]")
+
+    ts = pd.Timestamp(as_of).normalize()
+    sub = bars[bars["symbol"].isin({str(s) for s in pool})]
+    sub = sub[sub["trade_date"] <= ts]
+    if sub.empty or "amount" not in sub.columns:
+        return set()
+
+    amt = pivot_column(sub, "amount").sort_index()
+    avg = amt.tail(amount_window).mean().dropna()
+    if avg.empty:
+        return set()
+    need = target_weight * aum / participation_rate
+    return {str(s) for s in avg[avg >= need].index}

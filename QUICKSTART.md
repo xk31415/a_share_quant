@@ -224,6 +224,14 @@ python scripts/run_baseline_backtest.py --data-dir data/processed \
 
 # 因子研究：IC、十分档多空、流动性三档内的长仓绝对收益
 python scripts/factor_research.py --data-dir data/processed
+
+# 容量压力测试：放大本金 + 启用容量约束（选股阶段就只挑买得进的）
+python scripts/run_baseline_backtest.py --data-dir data/processed \
+    --start 2020-01-01 --end 2024-12-31 --strategy equal_weight \
+    --capital 500000000 --capacity-aum 500000000 --benchmark 000852
+
+# 静态容量估算（乐观上限，真实值以重跑为准）
+python scripts/capacity.py --exp results/EXP-xxxx
 ```
 
 **评估纪律**（这几条是踩坑换来的，见 `reports/strategy_log.md`）：

@@ -17,7 +17,7 @@ import pandas as pd
 
 from ..factors import pivot_column
 from .base import Strategy, TargetPortfolio
-from .filters import liquid_symbols
+from .filters import capacity_symbols, liquid_symbols
 
 
 class LowVolatility(Strategy):
@@ -35,7 +35,9 @@ class LowVolatility(Strategy):
 
     def __init__(self, top_n: int = 50, window: int = 60,
                  liquidity_pct: Optional[float] = None,
-                 amount_window: int = 20) -> None:
+                 amount_window: int = 20,
+                 capacity_aum: Optional[float] = None,
+                 participation_rate: float = 0.10) -> None:
         if top_n < 1:
             raise ValueError("top_n must be >= 1")
         if window < 2:
@@ -46,6 +48,10 @@ class LowVolatility(Strategy):
         self.window = window
         self.liquidity_pct = liquidity_pct
         self.amount_window = amount_window
+        # 容量约束：给定 AUM 时，只选"按目标权重买得进"的标的。
+        # None = 不启用（默认），保证默认输出与之前逐位一致。
+        self.capacity_aum = capacity_aum
+        self.participation_rate = participation_rate
         self.warmup = max(window + 1, amount_window)
 
     def generate_target(self, as_of, bars: pd.DataFrame,
@@ -74,6 +80,14 @@ class LowVolatility(Strategy):
         if self.liquidity_pct is not None:
             allow = liquid_symbols(bars, ts, pool, self.liquidity_pct,
                                    self.amount_window)
+            vol = vol.reindex(sorted(allow)).dropna()
+            if vol.empty:
+                return TargetPortfolio(as_of=ts, weights={})
+
+        if self.capacity_aum is not None:
+            allow = capacity_symbols(bars, ts, pool, self.capacity_aum,
+                                     self.participation_rate,
+                                     1.0 / self.top_n, self.amount_window)
             vol = vol.reindex(sorted(allow)).dropna()
             if vol.empty:
                 return TargetPortfolio(as_of=ts, weights={})

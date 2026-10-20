@@ -12,7 +12,7 @@ from typing import Sequence
 import pandas as pd
 
 from .base import Strategy, TargetPortfolio
-from .filters import liquid_symbols
+from .filters import capacity_symbols, liquid_symbols
 
 
 def _stable_key(symbol: str, seed: int = 0) -> str:
@@ -45,7 +45,9 @@ class EqualWeightStrategy(Strategy):
     name = "equal_weight"
 
     def __init__(self, max_positions: int = 20, seed: int = 0,
-                 liquidity_pct: float | None = None) -> None:
+                 liquidity_pct: float | None = None,
+                 capacity_aum: float | None = None,
+                 participation_rate: float = 0.10) -> None:
         if max_positions < 1:
             raise ValueError("max_positions must be >= 1")
         self.max_positions = max_positions
@@ -53,6 +55,9 @@ class EqualWeightStrategy(Strategy):
         # 只保留成交额最高的前 liquidity_pct；None = 不限制。
         # 用来给"因子组合"提供同流动性档的等权对照（默认不变，输出逐位一致）。
         self.liquidity_pct = liquidity_pct
+        # 容量约束：给定 AUM 时只选买得进的标的；None = 不启用（默认不变）
+        self.capacity_aum = capacity_aum
+        self.participation_rate = participation_rate
 
     def generate_target(self, as_of, bars: pd.DataFrame,
                         universe: Sequence[str]) -> TargetPortfolio:
@@ -60,6 +65,11 @@ class EqualWeightStrategy(Strategy):
         if self.liquidity_pct is not None:
             allow = liquid_symbols(bars, as_of, universe, self.liquidity_pct)
             pool = [s for s in universe if str(s) in allow]
+        if self.capacity_aum is not None:
+            allow = capacity_symbols(bars, as_of, pool, self.capacity_aum,
+                                     self.participation_rate,
+                                     1.0 / self.max_positions)
+            pool = [s for s in pool if str(s) in allow]
         picked = sorted(pool, key=lambda s: _stable_key(s, self.seed))[: self.max_positions]
         ts = pd.Timestamp(as_of).normalize()
         if not picked:

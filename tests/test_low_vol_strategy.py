@@ -69,3 +69,41 @@ def test_rejects_bad_liquidity_pct():
         except ValueError:
             continue
         raise AssertionError(f"liquidity_pct={bad} 应当报错")
+
+
+def test_capacity_filter_drops_names_that_cannot_fit_the_slice():
+    """1 亿本金、50 只、每只 200 万，单笔不超日成交额 10% -> 需要日额 >= 2000 万。"""
+    from a_share_quant.strategies.filters import capacity_symbols
+
+    dates = pd.bdate_range("2024-01-01", periods=30)
+    rows = []
+    for sym, amt in (("BIG", 5e8), ("SMALL", 5e6)):
+        for d in dates:
+            rows.append({"trade_date": d, "symbol": sym, "amount": amt})
+    bars = pd.DataFrame(rows)
+
+    ok = capacity_symbols(bars, dates[-1], ["BIG", "SMALL"], aum=1e8,
+                          participation_rate=0.10, target_weight=0.02)
+    assert ok == {"BIG"}, f"SMALL 日额 500 万装不下 200 万的单，实际 {ok}"
+
+    # 本金降到 100 万时，2000 万/50 = 2 万，SMALL 也装得下
+    ok_small = capacity_symbols(bars, dates[-1], ["BIG", "SMALL"], aum=1e6,
+                                participation_rate=0.10, target_weight=0.02)
+    assert ok_small == {"BIG", "SMALL"}
+
+
+def test_capacity_default_is_off_and_output_unchanged():
+    """不传 capacity_aum 时必须与加参数之前逐位一致（默认分支不许变）。"""
+    import hashlib
+
+    bars, dates = _bars(n=120)
+    universe = ["STABLE", "MID", "WILD", "ILLIQ"]
+    base = LowVolatility(top_n=2, window=60).generate_target(dates[-1], bars, universe)
+    with_none = LowVolatility(top_n=2, window=60, capacity_aum=None).generate_target(
+        dates[-1], bars, universe)
+    assert base.weights == with_none.weights
+
+    # 1 亿本金下 ILLIQ（日额 1 万）装不下 5000 万/2 = 2500 万，必须被剔除
+    big = LowVolatility(top_n=2, window=60, capacity_aum=1e8).generate_target(
+        dates[-1], bars, universe)
+    assert "ILLIQ" not in big.weights

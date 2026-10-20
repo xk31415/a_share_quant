@@ -64,6 +64,10 @@ def main() -> None:
     ap.add_argument("--out", default="results")
     ap.add_argument("--strategy", default="equal_weight",
                     choices=["equal_weight", "momentum", "low_vol"])
+    ap.add_argument("--capital", type=float, default=None,
+                    help="初始资金（默认取 settings.yaml，1,000,000）")
+    ap.add_argument("--capacity-aum", type=float, default=None,
+                    help="启用容量约束的 AUM 口径（元）；不传则不启用")
     ap.add_argument("--liquidity", type=float, default=None,
                     help="只保留成交额最高的这个比例的股票（0.33 = 前 1/3）")
     ap.add_argument("--seed", type=int, default=0, help="等权基准的抽样种子（换一批股票）")
@@ -105,7 +109,8 @@ def main() -> None:
     if args.strategy == "low_vol":
         strategy = LowVolatility(top_n=pf.get("max_positions", 20),
                                  window=int(args.window or 60),
-                                 liquidity_pct=args.liquidity)
+                                 liquidity_pct=args.liquidity,
+                                 capacity_aum=args.capacity_aum)
     elif args.strategy == "momentum":
         strategy = TopNMomentum(top_n=pf.get("max_positions", 20),
                                 window=int(args.window or bt.get("momentum_window", 60)),
@@ -114,7 +119,8 @@ def main() -> None:
     else:
         strategy = EqualWeightStrategy(max_positions=pf.get("max_positions", 20),
                                        seed=int(args.seed),
-                                       liquidity_pct=args.liquidity)
+                                       liquidity_pct=args.liquidity,
+                                       capacity_aum=args.capacity_aum)
     cost_model = CostModel(
         commission_rate=cost_cfg.get("commission_rate", 0.00025),
         commission_min=cost_cfg.get("commission_min", 5.0),
@@ -124,7 +130,7 @@ def main() -> None:
         start_date=args.start or bt.get("start_date", "2021-01-04"),
         end_date=args.end or bt.get("end_date", "2023-12-29"),
         rebalance_frequency=args.freq or bt.get("rebalance_frequency", "M"),
-        initial_capital=float(bt.get("initial_capital", 1_000_000)),
+        initial_capital=float(args.capital or bt.get("initial_capital", 1_000_000)),
         benchmark=args.benchmark or bt.get("benchmark"),
         cash_buffer=float(pf.get("cash_buffer", 0.01)))
 
@@ -223,6 +229,8 @@ def main() -> None:
                     "skip": getattr(strategy, "skip", None),
                     "seed": getattr(strategy, "seed", None),
                     "liquidity_pct": getattr(strategy, "liquidity_pct", None),
+                    "capacity_aum": getattr(strategy, "capacity_aum", None),
+                    "initial_capital": config.initial_capital,
                     "max_weight_per_stock": pf.get("max_weight_per_stock", 0.10),
                     "execution_price": config.execution_price,
                     "lot_size": mr.get("lot_size", 100)},
