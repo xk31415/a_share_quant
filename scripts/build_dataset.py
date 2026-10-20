@@ -75,7 +75,7 @@ class GmSource:
 
     name = "gm"
     STATUS_FIELDS = ("symbol,trade_date,pre_close,upper_limit,lower_limit,"
-                     "adj_factor,is_suspended,sec_name")
+                     "adj_factor,is_suspended,is_st,sec_name")
     BAR_FIELDS = "symbol,eob,open,high,low,close,volume,amount,pre_close"
 
     def __init__(self) -> None:
@@ -115,18 +115,35 @@ class GmSource:
         from gm.api import get_trading_dates
         return list(get_trading_dates(exchange="SHSE", start_date=start, end_date=end))
 
-    def instruments(self) -> pd.DataFrame:
-        from gm.api import get_instruments
-        kwargs = dict(exchanges=["SHSE", "SZSE", "BJSE"], sec_types=[1], df=True,
-                      fields="symbol,sec_name,listed_date,delisted_date")
-        try:
-            df = get_instruments(skip_delisted=False, **kwargs)
-        except TypeError:            # 老版本没有 skip_delisted
-            df = get_instruments(**kwargs)
+    def instruments(self, start: str | None = None, end: str | None = None) -> pd.DataFrame:
+        """按历史截面取全市场，而不是 ``get_instruments()``。
+
+        ``get_instruments()`` 只返回**最新**上市标的信息（实测只有 24 只已退市），
+        拿它当历史全市场会直接引入幸存者偏差。``get_symbols(trade_date=...)``
+        返回指定交易日的截面（含后来退市的标的），按年取快照再求并集即可还原。
+        """
+        from gm.api import get_symbols
+        s_year = int((start or "2015-01-01")[:4])
+        e_year = int((end or "2025-12-31")[:4])
+        frames = []
+        for year in range(s_year, e_year + 1):
+            for md in ("-06-30", "-12-31"):
+                day = f"{year}{md}"
+                try:
+                    df = get_symbols(sec_type1=1010, sec_type2=101001,
+                                     trade_date=day, skip_st=False,
+                                     skip_suspended=False, df=True)
+                except Exception as exc:
+                    print(f"[warn] get_symbols({day}) 失败：{str(exc)[:80]}")
+                    continue
+                if df is not None and len(df):
+                    frames.append(df)
+        if not frames:
+            raise SystemExit("get_symbols 未返回任何截面，无法构建证券列表")
+        df = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["symbol"])
         syms = [split_symbol(s) for s in df["symbol"]]
         listed = _gm_ts(df["listed_date"])
         delisted = _gm_ts(df["delisted_date"])
-        # gm 用 2038-01-01 表示"永不到期"，不是真的退市日
         delisted = delisted.where(delisted < pd.Timestamp("2030-01-01"))
         for s, e in syms:
             self._ex[s] = e
@@ -164,11 +181,19 @@ class GmSource:
         status_raw = pd.concat(stat_parts, ignore_index=True)
         status_raw["trade_date"] = _gm_date(status_raw["trade_date"])
         syms = [split_symbol(s) for s in status_raw["symbol"]]
+        # get_history_instruments 实测不返回官方 is_st（即使请求也会被丢掉），
+        # 退化为按当日 sec_name 的 ST/*ST 前缀推导——名称变更当天即生效，
+        # 属 point-in-time，但不是官方标记。
+        if "is_st" in status_raw.columns:
+            is_st = status_raw["is_st"].fillna(False).astype(bool)
+        else:
+            is_st = (status_raw["sec_name"].astype(str).str.upper()
+                     .str.replace(" ", "", regex=False)
+                     .str.match(_ST_RE).fillna(False))
         status = pd.DataFrame({
             "trade_date": status_raw["trade_date"],
             "symbol": [s for s, _ in syms],
-            "is_st": status_raw["sec_name"].astype(str).str.upper()
-                      .str.replace(" ", "", regex=False).str.match(_ST_RE).fillna(False),
+            "is_st": is_st,
             "is_suspended": status_raw["is_suspended"].fillna(0).astype(bool),
             "limit_up": pd.to_numeric(status_raw["upper_limit"], errors="coerce"),
             "limit_down": pd.to_numeric(status_raw["lower_limit"], errors="coerce"),
@@ -242,7 +267,8 @@ class QmtSource:
                                            end_time=end.replace("-", ""))
         return [pd.Timestamp(int(t), unit="ms").strftime("%Y-%m-%d") for t in stamps]
 
-    def instruments(self) -> pd.DataFrame:
+    def instruments(self, start: str | None = None,
+                    end: str | None = None) -> pd.DataFrame:
         codes = self.xt.get_stock_list_in_sector("沪深A股")
         rows = []
         for code in codes:
@@ -357,7 +383,8 @@ class BaostockSource:
                 out.append(row["calendar_date"])
         return out
 
-    def instruments(self) -> pd.DataFrame:
+    def instruments(self, start: str | None = None,
+                    end: str | None = None) -> pd.DataFrame:
         rs = self.bs.query_stock_basic()
         rows = []
         while rs.next():
@@ -489,7 +516,7 @@ def main() -> None:
     print(f"      {len(calendar)} 个交易日")
 
     print("[2/4] 证券列表")
-    instruments = source.instruments()
+    instruments = source.instruments(args.start, args.end)
     print(f"      {len(instruments)} 只，已退市 {int(instruments['delist_date'].notna().sum())} 只")
 
     boards = [b.strip() for b in args.boards.split(",") if b.strip()]
