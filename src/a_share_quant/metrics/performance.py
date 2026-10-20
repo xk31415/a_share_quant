@@ -231,6 +231,45 @@ def cost_contribution(result: "BacktestResult") -> dict[str, float]:
 
 # ---------- 汇总 ----------
 
+
+def benchmark_metrics(result: "BacktestResult") -> dict[str, Any]:
+    """相对基准的超额指标；没有基准数据时返回空字典。
+
+    基准价来自 ``bars`` 里同代码的行情（由 build_dataset 的 --benchmark 写入），
+    缺失时 ``result.benchmark is None``，这里什么都不算——不静默补 0。
+    """
+    bench = getattr(result, "benchmark", None)
+    ret = result.daily_returns
+    if bench is None or len(bench) < 2 or ret is None or ret.empty:
+        return {}
+    b = bench.pct_change().reindex(ret.index).fillna(0.0)
+    if float(b.std(ddof=1)) == 0.0 and float(b.abs().sum()) == 0.0:
+        return {}
+    # 逐日配对后再算，避免首日 NaN 把 beta 拖成 nan
+    pair = pd.DataFrame({"r": ret, "b": b}).dropna()
+    if len(pair) < 2:
+        return {}
+    ret, b = pair["r"], pair["b"]
+    excess = ret - b
+    n = max(len(b), 1)
+    eq_b = (1.0 + b).cumprod()
+    te = float(excess.std(ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR))
+    ann_excess = float(excess.mean() * TRADING_DAYS_PER_YEAR)
+    var_b = float(b.var(ddof=1))
+    beta = float(np.cov(ret, b, ddof=1)[0, 1] / var_b) if var_b > 0 else float("nan")
+    return {
+        "benchmark_symbol": str(getattr(bench, "name", "") or ""),
+        "benchmark_cumulative_return": float(eq_b.iloc[-1] - 1.0),
+        "benchmark_annualized_return": float(eq_b.iloc[-1] ** (TRADING_DAYS_PER_YEAR / n) - 1.0),
+        "benchmark_annualized_volatility": float(b.std(ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR)),
+        "excess_cumulative_return": float((1.0 + excess).prod() - 1.0),
+        "excess_annualized_return": ann_excess,
+        "tracking_error": te,
+        "information_ratio": float(ann_excess / te) if te > 0 else float("nan"),
+        "beta": beta,
+    }
+
+
 def summarize(result: "BacktestResult") -> dict[str, Any]:
     """回测结果汇总（不只有一个最终收益率）。"""
     eq, ret = result.equity_curve, result.daily_returns
@@ -291,6 +330,8 @@ def summarize(result: "BacktestResult") -> dict[str, Any]:
     summary["cost_pct_of_initial_capital"] = cc["cost_pct_of_initial_capital"]
     summary["annualized_cost_drag"] = cc["annualized_cost_drag"]
     summary["total_turnover"] = cc["total_turnover"]
+    # 相对基准的超额指标；没有基准行情时什么都不加（不静默补 0）
+    summary.update(benchmark_metrics(result))
     return summary
 
 

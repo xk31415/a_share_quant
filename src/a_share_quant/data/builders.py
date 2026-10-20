@@ -109,7 +109,8 @@ def _as_date(df: pd.DataFrame, col: str = "trade_date") -> pd.DataFrame:
 def assemble(bars_raw: pd.DataFrame, bars_post: pd.DataFrame,
              status_raw: pd.DataFrame, instruments: pd.DataFrame,
              calendar: Sequence, boards: Sequence[str] = DEFAULT_BOARDS,
-             limit_symbols: Iterable[str] | None = None) -> BuildReport:
+             limit_symbols: Iterable[str] | None = None,
+             extra_symbols: Iterable[str] | None = None) -> BuildReport:
     """装配四张表。
 
     参数
@@ -121,6 +122,8 @@ def assemble(bars_raw: pd.DataFrame, bars_post: pd.DataFrame,
     calendar   交易日序列
     boards     板块白名单
     limit_symbols 只保留这些代码（小样本调试用）
+    extra_symbols 额外保留的代码（基准指数）：**只留在 bars 里做对照**，
+                  不进 instruments，因此不会被股票池选中、也不会参与交易
     """
     warnings: list[str] = []
     inst = instruments.copy()
@@ -146,10 +149,11 @@ def assemble(bars_raw: pd.DataFrame, bars_post: pd.DataFrame,
 
     bars = _as_date(bars_raw)
     bars["symbol"] = bars["symbol"].astype(str)
-    bars = bars[bars["symbol"].isin(keep)]
+    keep_bars = keep | {str(s) for s in (extra_symbols or [])}
+    bars = bars[bars["symbol"].isin(keep_bars)]
     adj = _as_date(bars_post)
     adj["symbol"] = adj["symbol"].astype(str)
-    adj = adj[adj["symbol"].isin(keep)]
+    adj = adj[adj["symbol"].isin(keep_bars)]
     bars = bars.merge(adj[["trade_date", "symbol", "adj_close"]],
                       on=["trade_date", "symbol"], how="left")
 
@@ -183,6 +187,14 @@ def assemble(bars_raw: pd.DataFrame, bars_post: pd.DataFrame,
     for col in ("is_st", "is_suspended"):
         merged[col] = merged[col].fillna(False).astype(bool)
     merged["limit_exempt"] = merged["limit_exempt"].fillna(False).astype(bool)
+
+    # 基准指数不是可交易证券：没有涨跌停，也不该被自检当成"缺涨跌停价"
+    if extra_symbols:
+        idx_mask = merged["symbol"].isin({str(s) for s in extra_symbols})
+        if idx_mask.any():
+            merged.loc[idx_mask, ["limit_up", "limit_down"]] = float("nan")
+            merged.loc[idx_mask, "limit_exempt"] = True
+            merged.loc[idx_mask, ["is_st", "is_suspended"]] = False
 
     if "pre_close" not in merged.columns:
         merged["pre_close"] = merged.groupby("symbol")["close"].shift(1)

@@ -165,6 +165,28 @@ class LocalFileProvider(DataProvider):
                 self._cache[key] = out
         return self._slice_dates(out, start, end, symbols)
 
+    def get_benchmark(self, code: str):
+        """读取基准指数序列（benchmark.csv: trade_date, symbol, close）。
+
+        基准单独成文件而不是塞进 bars：它没有证券基本信息、不该参与选股，
+        混进 bars 会被校验器判成"缺 instruments 记录"。
+        """
+        path = self.root / "benchmark.csv"
+        if not path.exists():
+            return None
+        df = pd.read_csv(path, dtype={"symbol": str})
+        sub = df[df["symbol"] == str(code)]
+        if sub.empty:
+            return None
+        idx = pd.to_datetime(sub["trade_date"]).dt.normalize()
+        series = pd.Series(
+            pd.to_numeric(sub["close"], errors="coerce").to_numpy(), index=idx)
+        series = series.sort_index().dropna()
+        if series.empty:
+            return None
+        series.name = str(code)
+        return series
+
     def get_calendar(self) -> TradingCalendar:
         if self._calendar is not None:
             return self._calendar

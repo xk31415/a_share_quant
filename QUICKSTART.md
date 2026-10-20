@@ -131,7 +131,8 @@ cd /d/a_share_quant
 
 ```bash
 pip install baostock
-python scripts/build_dataset.py --source baostock --start 2020-01-01 --end 2024-12-31
+python scripts/build_dataset.py --source gm --start 2020-01-01 --end 2024-12-31 \
+    --benchmark 000300
 
 # 先小样本验证链路（3 只股票 1 季度）
 python scripts/build_dataset.py --source baostock --start 2023-01-01 --end 2023-03-31 \
@@ -186,6 +187,7 @@ SDK 升级导致字段名变化时，先用 `--probe` 看它到底返回了什�
 | `instruments.csv` | `symbol, name, list_date, delist_date` |
 | `status.csv` | `trade_date, symbol, is_st, is_suspended` |
 | `calendar.csv` | `trade_date` |
+| `benchmark.csv`（可选） | `trade_date, symbol, close`（基准指数，独立成文件、不进股票池） |
 
 建议的可选列（有了才能启用更多约束/因子）：`adj_close, pre_close, limit_up, limit_down, industry, market_cap`。
 

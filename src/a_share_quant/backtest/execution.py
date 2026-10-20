@@ -259,33 +259,54 @@ class ExecutionSimulator:
                 continue
             eligible.append((od, self.cost_model.buy_price(open_px), cap))
 
-        need = sum(min(int(od.shares), cap if cap is not None else int(od.shares))
-                   * px
-                   + self.cost_model.buy_cost(
-                       min(int(od.shares), cap if cap is not None else int(od.shares)) * px)
-                   for od, px, cap in eligible)
         cash = float(portfolio.cash)
-        # 现金不足 -> 全部买单等比例缩减（留 0.1% 余量吸收浮点误差）
-        factor = 1.0 if need <= cash else max(cash / need * 0.999, 0.0)
 
+        # 先算出每笔的目标股数，再决定怎么分钱。
+        plan: list[list] = []      # [od, price, cap, want, shares, volume_bound]
         for od, price, cap in eligible:
-            if cap is not None and cap <= 0:   # 当日成交量太小，一手都成交不了
-                fills.append(Fill(od.symbol, "buy", 0, 0.0, 0.0, "blocked:volume"))
+            if cap is not None and cap <= 0:
+                plan.append([od, price, cap, 0, 0, True])
                 continue
-            # capped 只表示"成交量上限绑定了股数"，现金不足或整手造成的缩量不算
             volume_bound = cap is not None and int(od.shares) > cap
             want = int(od.shares) if cap is None else min(int(od.shares), cap)
-            shares = int(want * factor) // self.lot_size * self.lot_size
-            turnover = shares * price
-            cost = self.cost_model.buy_cost(turnover)
-            while shares > 0 and turnover + cost > cash + 1e-6:
-                shares -= self.lot_size
-                turnover = shares * price
-                cost = self.cost_model.buy_cost(turnover)
+            plan.append([od, price, cap, want, 0, volume_bound])
+
+        need = sum(w * px + self.cost_model.buy_cost(w * px)
+                   for _, px, _, w, _, _ in plan if w > 0)
+        # 现金不足 -> 全部买单等比例缩减（留 0.1% 余量吸收浮点误差）
+        factor = 1.0 if need <= cash else max(cash / need * 0.999, 0.0)
+        for item in plan:
+            item[4] = int(item[3] * factor) // self.lot_size * self.lot_size
+
+        # 整手取整会把零头留在账上（50 只票每次能剩几万元），如果再按顺序扣现金，
+        # 后面的订单就会被压成 0 股——账上还有钱却没买满。这里按轮转把零头补回去。
+        spent = sum(s * px + self.cost_model.buy_cost(s * px)
+                    for _, px, _, _, s, _ in plan if s > 0)
+        leftover = cash - spent
+        changed = True
+        while changed:
+            changed = False
+            for item in plan:
+                od, px, _, want, s, _ = item
+                if s + self.lot_size > want:
+                    continue
+                add = self.lot_size * px
+                extra = (self.cost_model.buy_cost((s + self.lot_size) * px)
+                         - self.cost_model.buy_cost(s * px))
+                if add + extra <= leftover + 1e-9:
+                    item[4] = s + self.lot_size
+                    leftover -= add + extra
+                    changed = True
+
+        for od, price, cap, want, shares, volume_bound in plan:
             if shares <= 0:
-                reason = "blocked:volume" if volume_bound else "blocked:insufficient_cash"
+                reason = ("blocked:volume"
+                          if volume_bound or (cap is not None and cap <= 0)
+                          else "blocked:insufficient_cash")
                 fills.append(Fill(od.symbol, "buy", 0, 0.0, 0.0, reason))
                 continue
+            turnover = shares * price
+            cost = self.cost_model.buy_cost(turnover)
             portfolio.buy(od.symbol, shares, price, cost,
                           adj_factor=k_map.get(od.symbol, 1.0))
             cash -= turnover + cost

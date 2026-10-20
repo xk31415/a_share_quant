@@ -517,18 +517,25 @@ class BacktestEngine:
             f"前若干次调仓将因因子全为 NaN 而产出空目标（全现金）。"
             f"请把回测起点前移，或缩短因子窗口。"]
 
-    @staticmethod
-    def _load_benchmark(bars: pd.DataFrame,
+    def _load_benchmark(self, bars: pd.DataFrame,
                         benchmark: Optional[str]) -> Optional[pd.Series]:
-        """若基准指数在行情数据中，返回其价格序列用于对照。"""
+        """基准价格序列：优先从行情里找，其次读 provider 的 benchmark.csv。"""
         if not benchmark:
             return None
-        if "symbol" not in bars.columns:
+        if "symbol" in bars.columns:
+            col = "adj_close" if "adj_close" in bars.columns else "close"
+            bench = bars.loc[bars["symbol"] == benchmark,
+                             ["trade_date", col]].dropna()
+            if not bench.empty:
+                series = bench.set_index("trade_date").sort_index().iloc[:, 0]
+                series.name = benchmark
+                return series
+        # 基准指数通常不在 bars 里（没有证券基本信息、不参与选股），
+        # 由 build_dataset --benchmark 单独写成 benchmark.csv。
+        getter = getattr(self.provider, "get_benchmark", None)
+        if getter is None:
             return None
-        col = "adj_close" if "adj_close" in bars.columns else "close"
-        bench = bars.loc[bars["symbol"] == benchmark, ["trade_date", col]].dropna()
-        if bench.empty:
+        try:
+            return getter(benchmark)
+        except Exception:
             return None
-        series = bench.set_index("trade_date").sort_index().iloc[:, 0]
-        series.name = benchmark
-        return series

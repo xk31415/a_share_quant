@@ -271,6 +271,30 @@ class GmSource:
         return bars, post[["trade_date", "symbol", "adj_close"]], \
             status.drop(columns=["adj_factor"])
 
+    def index_bars(self, code: str, start: str, end: str):
+        """取基准指数日线（只用于绩效对照，不参与交易）。"""
+        from gm.api import ADJUST_NONE, history
+        ex = "SHSE" if str(code).startswith("000") else "SZSE"
+        df = history(symbol=f"{ex}.{code}", frequency="1d", start_time=start,
+                     end_time=end, fields=self.BAR_FIELDS, adjust=ADJUST_NONE,
+                     df=True)
+        if df is None or len(df) == 0:
+            return pd.DataFrame(), pd.DataFrame()
+        bars = pd.DataFrame({
+            "trade_date": _gm_date(df["eob"]),
+            "symbol": str(code),
+            "open": pd.to_numeric(df["open"], errors="coerce"),
+            "high": pd.to_numeric(df["high"], errors="coerce"),
+            "low": pd.to_numeric(df["low"], errors="coerce"),
+            "close": pd.to_numeric(df["close"], errors="coerce"),
+            "volume": pd.to_numeric(df["volume"], errors="coerce"),
+            "amount": pd.to_numeric(df["amount"], errors="coerce"),
+            "pre_close": pd.to_numeric(df["pre_close"], errors="coerce"),
+        })
+        post = bars[["trade_date", "symbol"]].copy()
+        post["adj_close"] = bars["close"]      # 指数不复权
+        return bars, post
+
     # 兼容旧接口（fetch_all 优先）
     def bars(self, symbols, start, end):
         raw, post, _ = self.fetch_all(symbols, start, end)
@@ -638,6 +662,8 @@ def main() -> None:
                     help="baostock 每片股票数（断点续传的粒度）")
     ap.add_argument("--chunk-timeout", type=int, default=1200,
                     help="单片超时秒数，超时杀掉重试（baostock 偶发卡死）")
+    ap.add_argument("--benchmark", default="",
+                    help="基准指数代码（如 000300），只写入 bars 供对照，不参与交易")
     ap.add_argument("--probe", action="store_true", help="只打印 SDK 返回的字段")
     args = ap.parse_args()
 
@@ -688,6 +714,22 @@ def main() -> None:
         raise SystemExit("状态表为空：涨跌停/停牌/ST 都无法判定，不能继续。")
 
     print("[4/4] 装配与校验")
+    # 基准指数单独落成 benchmark.csv：混进 bars 会被校验器判成"缺证券记录"的脏数据，
+    # 而且它本来就不该参与选股与交易。
+    bench_frame = None
+    if args.benchmark:
+        if not isinstance(source, GmSource):
+            print("[warn] --benchmark 目前只支持 --source gm，已跳过")
+        else:
+            code = args.benchmark.strip()
+            print(f"      拉取基准指数 {code}")
+            b_raw, _ = source.index_bars(code, args.start, args.end)
+            if len(b_raw) == 0:
+                print(f"[warn] 基准 {code} 没有行情，跳过")
+            else:
+                bench_frame = b_raw[["trade_date", "symbol", "close"]]
+                print(f"      基准 {code}: {len(b_raw)} 行")
+
     report = assemble(bars_raw, bars_post, status, instruments, calendar,
                       boards=boards,
                       limit_symbols=set(symbols) if args.limit_symbols else None)
@@ -702,6 +744,8 @@ def main() -> None:
     warnings = self_check(report, allow_missing_limits=args.allow_missing_limits,
                           min_symbols_per_day=args.min_symbols_per_day)
     write_tables(report, Path(args.out))
+    if bench_frame is not None:
+        bench_frame.to_csv(Path(args.out) / "benchmark.csv", index=False)
     if hasattr(source, "close"):
         source.close()
 

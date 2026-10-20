@@ -1,0 +1,53 @@
+"""基准超额指标（F-06）。"""
+import pandas as pd
+
+from a_share_quant.backtest import BacktestConfig, BacktestEngine
+from a_share_quant.backtest.costs import CostModel
+from a_share_quant.metrics import summarize
+from a_share_quant.portfolio import PortfolioRules
+from a_share_quant.strategies import Strategy, TargetPortfolio
+from a_share_quant.universe import UniverseBuilder, UniverseRules
+
+from helpers import make_bars, make_provider
+
+
+class Fixed(Strategy):
+    name = "fixed"
+
+    def generate_target(self, as_of, bars, universe):
+        return TargetPortfolio(as_of=pd.Timestamp(as_of).normalize(),
+                               weights={"AAA": 1.0})
+
+
+def _run(with_benchmark=True):
+    dates = pd.bdate_range("2024-01-02", periods=40)
+    syms = ["AAA", "000300"] if with_benchmark else ["AAA"]
+    bars = make_bars(dates, syms)
+    provider = make_provider(dates, syms, bars=bars)
+    engine = BacktestEngine(
+        provider=provider, strategy=Fixed(),
+        universe_builder=UniverseBuilder(provider, UniverseRules(min_list_days=0)),
+        portfolio_rules=PortfolioRules(max_positions=1, max_weight_per_stock=1.0),
+        cost_model=CostModel(slippage_rate=0.0),
+        config=BacktestConfig(str(dates[0].date()), str(dates[-1].date()), "W",
+                              benchmark="000300" if with_benchmark else None))
+    return engine.run()
+
+
+def test_benchmark_metrics_are_reported():
+    result = _run()
+    assert result.benchmark is not None
+    s = summarize(result)
+    for key in ("benchmark_symbol", "benchmark_cumulative_return",
+                "excess_cumulative_return", "tracking_error",
+                "information_ratio", "beta"):
+        assert key in s, f"缺少 {key}"
+    assert s["benchmark_symbol"] == "000300"
+    assert s["tracking_error"] >= 0
+
+
+def test_no_benchmark_means_no_keys():
+    """没有基准行情时不能凭空补 0，而是干脆不输出这些指标。"""
+    s = summarize(_run(with_benchmark=False))
+    assert "excess_cumulative_return" not in s
+    assert "tracking_error" not in s

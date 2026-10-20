@@ -348,3 +348,21 @@ def test_cap_that_truly_binds_still_rounds_down():
     """上限真的卡住时才取整：1050 清仓、上限 1000 -> 卖 1000、留 50。"""
     shares, capped, left = _sell_with_cap(1050, 1050, 10000.0)
     assert (shares, capped, left) == (1000, True, 50)
+
+
+def test_leftover_cash_is_redistributed_not_idled():
+    """整手取整剩下的现金要补回去，不能一边"现金不足"一边账上躺着钱。"""
+    sim = ExecutionSimulator(CostModel(commission_min=0.0, stamp_duty_rate=0.0,
+                                       slippage_rate=0.0), lot_size=100)
+    state = PortfolioState(5_500.0)
+    row = pd.DataFrame([
+        {"symbol": s, "open": 10.0, "close": 10.0, "volume": 1e7,
+         "limit_up": 11.0, "limit_down": 9.0, "is_suspended": False}
+        for s in ("600001", "600002", "600003")])
+    fills = sim.execute([Order("600001", "buy", 200), Order("600002", "buy", 200),
+                         Order("600003", "buy", 200)], row, state)
+    buy_fills = [f for f in fills if f.direction == "buy"]
+    assert all(f.shares > 0 for f in buy_fills), "不应出现 0 股买单"
+    spent = sum(f.shares * f.price for f in buy_fills)
+    assert spent >= 5_000, f"现金没用完：只花了 {spent:.0f}/5500"
+    assert state.cash < 500
