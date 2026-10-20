@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -43,34 +44,71 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------- 掘金
+def _gm_date(series) -> pd.Series:
+    """把带时区的 eob/trade_date 转成 naive 日期（本地时间不动）。"""
+    d = pd.to_datetime(series)
+    if getattr(d.dt, "tz", None) is not None:
+        d = d.dt.tz_localize(None)
+    return d.dt.normalize()
+
+
+def _gm_ts(series) -> pd.Series:
+    """同上但不截断到日（用于上市/退市时间戳）。"""
+    d = pd.to_datetime(series, errors="coerce")
+    if getattr(d.dt, "tz", None) is not None:
+        d = d.dt.tz_localize(None)
+    return d
+
+
+_ST_RE = r"^(\*?ST|S\*?ST)"
+
+
 class GmSource:
-    """掘金量化 gm SDK。token 走环境变量 GM_TOKEN。"""
+    """掘金量化 gm SDK。token 走环境变量 GM_TOKEN。
+
+    实测字段（2026-10）：
+      * ``history`` -> symbol/open/high/low/close/volume/amount/pre_close/bob/eob
+      * ``get_history_instruments`` 逐日给 pre_close / upper_limit / lower_limit /
+        adj_factor / is_suspended / sec_name —— 涨跌停与复权因子都不用自己算。
+      * 没有 ``is_st`` 列，但**逐日 sec_name** 带 ST 前缀，可据此还原当日 ST 状态。
+    """
 
     name = "gm"
+    STATUS_FIELDS = ("symbol,trade_date,pre_close,upper_limit,lower_limit,"
+                     "adj_factor,is_suspended,sec_name")
+    BAR_FIELDS = "symbol,eob,open,high,low,close,volume,amount,pre_close"
 
     def __init__(self) -> None:
         token = os.environ.get("GM_TOKEN", "").strip()
-        if not token:
-            raise SystemExit("缺少环境变量 GM_TOKEN（掘金 token）")
         from gm.api import set_token
-        set_token(token)
+        if token:
+            set_token(token)
+        else:
+            # gm 会把 token 缓存在用户目录（set_token 写过一次即可复用），
+            # 所以这里不硬失败；真没凭据时首个调用会报鉴权错误。
+            print("[warn] 未设置 GM_TOKEN，将尝试使用 gm 已缓存的凭据")
+        self._ex: dict[str, str] = {}
+
+    def _gm_symbol(self, sym: str) -> str:
+        ex = self._ex.get(sym, "")
+        if not ex:
+            raise SystemExit(f"缺少 {sym} 的交易所信息（先调用 instruments()）")
+        return f"{ex}.{sym}"
 
     # -- 探针 --
     def probe(self) -> None:
         from gm.api import get_trading_dates, get_instruments, get_history_instruments, history
-        cal = get_trading_dates(exchange="SHSE", start_date="2024-01-02", end_date="2024-01-05")
-        print("trading_dates:", cal[:3])
+        print("trading_dates:", get_trading_dates(exchange="SHSE",
+                                                  start_date="2024-01-02",
+                                                  end_date="2024-01-05")[:3])
         inst = get_instruments(exchanges=["SHSE"], sec_types=[1], df=True)
         print("instruments columns:", list(inst.columns), "rows:", len(inst))
-        print(inst.head(2).to_string())
         bar = history(symbol="SHSE.600000", frequency="1d", start_time="2024-01-02",
                       end_time="2024-01-05", df=True)
         print("history columns:", list(bar.columns))
-        print(bar.head(2).to_string())
         hi = get_history_instruments(symbols=["SHSE.600000"], start_date="2024-01-02",
                                      end_date="2024-01-05", df=True)
         print("history_instruments columns:", list(hi.columns))
-        print(hi.head(2).to_string())
 
     # -- 取数 --
     def calendar(self, start: str, end: str) -> list[str]:
@@ -79,79 +117,96 @@ class GmSource:
 
     def instruments(self) -> pd.DataFrame:
         from gm.api import get_instruments
-        df = get_instruments(exchanges=["SHSE", "SZSE", "BJSE"], sec_types=[1],
-                             fields="symbol,sec_name,listed_date,delisted_date", df=True)
+        kwargs = dict(exchanges=["SHSE", "SZSE", "BJSE"], sec_types=[1], df=True,
+                      fields="symbol,sec_name,listed_date,delisted_date")
+        try:
+            df = get_instruments(skip_delisted=False, **kwargs)
+        except TypeError:            # 老版本没有 skip_delisted
+            df = get_instruments(**kwargs)
         syms = [split_symbol(s) for s in df["symbol"]]
-        out = pd.DataFrame({
+        listed = _gm_ts(df["listed_date"])
+        delisted = _gm_ts(df["delisted_date"])
+        # gm 用 2038-01-01 表示"永不到期"，不是真的退市日
+        delisted = delisted.where(delisted < pd.Timestamp("2030-01-01"))
+        for s, e in syms:
+            self._ex[s] = e
+        return pd.DataFrame({
             "symbol": [s for s, _ in syms],
             "exchange": [e for _, e in syms],
-            "name": df.get("sec_name", pd.Series([""] * len(df))).astype(str),
-            "list_date": pd.to_datetime(df["listed_date"], errors="coerce"),
-            "delist_date": pd.to_datetime(df["delisted_date"], errors="coerce"),
+            "name": df["sec_name"].astype(str),
+            "list_date": listed,
+            "delist_date": delisted,
         })
-        return out
 
-    def bars(self, symbols: list[str], start: str, end: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """返回 (原始价, 后复权收盘)。"""
-        from gm.api import ADJUST_NONE, ADJUST_POST, history
-        raw_parts, post_parts = [], []
-        for i in range(0, len(symbols), 100):
+    def fetch_all(self, symbols: list[str], start: str, end: str):
+        from gm.api import ADJUST_NONE, get_history_instruments, history
+        raw_parts, stat_parts = [], []
+        total = len(symbols)
+        for i in range(0, total, 100):
             batch = symbols[i:i + 100]
-            gm_syms = [f"{split_symbol(s)[1]}.{split_symbol(s)[0]}" for s in batch]
-            for adjust, bucket in ((ADJUST_NONE, raw_parts), (ADJUST_POST, post_parts)):
-                df = history(symbol=gm_syms, frequency="1d", start_time=start, end_time=end,
-                             fields="symbol,eob,open,high,low,close,volume,amount,pre_close",
-                             adjust=adjust, adjust_end_time=end, df=True)
-                if df is None or len(df) == 0:
-                    continue
-                bucket.append(_normalize_gm_bars(df, post_only=(adjust == ADJUST_POST)))
-            print(f"  bars {min(i + 100, len(symbols))}/{len(symbols)}", flush=True)
-        raw = pd.concat(raw_parts, ignore_index=True) if raw_parts else pd.DataFrame()
-        post = pd.concat(post_parts, ignore_index=True) if post_parts else pd.DataFrame()
+            gm_syms = [self._gm_symbol(s) for s in batch]
+
+            df = history(symbol=gm_syms, frequency="1d", start_time=start,
+                         end_time=end, fields=self.BAR_FIELDS,
+                         adjust=ADJUST_NONE, df=True)
+            if df is not None and len(df):
+                raw_parts.append(df)
+
+            st = get_history_instruments(symbols=gm_syms, start_date=start,
+                                         end_date=end, fields=self.STATUS_FIELDS,
+                                         df=True)
+            if st is not None and len(st):
+                stat_parts.append(st)
+            print(f"  {min(i + 100, total)}/{total} 只", flush=True)
+
+        if not stat_parts:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        status_raw = pd.concat(stat_parts, ignore_index=True)
+        status_raw["trade_date"] = _gm_date(status_raw["trade_date"])
+        syms = [split_symbol(s) for s in status_raw["symbol"]]
+        status = pd.DataFrame({
+            "trade_date": status_raw["trade_date"],
+            "symbol": [s for s, _ in syms],
+            "is_st": status_raw["sec_name"].astype(str).str.upper()
+                      .str.replace(" ", "", regex=False).str.match(_ST_RE).fillna(False),
+            "is_suspended": status_raw["is_suspended"].fillna(0).astype(bool),
+            "limit_up": pd.to_numeric(status_raw["upper_limit"], errors="coerce"),
+            "limit_down": pd.to_numeric(status_raw["lower_limit"], errors="coerce"),
+            "adj_factor": pd.to_numeric(status_raw["adj_factor"], errors="coerce"),
+        })
+
+        if not raw_parts:
+            return pd.DataFrame(), pd.DataFrame(), status
+        bars = pd.concat(raw_parts, ignore_index=True)
+        bars["trade_date"] = _gm_date(bars["eob"])
+        bsyms = [split_symbol(s) for s in bars["symbol"]]
+        bars = pd.DataFrame({
+            "trade_date": bars["trade_date"],
+            "symbol": [s for s, _ in bsyms],
+            "open": pd.to_numeric(bars["open"], errors="coerce"),
+            "high": pd.to_numeric(bars["high"], errors="coerce"),
+            "low": pd.to_numeric(bars["low"], errors="coerce"),
+            "close": pd.to_numeric(bars["close"], errors="coerce"),
+            "volume": pd.to_numeric(bars["volume"], errors="coerce"),
+            "amount": pd.to_numeric(bars["amount"], errors="coerce"),
+            "pre_close": pd.to_numeric(bars["pre_close"], errors="coerce"),
+        })
+
+        # 后复权价 = 原始价 × 当日复权因子（gm 直接给因子，不必再拉一次复权行情）
+        post = bars[["trade_date", "symbol", "close"]].merge(
+            status[["trade_date", "symbol", "adj_factor"]],
+            on=["trade_date", "symbol"], how="left")
+        post["adj_close"] = post["close"] * post["adj_factor"]
+        return bars, post[["trade_date", "symbol", "adj_close"]], \
+            status.drop(columns=["adj_factor"])
+
+    # 兼容旧接口（fetch_all 优先）
+    def bars(self, symbols, start, end):
+        raw, post, _ = self.fetch_all(symbols, start, end)
         return raw, post
 
-    def status(self, symbols: list[str], start: str, end: str) -> pd.DataFrame:
-        from gm.api import get_history_instruments
-        parts = []
-        for i in range(0, len(symbols), 100):
-            batch = symbols[i:i + 100]
-            gm_syms = [f"{split_symbol(s)[1]}.{split_symbol(s)[0]}" for s in batch]
-            df = get_history_instruments(symbols=gm_syms, start_date=start, end_date=end,
-                                         df=True)
-            if df is not None and len(df):
-                parts.append(df)
-            print(f"  status {min(i + 100, len(symbols))}/{len(symbols)}", flush=True)
-        if not parts:
-            return pd.DataFrame()
-        df = pd.concat(parts, ignore_index=True)
-        syms = [split_symbol(s) for s in df["symbol"]]
-        out = pd.DataFrame({
-            "trade_date": pd.to_datetime(df["trade_date"]).dt.normalize(),
-            "symbol": [s for s, _ in syms],
-            "is_st": df.get("is_st", False),
-            "is_suspended": df.get("is_suspended", False),
-            "limit_up": pd.to_numeric(df.get("upper_limit"), errors="coerce"),
-            "limit_down": pd.to_numeric(df.get("lower_limit"), errors="coerce"),
-        })
-        out["is_st"] = out["is_st"].fillna(False).astype(bool)
-        out["is_suspended"] = out["is_suspended"].fillna(False).astype(bool)
-        return out
-
-
-def _normalize_gm_bars(df: pd.DataFrame, post_only: bool) -> pd.DataFrame:
-    syms = [split_symbol(s) for s in df["symbol"]]
-    date_col = "eob" if "eob" in df.columns else "trade_date"
-    out = pd.DataFrame({
-        "trade_date": pd.to_datetime(df[date_col]).dt.normalize(),
-        "symbol": [s for s, _ in syms],
-    })
-    if post_only:
-        out["adj_close"] = pd.to_numeric(df["close"], errors="coerce")
-        return out
-    for col in ("open", "high", "low", "close", "volume", "amount", "pre_close"):
-        src = col if col in df.columns else ("preclose" if col == "pre_close" else None)
-        out[col] = pd.to_numeric(df[src], errors="coerce") if src else float("nan")
-    return out
+    def status(self, symbols, start, end):
+        return self.fetch_all(symbols, start, end)[2]
 
 
 # ---------------------------------------------------------------- QMT
@@ -320,16 +375,35 @@ class BaostockSource:
             })
         return pd.DataFrame(rows)
 
+    def _query(self, code: str, fields: str, start: str, end: str, adjustflag: str):
+        """带退避重试的查询。baostock 高频调用会主动断连（WinError 10054）。"""
+        for attempt in range(4):
+            try:
+                rs = self.bs.query_history_k_data_plus(
+                    code, fields, start_date=start, end_date=end,
+                    frequency="d", adjustflag=adjustflag)
+                if str(rs.error_code) == "0":
+                    return rs
+                err = rs.error_msg
+            except Exception as exc:          # 连接被重置等
+                err = str(exc)
+            time.sleep(1.0 * (attempt + 1))
+            if attempt >= 1:                  # 连续失败则重连
+                try:
+                    self.bs.logout()
+                except Exception:
+                    pass
+                self.bs.login()
+        print(f"[warn] {code} 查询失败（已重试 4 次）：{err}")
+        return None
+
     def fetch_all(self, symbols: list[str], start: str, end: str):
         raw_parts, post_parts, status_parts = [], [], []
         total = len(symbols)
         for n, sym in enumerate(symbols, 1):
             code = f"{'sh' if self._ex.get(sym) == 'SHSE' else 'sz'}.{sym}"
-            rs = self.bs.query_history_k_data_plus(
-                code, self.RAW_FIELDS, start_date=start, end_date=end,
-                frequency="d", adjustflag="3")
-            if str(rs.error_code) != "0":
-                print(f"[warn] {code} 行情查询失败：{rs.error_msg}")
+            rs = self._query(code, self.RAW_FIELDS, start, end, "3")
+            if rs is None:
                 continue
             rows = []
             while rs.next():
@@ -354,11 +428,9 @@ class BaostockSource:
                 columns={"preclose": "pre_close"})
             raw_parts.append(priced)
 
-            rs2 = self.bs.query_history_k_data_plus(
-                code, "date,close", start_date=start, end_date=end,
-                frequency="d", adjustflag="1")
+            rs2 = self._query(code, "date,close", start, end, "1")
             rows2 = []
-            while rs2.next():
+            while rs2 is not None and rs2.next():
                 rows2.append(dict(zip(rs2.fields, rs2.get_row_data())))
             if rows2:
                 d2 = pd.DataFrame(rows2)
@@ -436,6 +508,12 @@ def main() -> None:
         bars_raw, bars_post = source.bars(symbols, args.start, args.end)
         status = source.status(symbols, args.start, args.end)
     print(f"      bars {len(bars_raw)} 行 / 后复权 {len(bars_post)} 行 / 状态 {len(status)} 行")
+    if len(bars_raw) == 0:
+        raise SystemExit(
+            "行情为空：检查代码是否正确、区间内是否有交易日、账号是否有该区间数据权限；"
+            "也可先用 --probe 确认接口返回。")
+    if len(status) == 0:
+        raise SystemExit("状态表为空：涨跌停/停牌/ST 都无法判定，不能继续。")
 
     print("[4/4] 装配与校验")
     report = assemble(bars_raw, bars_post, status, instruments, calendar,
