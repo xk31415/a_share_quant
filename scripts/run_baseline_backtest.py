@@ -60,6 +60,8 @@ def main() -> None:
     ap.add_argument("--end", default=None)
     ap.add_argument("--freq", default=None, choices=["D", "W", "M"])
     ap.add_argument("--out", default="results")
+    ap.add_argument("--benchmark", default=None,
+                    help="覆盖配置里的基准代码（如 000300 / 000905 / 000852）")
     args = ap.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -100,7 +102,7 @@ def main() -> None:
         end_date=args.end or bt.get("end_date", "2023-12-29"),
         rebalance_frequency=args.freq or bt.get("rebalance_frequency", "M"),
         initial_capital=float(bt.get("initial_capital", 1_000_000)),
-        benchmark=bt.get("benchmark"),
+        benchmark=args.benchmark or bt.get("benchmark"),
         cash_buffer=float(pf.get("cash_buffer", 0.01)))
 
     engine = BacktestEngine(
