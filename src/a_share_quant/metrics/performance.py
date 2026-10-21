@@ -231,13 +231,19 @@ def cost_contribution(result: "BacktestResult") -> dict[str, float]:
 
 # ---------- 暖机期 ----------
 def trim_warmup(eq: pd.Series, positions: Optional[pd.DataFrame] = None) -> tuple[pd.Series, int]:
-    """截掉开头"策略还不可能持仓"的那一段，返回 (截后净值, 被截天数)。
+    """截掉开头"策略还不可能持仓"的那一段，返回 (截后净值, 被截掉的净值点数)。
 
     为什么必须截：回测起点由**数据起点**决定，而 ``min_list_days=60`` 要求
     上市满 60 个交易日才入池。数据从 2015-01-05 开始时，前 60 个交易日
     股票池为空，净值恒等于初始资金。这段被计入年化的分母（约 4 个月），
     而基准在这段时间是活的——2015-01-05~2015-05-04 中证1000 涨了 **69.8%**，
     策略却记为 0 收益。不截掉，超额会被系统性压低，样本外结论直接失真。
+
+    **切点必须落在首次持仓日的"前一个净值点"**：首次持仓当天的收益是策略的
+    第一笔盈亏，要成为 ``pct_change`` 的第一个值。切在首次持仓日当天，等于把
+    建仓日的涨跌从年化/波动/夏普/超额里删掉（2026-10-21 的 R05 审查 F-16）。
+    实测三段建仓日分别涨 +2.04%/+1.30%/+1.92%，年化因此低估 0.47/0.27/1.39pp；
+    而 ``cumulative_return`` 用的是全序列、把这一天算进去了，两个指标会自相矛盾。
 
     优先用持仓表判断（第一次有持仓那天之前都是暖机）；没有持仓表时
     退回"净值首次偏离初始值"。
@@ -264,7 +270,13 @@ def trim_warmup(eq: pd.Series, positions: Optional[pd.DataFrame] = None) -> tupl
     if start is None:
         return eq, 0
     start = pd.Timestamp(start)
-    trimmed = eq[eq.index >= start]
+
+    # 前移一个净值点：它是首个收益的基准。两条路径都适用——持仓表路径取
+    # 首次持仓日的前一交易日；平盘路径取最后一段平盘里的最后一个点。
+    prior = eq.index[eq.index < start]
+    base = prior[-1] if len(prior) else start
+
+    trimmed = eq[eq.index >= base]
     if len(trimmed) < 2:              # 全部在暖机内，不截（避免空序列）
         return eq, 0
     return trimmed, int(len(eq) - len(trimmed))
@@ -325,13 +337,30 @@ def summarize(result: "BacktestResult") -> dict[str, Any]:
     # 因为它不是策略选择，而是数据起点 + min_list_days 的副产物。
     eq, warmup_days = trim_warmup(eq_full, positions if has_positions else None)
     ret = eq.pct_change()
+
+    # 首次持仓日：**不能取 eq.index[0]**——那是首个收益的基准点（首次持仓日的
+    # 前一交易日），报出去会让人以为建仓早了一天。
+    active_start = None
+    if has_positions:
+        _d = pd.to_datetime(positions["trade_date"])
+        if "shares" in positions.columns:
+            _d = _d[positions["shares"].fillna(0) > 0]
+        if len(_d):
+            active_start = pd.Timestamp(_d.min())
+    if active_start is None and len(eq):
+        active_start = eq.index[0]
+
     summary: dict[str, Any] = {
         "start": str(eq_full.index[0].date()) if len(eq_full) else None,
         "end": str(eq_full.index[-1].date()) if len(eq_full) else None,
         "trading_days": int(len(eq_full)),
         "effective_days": int(len(eq)),
         "warmup_days": int(warmup_days),
-        "first_active_date": str(eq.index[0].date()) if len(eq) else None,
+        "first_active_date": str(active_start.date()) if active_start is not None else None,
+        # 建仓前的空仓交易日数，在**全序列**上算（在截断后的序列上算恒为 0）
+        "n_cash_only_days": (
+            int((eq_full.index < active_start).sum())
+            if active_start is not None else 0),
         "final_equity": float(eq_full.iloc[-1]) if len(eq_full) else float("nan"),
         "cumulative_return": cumulative_return(eq_full),
         "annualized_return": annualized_return(eq),
@@ -358,20 +387,11 @@ def summarize(result: "BacktestResult") -> dict[str, Any]:
         summary["max_positions_held"] = int(per_day_count.max())
         summary["avg_positions_held"] = float(per_day_count.mean())
         summary["max_single_weight"] = float(positions["weight"].max())
-        # --- 剔除建仓前空仓期的口径 ---
-        # 股票池暖机（如 min_list_days=60）会让前若干十个交易日全现金，
-        # 这段直线的零收益会稀释年化收益、压低波动与夏普。全区间口径保留
-        # （便于与历史实验对比），同时给出有效区间口径以便如实汇报。
-        first_inv = pd.Timestamp(pd.to_datetime(positions["trade_date"]).min())
-        active_eq = eq.loc[first_inv:]
-        if len(active_eq) >= 2:
-            active_ret = active_eq.pct_change()
-            summary["first_invested_date"] = str(first_inv.date())
-            summary["n_cash_only_days"] = int((eq.index < first_inv).sum())
-            summary["cumulative_return_active"] = cumulative_return(active_eq)
-            summary["annualized_return_active"] = annualized_return(active_eq)
-            summary["annualized_volatility_active"] = annualized_volatility(active_ret)
-            summary["sharpe_ratio_active"] = sharpe_ratio(active_ret)
+        # 注：这里曾经另给一套 `*_active` 字段（"剔除建仓前空仓期"口径）。
+        # 2026-10-21 的 R05 审查 F-18 证实它算在**已经截断过**的序列上，
+        # 所以激活区间口径与主口径逐位相同、n_cash_only_days 恒为 0，
+        # 只剩"两套口径"这个混乱来源。已删除，需要时用 warmup_days /
+        # n_cash_only_days 判断截了多少。
     else:
         summary["max_positions_held"] = 0
         summary["avg_positions_held"] = 0.0

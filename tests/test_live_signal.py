@@ -15,6 +15,7 @@ from a_share_quant.live.signal import (
     Sample,
     build_plan,
     diff_orders,
+    quote_symbols,
     rank_universe,
     size_positions,
 )
@@ -206,3 +207,41 @@ def test_plan_never_exceeds_budget():
                       Sample(ranked=["A", "B", "C", "D"], n=4), ["A", "B", "C", "D"],
                       capital=1_000_000, position=0.40, cash_buffer=0.01)
     assert plan.target["target_value"].sum() <= plan.investable + 1e-6
+
+
+def test_frozen_holding_is_not_warned_as_clearing():
+    """停牌持仓只能报"保持原股数"，不能同时报"目标为 0（清仓）"（R05 F-20）。
+
+    两条提示相反：一条说清仓、一条说冻结，而订单里根本没有它的卖单。
+    照"清仓"那句手工下单，会把一只仍在冻结样本里的股票卖掉。
+    """
+    prices = {"A": 10.0, "B": 10.0, "C": 10.0}
+    plan = build_plan("2026-10-20", prices, _sample(), ["A", "B", "C"],
+                      current_holdings={"A": 10_000}, capital=1_000_000,
+                      position=1.0, cash_buffer=0.0,
+                      tradeable={"B", "C"})       # A 停牌
+    clearing = [w for w in plan.warnings if "清仓" in w]
+    frozen = [w for w in plan.warnings if "保持原股数" in w]
+    assert frozen, plan.warnings
+    assert not clearing, f"停牌持仓不该出现清仓提示：{clearing}"
+
+
+def test_really_stale_holding_still_warned_as_clearing():
+    """真·剔除样本且可交易的持仓，仍然要报清仓，别把 F-20 修过头。"""
+    prices = {"A": 10.0, "B": 10.0, "C": 10.0, "Z": 20.0}
+    plan = build_plan("2026-10-20", prices, _sample(), ["A", "B", "C"],
+                      current_holdings={"Z": 3000}, capital=1_000_000,
+                      position=1.0, cash_buffer=0.0,
+                      tradeable={"A", "B", "C", "Z"})
+    clearing = [w for w in plan.warnings if "清仓" in w]
+    assert clearing and "Z" in clearing[0], plan.warnings
+
+
+def test_quote_symbols_covers_full_ranked():
+    """取价必须覆盖完整 ranked，否则补位越过窗口就抛错、当天不出单（R05 F-21）。"""
+    ranked = [f"{i:06d}" for i in range(400)]
+    sample = Sample(created="x", data_dir="d", as_of="2026-10-20", n=100,
+                    seed=0, ranked=ranked)
+    got = quote_symbols(sample, {"A": 100})
+    assert len(got) == 401
+    assert ranked[-1] in got and "A" in got

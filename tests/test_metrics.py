@@ -226,8 +226,11 @@ def test_trim_warmup_drops_flat_prefix():
     idx = pd.bdate_range("2024-01-01", periods=10)
     eq = pd.Series([1e6] * 4 + [1e6 * (1 + 0.01 * i) for i in range(1, 7)], index=idx)
     trimmed, n = trim_warmup(eq)
-    assert n == 4
-    assert len(trimmed) == 6
+    # 平盘 4 个点，但最后那个平盘点要留作首个收益的基准，所以只截掉 3 个点
+    assert n == 3
+    assert len(trimmed) == 7
+    # 关键：第 5 个点（+1%）的收益必须被算进来
+    assert trimmed.pct_change().iloc[1] == pytest.approx(0.01, rel=1e-9)
 
 
 def test_trim_warmup_prefers_positions():
@@ -236,8 +239,10 @@ def test_trim_warmup_prefers_positions():
     eq = pd.Series([1e6] * 5 + [1e6 * (1 + 0.02) ** i for i in range(5)], index=idx)
     pos = pd.DataFrame({"trade_date": idx[3:], "shares": 100})
     trimmed, n = trim_warmup(eq, pos)
-    assert n == 3
-    assert trimmed.index[0] == idx[3]
+    # 切到首次持仓日的前一个净值点：那一天是首个收益的基准
+    assert n == 2
+    assert trimmed.index[0] == idx[2]
+    assert trimmed.index[1] == idx[3]
 
 
 def test_trim_warmup_no_flat_prefix_is_noop():
@@ -254,3 +259,60 @@ def test_trim_warmup_keeps_all_when_never_moves():
     eq = pd.Series([1e6] * 5, index=idx)
     trimmed, n = trim_warmup(eq)
     assert n == 0 and len(trimmed) == 5
+
+
+def test_trim_warmup_keeps_first_position_day_return():
+    """首次持仓日当天的收益必须进年化（R05 F-16）。
+
+    引擎的净值序列在首次持仓日之前全是初始资金；切在首次持仓日当天会让
+    当天从开盘到收盘的盈亏凭空消失，而 cumulative_return 用的是全序列、
+    把它算了进去——两个指标自相矛盾。实测三段建仓日 +2.04%/+1.30%/+1.92%，
+    年化因此低估 0.47/0.27/1.39pp。
+    """
+    idx = pd.bdate_range("2024-01-01", periods=5)
+    eq = pd.Series([1e6, 1e6, 1e6 * 1.02, 1e6 * 1.02, 1e6 * 1.02], index=idx)
+    pos = pd.DataFrame({"trade_date": idx[2:], "shares": 100})
+    trimmed, n = trim_warmup(eq, pos)
+    assert n == 1
+    assert trimmed.index[0] == idx[1]          # 基准点 = 首次持仓日前一交易日
+    assert trimmed.pct_change().iloc[1] == pytest.approx(0.02, rel=1e-9)
+
+
+class _FakeResultWithPositions:
+    def __init__(self, equity, positions):
+        self.equity_curve = equity
+        self.daily_returns = equity.pct_change().fillna(0.0)
+        self.costs = pd.Series([0.0], index=[equity.index[0]])
+        self.turnover = pd.Series([0.0], index=[equity.index[0]])
+        self.positions = positions
+        self.trades = pd.DataFrame()
+        self.benchmark = None
+
+
+def test_summarize_first_active_date_is_position_day_not_base_point():
+    """first_active_date 必须报首次持仓日，不能报被保留的基准点（R05 F-16）。"""
+    from a_share_quant.metrics import summarize
+
+    idx = pd.bdate_range("2024-01-01", periods=10)
+    eq = pd.Series([1e6] * 3 + [1e6 * 1.02] * 7, index=idx)
+    pos = pd.DataFrame({"trade_date": idx[3:], "symbol": "000001",
+                        "shares": 100, "weight": 1.0})
+    s = summarize(_FakeResultWithPositions(eq, pos))
+    assert s["first_active_date"] == str(idx[3].date())
+    assert s["n_cash_only_days"] == 3
+    assert s["warmup_days"] == 2               # 截掉的净值点数（基准点不算截）
+    assert s["effective_days"] == 8
+    assert s["annualized_return"] > 0.0        # 建仓日 +2% 必须进来
+    assert s["cumulative_return"] == pytest.approx(0.02, rel=1e-9)
+
+
+def test_summarize_no_duplicate_active_fields():
+    """`*_active` 曾在截断后的序列上再算一遍，与主口径逐位相同（R05 F-18）。"""
+    from a_share_quant.metrics import summarize
+
+    idx = pd.bdate_range("2024-01-01", periods=10)
+    eq = pd.Series([1e6] * 3 + [1e6 * (1.01 ** i) for i in range(1, 8)], index=idx)
+    pos = pd.DataFrame({"trade_date": idx[3:], "symbol": "000001",
+                        "shares": 100, "weight": 1.0})
+    s = summarize(_FakeResultWithPositions(eq, pos))
+    assert not [k for k in s if k.endswith("_active")]

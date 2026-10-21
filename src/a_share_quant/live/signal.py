@@ -255,6 +255,22 @@ class LivePlan:
         }
 
 
+def quote_symbols(sample: Sample, holdings: Optional[Mapping[str, int]] = None) -> set[str]:
+    """需要取价的全部标的：**完整 ranked** + 当前持仓。
+
+    不能只取前 ``max(n*3, 300)`` 名。``Sample.active`` 会沿完整 ranked 往后补位
+    （前段集中停牌/ST/退市时），补到取价窗口之外的名字没有价格，
+    ``size_positions`` 会抛 ``ValueError`` 让整张计划作废——表现为"今天不出单"，
+    而且失败点在一个看起来无关的函数里（R05 F-21）。
+
+    取价只是从已加载的 bars 里查一次，多覆盖几百个标的不增加行情请求。
+    """
+    out = {str(s) for s in sample.ranked}
+    if holdings:
+        out |= {str(s) for s in holdings}
+    return out
+
+
 def build_plan(as_of, prices: Mapping[str, float], sample: Sample,
                investable_universe: Iterable[str],
                current_holdings: Optional[Mapping[str, int]] = None,
@@ -322,17 +338,21 @@ def build_plan(as_of, prices: Mapping[str, float], sample: Sample,
             f"可投资样本只有 {len(picked)} 只，少于目标 {want} 只——"
             f"样本池需要扩容（--pool 调大）")
 
-    stale = [s for s in holdings if s not in set(picked)]
-    if stale:
-        warnings.append(f"{len(stale)} 只持仓不在当前样本内，目标为 0（清仓）：{stale[:8]}")
-
-    # 冻结：不在 picked 里又不能交易的持仓，保持原股数，占用仓位不下单
+    # 冻结：不在 picked 里又不能交易的持仓，保持原股数，占用仓位不下单。
+    # **必须先算冻结再算 stale**：停牌持仓既不进 picked 又不可交易，若先算 stale
+    # 会同时输出"目标为 0（清仓）"和"保持原股数"两句相反的话，而订单里并没有
+    # 它的卖单——照第一句手工下单会把一只仍在冻结样本里的股票清掉（R05 F-20）。
     frozen = {s: h for s, h in holdings.items() if s not in can_trade}
     frozen_value = sum(h * float(prices[s]) for s, h in frozen.items())
     if frozen:
         warnings.append(
             f"{len(frozen)} 只持仓当日不可交易（停牌/跌停/退市整理），"
             f"保持原股数、占用仓位 {frozen_value:,.0f} 元：{list(frozen)[:8]}")
+
+    stale = [s for s in holdings if s not in set(picked) and s not in frozen]
+    if stale:
+        warnings.append(
+            f"{len(stale)} 只持仓不在当前样本内且可交易，目标为 0（清仓）：{stale[:8]}")
 
     # 预算：总仓位目标减去冻结部分，再留缓冲
     budget = max(equity * float(position) - frozen_value, 0.0) * (1.0 - float(cash_buffer))

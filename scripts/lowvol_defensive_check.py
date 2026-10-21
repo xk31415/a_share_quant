@@ -17,26 +17,44 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 ROOT = Path(r"D:/a_share_quant")
+sys.path.insert(0, str(ROOT / "src"))
+
+from a_share_quant.metrics import trim_warmup  # noqa: E402
 TRADING_DAYS = 252
 RF_ANNUAL = 0.02          # 现金年化，保守取 2%（货币基金/逆回购）
 
+# 每次口径变更（如 2026-10-21 的暖机切点修正）后要同步换成本批 EXP：
+# 2020-2024 / 2015-2019 / 2025-2026 各一对（等权, 低波·行业中性）
 PERIODS = [
-    ("2020-2024", "EXP-20261020-224836-9331", "EXP-20261021-053810-1173"),
-    ("2015-2019", "EXP-20261021-062018-7822", "EXP-20261021-062156-7057"),
-    ("2025-2026", "EXP-20261021-065425-7744", "EXP-20261021-065451-8706"),
+    ("2020-2024", "EXP-20261021-134425-3784", "EXP-20261021-135258-4036"),
+    ("2015-2019", "EXP-20261021-134607-3123", "EXP-20261021-134840-6325"),
+    ("2025-2026", "EXP-20261021-134908-3218", "EXP-20261021-135345-0943"),
 ]
 
 
 def load_eq(exp: str) -> pd.Series:
-    p = ROOT / "results" / exp / "equity_curve.csv"
-    df = pd.read_csv(p, parse_dates=["trade_date"]).set_index("trade_date")
-    return df["equity"].astype(float).sort_index()
+    """读净值曲线，**并截掉建仓前的空仓期**。
+
+    不截的话这张表会用"全区间"口径：2020-2024 的等权是 9.15%，
+    而主口径（`metrics.summarize`）是 9.81%——同一策略两个数，跨节对比
+    就会减出假的差额（R05 F-23）。这里直接调主口径的 `trim_warmup`，
+    保证这张表和 `live_readiness.md` 第 3 节用同一条规则。
+    """
+    d = ROOT / "results" / exp
+    df = pd.read_csv(d / "equity_curve.csv", parse_dates=["trade_date"]).set_index("trade_date")
+    eq = df["equity"].astype(float).sort_index()
+    pos_path = d / "positions.csv"
+    pos = (pd.read_csv(pos_path, dtype={"symbol": str}, parse_dates=["trade_date"])
+           if pos_path.exists() else None)
+    eq, _ = trim_warmup(eq, pos)
+    return eq
 
 
 def max_dd(eq: pd.Series) -> float:

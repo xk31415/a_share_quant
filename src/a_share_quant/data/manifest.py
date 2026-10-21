@@ -158,7 +158,10 @@ def _column_digests_sorted(df: pd.DataFrame) -> dict[str, str]:
 def load_table(path: Path) -> pd.DataFrame:
     if path.suffix == ".parquet":
         return pd.read_parquet(path)
-    return pd.read_csv(path)
+    # symbol 必须按字符串读：`000852` 读成整数后是 852，与文件里真的写 `852`
+    # 得到同一个指纹，一份丢掉前导零的 benchmark.csv 就能通过校验（R05 F-22）。
+    # dtype 里的键在本表没有该列时会被 pandas 忽略，所以 calendar.csv 也走这条。
+    return pd.read_csv(path, dtype={"symbol": str})
 
 
 def describe_table(path: Path) -> dict[str, Any]:

@@ -36,6 +36,7 @@ import yaml
 
 from a_share_quant.data.loader import LocalFileProvider
 from a_share_quant.live.signal import (
+    quote_symbols,
     DEFAULT_LOT_SIZE,
     DEFAULT_MIN_TRADE_VALUE,
     Sample,
@@ -223,7 +224,8 @@ def main() -> None:
     bars = provider.get_bars(start, as_of)
     bars["trade_date"] = pd.to_datetime(bars["trade_date"])
     holdings = _load_holdings(args.holdings)
-    need = set(holdings) | set(sample.ranked[: max(n * 3, 300)])
+    # 覆盖完整 ranked：补位可能越过 3n/300 名，缺价会让整张计划抛错（R05 F-21）
+    need = quote_symbols(sample, holdings)
     prices = _latest_prices(bars, need, as_of)
 
     # ---- 熔断 2：非季度调仓月（空仓建仓不受限制，否则永远建不了仓）----

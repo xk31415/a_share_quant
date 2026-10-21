@@ -19,6 +19,7 @@ from a_share_quant.data.manifest import (
     describe_table,
     frame_digest,
     load_manifest,
+    load_table,
     update_manifest,
     verify_dataset,
 )
@@ -183,3 +184,18 @@ def test_describe_table_has_per_column_digests(tmp_path):
     _write_dataset(d, _bars())
     meta = describe_table(d / "bars.parquet")
     assert set(meta["column_sha256"]) == set(_bars().columns)
+
+
+def test_load_table_keeps_leading_zeros(tmp_path):
+    """CSV 里的 000852 不能读成 852（R05 F-22）。
+
+    读成整数后，一份丢掉前导零的 benchmark.csv 与正确文件指纹相同，
+    校验会放行——而下游按字符串 "000852" 对齐基准会对不上，超额又可以指错序列。
+    """
+    a, b = tmp_path / "a.csv", tmp_path / "b.csv"
+    pd.DataFrame({"trade_date": ["2024-01-02"], "symbol": ["000852"],
+                  "close": [1.0]}).to_csv(a, index=False)
+    pd.DataFrame({"trade_date": ["2024-01-02"], "symbol": ["852"],
+                  "close": [1.0]}).to_csv(b, index=False)
+    assert load_table(a)["symbol"].iloc[0] == "000852"
+    assert frame_digest(load_table(a)) != frame_digest(load_table(b))
