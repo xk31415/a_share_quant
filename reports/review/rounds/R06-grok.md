@@ -5,7 +5,7 @@
 - reviewed_commit: `baae4a8b2eabb55559461759d4870892cba7da89`
 - 当前 HEAD：`600f571`（`git log --oneline -3`：`600f571` 任务书补记、`44b05cd` 任务书、`baae4a8` 本地复验）。`baae4a8..600f571` 只有任务书、台账和记忆文件。下面引用的 `src/`、`scripts/`、`reports/strategy_log.md` 与 `baae4a8` 无差异，行在当前 HEAD 仍在。
 - pytest：`python3 -m pytest --override-ini="addopts=" -q` → **241 passed in 3.09s**（退出码 0）。解释器是本环境的 Linux CPython 3.12，不是任务书里的 Windows 路径。包版本：pandas 3.0.6、numpy 2.5.4、pyarrow 26.0.0、pytest 9.1.1。测试不读数据目录。
-- **P1 是否复现成功：否。P1：待本机结果。** `annualized_return`：未跑，无数字。本机没有 `data/processed_2025_2026`，没有用合成数据顶替，也没有填期望表里的数。
+- **P1 复现成功。** 本机跑出的 `annualized_return = 0.05284728655420845`（与期望值逐位一致，不只前 6 位）；`excess_annualized_return = -0.04941406078251481`。
 
 ## 总评
 
@@ -81,17 +81,41 @@
 
 | 事项 | 缺什么 | 为什么现在不能判 |
 |---|---|---|
-| P1 2025-2026 回测是否复现出 `annualized_return = 0.05284728655420845` | 本机没有 `data/processed_2025_2026` | 任务书要求只跑这一段真实数据。没有跑，也不用合成净值顶替 |
-| §1 的 9.15% / Sharpe 0.489 / 回撤 -36.02% 是否与某份 `metrics.json` 逐位相同 | 本机没有 `results/` | 文档把它们放在同一次定版表里（见 P3）。不能再对原始指标文件复算 |
+| §1 的 9.15% / Sharpe 0.489 / 回撤 -36.02% 是否与某份 `metrics.json` 逐位相同 | 本机没有 2020-2024 的 `results/` | 文档把它们放在同一次定版表里（见 P3）。P1 只带来 2025-2026 的 `metrics.json`，不能对这段旧口径复算 |
 | §10.3 的 9.74% / Sharpe 0.679 / 回撤 -22.47% 是否同一次引擎产出 | 同上 | 表上是同一行。没有指标文件，不能独立复算。§12 第 9 条已写明 Sharpe 和归因差额没有按新口径重算 |
 | §2 动量、§3 反转、§8 低波非中性、§9 容量阶梯在新口径下的数字 | 未重跑，本机也没有对应实验目录 | 这些行没有「新」数。对照表填不出，重跑才有 |
 | `update_dataset` 的数据源在跨月窗口是否返回「无行情的停牌状态行」 | 不能跑 `update_dataset.py`（写盘、打数据源） | 合并函数本身不按月份丢行。源若在新月份漏发停牌状态，股票池会不会把停牌股放进来，要看源的返回，不是 `upsert` 能证明的 |
 
 ## P1–P4
 
-### P1 没跑
+### P1 审了 + 复现成功
 
-P1：待本机结果。没有 `annualized_return`。
+本机报告来自用户 Windows 本机（`D:\a_share_quant`）。本机 HEAD 为 `600f571f1a2f364df8ae2ff13c9caf2feaa3c28b`。审查环境执行 `git diff --stat baae4a8 600f571`：4 个文件、+249 行，分别是 `.workbuddy/memory/2026-10-21.md`、`.workbuddy/memory/MEMORY.md`、`reports/review/LEDGER.md`、`reports/review/R06-brief.md`。中间两个提交是 `44b05cd`、`600f571`。`src/`、`tests/`、`config/`、`scripts/` 与 `baae4a8` 无差异。`600f571` 在 `origin/main` 上存在。
+
+命令原文未加参数：
+
+```
+scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 --start 2025-01-01 --end 2026-10-20 --benchmark 000852
+```
+
+耗时 30.6 秒。新实验 `EXP-20261021-200012-4670`。版本：Python 3.13.14 / pandas 3.0.5 / pyarrow 25.0.1 / numpy 2.5.3。本机 `python -m pytest -q` 退出码 0，241 个进度点，输出里没有 `241 passed` 汇总行。
+
+审查 VM 记录的包是 Python 3.12 / pandas 3.0.6 / pyarrow 26.0.0 / numpy 2.5.4。本机这次回测的版本与之不同，跑出的键与任务书期望值、与参照实验 `EXP-20261021-134908-3218` 逐位一致。这是同一台机器上的第二次环境记录，可以作为「这串数字不随这次记录到的包版本分叉」的旁证。范围停在这一台机器。
+
+| 键 | 实测（EXP-20261021-200012-4670） | 期望 |
+|---|---|---|
+| `annualized_return` | `0.05284728655420845` | `0.05284728655420845` |
+| `excess_annualized_return` | `-0.04941406078251481` | `-0.04941406078251481` |
+| `information_ratio` | `-0.3685235795332981` | `-0.3685235795332981` |
+| `benchmark_annualized_return` | `0.09560974920749588` | `0.09560974920749588` |
+| `warmup_days` | `77` | `77` |
+| `effective_days` | `356` | `356` |
+| `trading_days` | `433` | 任务书期望表未列；与参照实验同为 `433` |
+| `first_active_date` | `2025-05-06` | `2025-05-06` |
+| `n_cash_only_days` | `78` | `78` |
+| `cumulative_return` | `0.07524340724190304` | 任务书期望表未列；与参照实验同为 `0.07524340724190304` |
+
+`77 + 356 = 433`。metrics 里 `start` 为 `2025-01-02`（命令写 `2025-01-01`，落到区间内首个交易日），`end` 为 `2026-10-20`。
 
 ### P2 审了
 
@@ -101,7 +125,7 @@ P1：待本机结果。没有 `annualized_return`。
 2. 首日就有持仓，且第 2 个净值点已经离开初始值：两条路径都 `warmup=0`，`first_active_date` 等于第 1 个交易日（2024-01-02）。首日有持仓但净值继续平着：持仓路径不截，平盘路径会截。任务书这一问的前提是「不存在平盘前缀」，该前提下成立。
 3. 开头平 10 个点、上涨、中间再平 30 个点、再上涨。中间那 30 天无论停在涨完的水平上，还是回到初始值，都留在截后序列里。两条路径切点相同，只去掉开头 9 个点（最后那个平盘点留作基准）。
 4. 同一条净值、两种输入，切点不总是同一个。净值在首次持仓日已经离开初始值时，切点相同（默认成本的引擎对照是这种）。首次持仓日净值仍等于初始值时，切点不同（F-28）。`test_trim_warmup_prefers_positions` 锁的是「有持仓表就以持仓日为准」，所以有持仓时以持仓路径为准是现有测试的预期；分叉出在不传持仓的那条退路上。
-5. 恒等式，不是三段样本凑出来的。`summarize` 里 `trading_days = len(eq_full)`，`effective_days = len(eq)`，`warmup_days` 是 `trim_warmup` 的第二个返回值。该函数要么 `return eq, 0`，要么 `return trimmed, len(eq) - len(trimmed)`，而 `trimmed` 是 `eq[eq.index >= base]` 的布尔切片。两种返回都有 `warmup_days + effective_days = trading_days`。空序列是 0+0=0。另外试过单点、重复索引、非单调索引、股数全 0、持仓日在净值区间之外、30 组不同长度的前缀，全部成立，没有反例。切点选错时这个等式仍然成立，所以三段 78+1134=1212、77+1142=1219、77+356=433 只说明计数器自洽，不能证明切点对。持仓路径上，索引单调且首次持仓日在索引内时，`n_cash_only_days = warmup_days + 1`（基准日仍算空仓、但不算被截掉的点）。任务书里 2025 段的 78 与 77 符合这个关系；本机没有 metrics 文件，没有再对那一段复算。
+5. 恒等式，不是三段样本凑出来的。`summarize` 里 `trading_days = len(eq_full)`，`effective_days = len(eq)`，`warmup_days` 是 `trim_warmup` 的第二个返回值。该函数要么 `return eq, 0`，要么 `return trimmed, len(eq) - len(trimmed)`，而 `trimmed` 是 `eq[eq.index >= base]` 的布尔切片。两种返回都有 `warmup_days + effective_days = trading_days`。空序列是 0+0=0。另外试过单点、重复索引、非单调索引、股数全 0、持仓日在净值区间之外、30 组不同长度的前缀，全部成立，没有反例。切点选错时这个等式仍然成立，所以三段 78+1134=1212、77+1142=1219、77+356=433 只说明计数器自洽，不能证明切点对。持仓路径上，索引单调且首次持仓日在索引内时，`n_cash_only_days = warmup_days + 1`（基准日仍算空仓、但不算被截掉的点）。任务书里 2025 段的 78 与 77 符合这个关系。P1 的 `metrics.json` 现已到：`warmup_days` 77、`effective_days` 356、`trading_days` 433、`n_cash_only_days` 78，等式与 `n_cash_only_days = warmup_days + 1` 都对上。
 
 ### P3 审了
 
@@ -139,7 +163,7 @@ P1：待本机结果。没有 `annualized_return`。
 
 | 项 | 状态 | 一句 |
 |---|---|---|
-| P1 | 没跑 | P1：待本机结果，没有 `annualized_return` |
+| P1 | 审了 + 复现成功 | `annualized_return` `0.05284728655420845`，与期望逐位一致 |
 | P2 | 审了 | 三问成立；两路径在成交日净值不动时分叉；天数相加是恒等式 |
 | P3 | 审了 | `9.74%` 漏了 §10；9.15/0.489/-36.02 在旧文档里是同一次；对照表不够 |
 | P4 | 审了 | 目标持仓再跑是零订单；停牌占仓；卖出整手；跨月不漏不重；退出码 2 不含部分成交；重复入账会改账 |
