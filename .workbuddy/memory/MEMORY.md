@@ -28,6 +28,8 @@
   写进 README 限制清单，不阻塞修复。
 - 只对齐事实判定，严重度由用户拍板，不争论定级。
 - 达成一致之前**不改代码**。
+- **轮次文件就是交付物**：Grok push 后我直接读 `rounds/R<nn>-grok.md`（全小写连字符），
+  不要求用户贴内容；但 `git pull` 需 `dangerouslyDisableSandbox`（沙箱读不到 ~/.ssh）。
 
 ## 领域口径（踩过的坑）
 
