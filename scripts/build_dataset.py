@@ -43,6 +43,13 @@ from a_share_quant.data.builders import (  # noqa: E402
     self_check,
     split_symbol,
 )
+from a_share_quant.data.manifest import (  # noqa: E402
+    DEFAULT_MANIFEST_PATH,
+    describe_dataset,
+    load_manifest,
+    update_manifest,
+    verify_dataset,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -685,6 +692,13 @@ def main() -> None:
     ap.add_argument("--benchmark", default="",
                     help="基准指数代码（如 000300），只写入 bars 供对照，不参与交易")
     ap.add_argument("--probe", action="store_true", help="只打印 SDK 返回的字段")
+    ap.add_argument("--write-manifest", nargs="?", const=DEFAULT_MANIFEST_PATH,
+                    default=None, metavar="PATH",
+                    help="构建完把这份数据的指纹写进 manifest（默认 data/MANIFEST.json）；"
+                         "数据本体不入库，靠它让别人验证重建结果是否一致")
+    ap.add_argument("--verify-manifest", nargs="?", const=DEFAULT_MANIFEST_PATH,
+                    default=None, metavar="PATH",
+                    help="构建完与 manifest 里同名条目比对内容指纹，不一致时退出码 1")
     args = ap.parse_args()
 
     source = {"baostock": BaostockSource, "gm": GmSource, "qmt": QmtSource}[args.source]()
@@ -777,6 +791,33 @@ def main() -> None:
         bench_frame.to_csv(Path(args.out) / "benchmark.csv", index=False)
     if hasattr(source, "close"):
         source.close()
+
+    # 数据本体不进仓库（366 MB、超 GitHub 单文件 100 MB 限制、且授权跟账号走），
+    # 进仓库的是内容指纹：别人重建一份后能验证"是不是同一份"。
+    # 先校验再写，否则自己刚写进去的指纹必然通过，等于没校验。
+    if args.verify_manifest:
+        key = Path(args.out).name
+        problems = verify_dataset(
+            Path(args.out), load_manifest(Path(args.verify_manifest))
+            .get("datasets", {}).get(key, {}))
+        fatal = [p for p in problems if not p.startswith("[info]")]
+        for p in problems:
+            print(f"[{'fail' if not p.startswith('[info]') else 'info'}] {p}")
+        if fatal:
+            print(f"[fail] 重建结果与 manifest 里的 {key} 不一致，回测数字不可直接对比")
+            raise SystemExit(1)
+        print(f"      内容指纹与 manifest 的 {key} 一致")
+    if args.write_manifest:
+        entry = describe_dataset(
+            Path(args.out),
+            label=f"{args.source} {args.start} ~ {args.end}",
+            build_command="python " + " ".join(
+                [Path(sys.argv[0]).name] + sys.argv[1:]),
+            note=None,
+        )
+        update_manifest(Path(args.write_manifest), Path(args.out).name, entry)
+        print(f"      指纹已写入 {args.write_manifest}"
+              f"（{entry['dataset_sha256'][:12]}，{entry['summary']['bars_rows']:,} 行）")
 
     for w in warnings:
         print(f"[warn] {w}")

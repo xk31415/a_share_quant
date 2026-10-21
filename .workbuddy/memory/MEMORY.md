@@ -97,3 +97,17 @@
 - 沙箱默认拒绝读 `~/.ssh`，`git push` / `ls-remote` 需 `dangerouslyDisableSandbox`；
   被拒后不要重试等价命令，直接让用户自己推。
 - `data/interim/`、`results/`、`experiments/` 在 .gitignore 内，合成数据不入库。
+
+## 数据入库策略（2026-10-21 定）
+
+- **行情数据不入库**，三个理由（前两个是工程，第三个不是）：三份共 366 MB、
+  `bars.parquet` 单文件 166 MB 超 GitHub 100 MB 硬限；`update_dataset` 每次
+  整体重写 parquet，进历史删不掉，8 周 paper trading 能到 GB 级；行情授权
+  跟账号走，不能公开转分发。测试不读 `data/processed`，没数据照样 234 passed。
+- 入库的是 `data/MANIFEST.json`（17 KB **内容指纹**）：行按主键排序、浮点按
+  float64 原位模式、NaN 先抹平，所以换 pyarrow/pandas 版本仍判一致；真实差异
+  （少一天/改一位小数/换列类型）会报出来并**指名差异列**。
+- 工具：`scripts/data_manifest.py write|verify|show`（verify 不一致退出码 1）；
+  `build_dataset.py --write-manifest/--verify-manifest`；`tests/test_data_manifest.py`。
+- **指纹不跟着每日更新自动改写**——它的用途是钉住某一版数据；`update_dataset`
+  跑完只打印提示，不自动 write。

@@ -1,0 +1,381 @@
+{
+  "datasets": {
+    "processed": {
+      "build_command": "python scripts/build_dataset.py --source gm --start 2020-01-01 --end 2024-12-31 --benchmark 000852 --out data/processed",
+      "data_dir": "data/processed",
+      "dataset_sha256": "b76b5a7653bfa2c1109293a6226127623a1cedadf6e8275966976b4205cf5b11",
+      "files": {
+        "bars.parquet": {
+          "column_sha256": {
+            "adj_close": "ebcb285091716f51fb7d7d222107d2567bb20c2b7eb9835eb37f538e81192a78",
+            "amount": "89b538d1c67af2253aef7e605267444bfebdb11620a04251b28c23b46f7ff9c7",
+            "close": "23e3bd53449497856963616c8878f749a4796a6a6131ec9b9da910761ee3e5ad",
+            "high": "f379ecaa09f38578832f5a0318f7fc161043207b4c49ebddfd7d32014058f5d7",
+            "is_st": "8a6007f0e6b6da52d40eb4858fee99e872aa8195d442be0f70f44abea606ceba",
+            "is_suspended": "cce0935ecae523714beb2d9bb4f2a7db2de6366249baacf19c9f94edd6937d99",
+            "limit_down": "d0c17503604fe385666590f714c0c7cf920a264322b643677288ef1d767258b5",
+            "limit_exempt": "506c84f593e1c7734193476bcf7dcd5e85a8c81c7f40b0959c2f6df2df42dc30",
+            "limit_up": "bc2514b1865fa6caeb692fb072e5271995aeaff206b7d86f3aed9396378e1796",
+            "low": "78cbe1f5cf9ac2182b37dbe47f907f6eb92850967e60b0ef981130b7b4571f50",
+            "open": "c02779be3b9f2ac7ba5e21f4914a91660235516147bed26da8f55157acb0801e",
+            "pre_close": "aa2cd5e72b50d4290ff89b17b7a321587a56699007e475e4db64ecc9fa912fc7",
+            "symbol": "efad7f84f7d446e556567bc3ad58e7d8157000cda2583e6d2011340081df33ee",
+            "trade_date": "f467191a0c0f8068b91af74a2f4a1838088de455fb855d6065c7a6842cb9e0d9",
+            "volume": "859dcfec758fc2b047bae3cb89e415660b828b2817661ea5f9c91d153c2c23bb"
+          },
+          "columns": [
+            "trade_date",
+            "symbol",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "pre_close",
+            "adj_close",
+            "limit_up",
+            "limit_down",
+            "limit_exempt",
+            "is_st",
+            "is_suspended"
+          ],
+          "content_sha256": "21859cf6a2111a64dbfc3d46e1022a95c51271593758849c76839fa5f44a0b37",
+          "file": "bars.parquet",
+          "rows": 5114194,
+          "size_bytes": 174043941
+        },
+        "benchmark.csv": {
+          "column_sha256": {
+            "close": "ea8c6255179456e380ce6b42699ca209d62f707696464afb0c91a6a1e5935fe1",
+            "symbol": "1af5086ef90df358a3d3e24d57ceda47d4a7dd27d7cc98a3a4d6a52d62c1e11d",
+            "trade_date": "cffe48b0dcd25ea0cccb759e2fb33456e61dc56d6c1175d40dd6c20bcbb1da9c"
+          },
+          "columns": [
+            "trade_date",
+            "symbol",
+            "close"
+          ],
+          "content_sha256": "c701044f04c93f5d6d04717a31b83ebb6caf282d0ca9fc20bd7da2d1e2456ebb",
+          "file": "benchmark.csv",
+          "rows": 3636,
+          "size_bytes": 101461
+        },
+        "calendar.csv": {
+          "column_sha256": {
+            "trade_date": "675f602ee2ee8ce8cd46c6318d07c0837ff423ee7f385dec7c9813423a1d1697"
+          },
+          "columns": [
+            "trade_date"
+          ],
+          "content_sha256": "14c2f42b7abf1c0d54e3f0467adbd9f5b775ee2b9ac09c66dbbd758bd7dac28c",
+          "file": "calendar.csv",
+          "rows": 1212,
+          "size_bytes": 14556
+        },
+        "instruments.parquet": {
+          "column_sha256": {
+            "delist_date": "717700b82770d6396fc7fedc09a978284effe2c7ff6bd555abf78a30258760a1",
+            "exchange": "92574072b75983292508ef7fb190c0ff749bd282f99781d19506fc99bf190ed2",
+            "industry": "da60f479d0a5a39630f77f9b7c5c675d4e74990985e28088a4220021044c64ab",
+            "list_date": "263523b5606c358ec426960112fae3cb401ab939c40f6205cf418fd8e0e2ab7d",
+            "name": "ef7955177dc6e26c12ac562d0219f6f8ebd835b209bd2ec9b7ba278d66f50578",
+            "symbol": "8451cc9c3f5ba52904e99a2f5ab0313ae3b36c8b4ee1f656f72cf8d606755921"
+          },
+          "columns": [
+            "symbol",
+            "exchange",
+            "name",
+            "list_date",
+            "delist_date",
+            "industry"
+          ],
+          "content_sha256": "cdb8653c60b79f2d2a17de687d2ccce8ae1789f417b7077d54d988c76c87f2a4",
+          "file": "instruments.parquet",
+          "rows": 4711,
+          "size_bytes": 108174
+        },
+        "status.parquet": {
+          "column_sha256": {
+            "is_st": "26fa0b94caf4b5932d091593089548f80a3ef88f633bb1d18916576564a38aa2",
+            "is_suspended": "5883bdc97c31a41d619fabd8edb949da8f8703355aca787f085a22170b071e50",
+            "symbol": "f1dbe32ac4f761ed56cf12f3a7bc69f48a81abe078108a25a176b1bfa425a116",
+            "trade_date": "650a2d1d8400c789d0d475008e18e15f6a58b370d080bc16605ed950c3e798fd"
+          },
+          "columns": [
+            "trade_date",
+            "symbol",
+            "is_st",
+            "is_suspended"
+          ],
+          "content_sha256": "f628e6e11d68ded935b751288378ffbdd0c1034bc83ade13055041f4e6b8f7bd",
+          "file": "status.parquet",
+          "rows": 5132009,
+          "size_bytes": 8130272
+        }
+      },
+      "label": "2020-2024（样本内）",
+      "rows_total": 10255762,
+      "summary": {
+        "bars_rows": 5114194,
+        "first_date": "2020-01-02",
+        "last_date": "2024-12-31",
+        "n_symbols": 4711,
+        "n_trade_days": 1212
+      },
+      "written_at": "2026-10-21T08:15:39+08:00"
+    },
+    "processed_2015_2019": {
+      "build_command": "python scripts/build_dataset.py --source gm --start 2015-01-01 --end 2019-12-31 --benchmark 000852 --out data/processed_2015_2019",
+      "data_dir": "data/processed_2015_2019",
+      "dataset_sha256": "744aae67e2205b5fe809373da404f46db18f1515d614c53673f981c00965371f",
+      "files": {
+        "bars.parquet": {
+          "column_sha256": {
+            "adj_close": "63cde80e08ae70dc4ce9b303a8e9e74bb3c6ef21ddc9fbfa30d2b6968b948c17",
+            "amount": "7c1428e7490020a8309805424f5332cfc272e1c38ed4c1ec688c7dfb5e84eb29",
+            "close": "9baa6e7785912434b8a7c3e98e9b5b106cd42f2d8a823cc93a6940d0f387dfcd",
+            "high": "84c1eba27f3e50849e4cb84ae102fb9e63aacbb0043920d33d95a47d05321034",
+            "is_st": "424c45de85d8b18993aaa35d1aaacee29f85ff77b6fbce9a1fe853ace3dfb440",
+            "is_suspended": "17da0c1c5035e7eecbe714d174d8369eab6dacf5e9179249ee6b258c28e3ef9e",
+            "limit_down": "caaa12d65fa6cd3f2bdf215ae6be392135a2e89632c0f12267b1d4db3a6a358b",
+            "limit_exempt": "0edb3eab784b47fb7848f3cfff0c76f5dfc8b5bd0b36537d22d4b1bf39300df7",
+            "limit_up": "a6cc11b2ed56a6008796e164ca995ccba2a825849033e14e77feac1a7ff0e2a3",
+            "low": "004963fb046f0bb9cf7f9200ed3604e743c5d7b2cd14053ca45adf07c2b38f99",
+            "open": "1b0b30b4a05452886d0861a6998782f807d4bb58f370b9bc7c7f8fc6ce54ce48",
+            "pre_close": "2ce544592d2dd009888376364643e1833b9619fdc06622f5a9cf10ea7f10e066",
+            "symbol": "7071b409cf892c6077c3aea48a9188f4a2a1314b5da69d782907a6d635309a73",
+            "trade_date": "38f0ef45bf64d0b059fb767dd517b8b9b18c587078ad61c33ca99ffc62c85f3b",
+            "volume": "8ae14e405004804c329148c30ef2f5b372de616ef5903733836f7d9638e37ae9"
+          },
+          "columns": [
+            "trade_date",
+            "symbol",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "pre_close",
+            "adj_close",
+            "limit_up",
+            "limit_down",
+            "limit_exempt",
+            "is_st",
+            "is_suspended"
+          ],
+          "content_sha256": "49a301445355114b0d5f347135196f96f06291abae788dcc7e5a36866a4ead4c",
+          "file": "bars.parquet",
+          "rows": 3652321,
+          "size_bytes": 123219937
+        },
+        "benchmark.csv": {
+          "column_sha256": {
+            "close": "2d87d8969a676d1f0d6ed17ca467b31179f19a1cc56b8063c779946771924897",
+            "symbol": "53ca4ec841f540ccb02c30d00c8d5d3cab2f80ffe396844d9c0f50933bc9f42d",
+            "trade_date": "c21c3117537c71597c5ee9f12a48c63678874db9aaff7bb8ce6fd4c94fd03091"
+          },
+          "columns": [
+            "trade_date",
+            "symbol",
+            "close"
+          ],
+          "content_sha256": "ef6b34046475d36b20537b33c952392977e5ee0b26882c2659aa38d0324c8da7",
+          "file": "benchmark.csv",
+          "rows": 1219,
+          "size_bytes": 34024
+        },
+        "calendar.csv": {
+          "column_sha256": {
+            "trade_date": "c21c3117537c71597c5ee9f12a48c63678874db9aaff7bb8ce6fd4c94fd03091"
+          },
+          "columns": [
+            "trade_date"
+          ],
+          "content_sha256": "f9586ff65ee1d0b0c5ae144f2b398060f0ff3938c45a3e8a358ff9b6991174c9",
+          "file": "calendar.csv",
+          "rows": 1219,
+          "size_bytes": 14640
+        },
+        "instruments.parquet": {
+          "column_sha256": {
+            "delist_date": "334d898f4a3cda18f0ac7b8d55467e066d76a012bae8f808c8b30719b676d275",
+            "exchange": "fb174317ff341f9116d34c0815e679ab6ed04ceffd00366a846fa4fe9a011277",
+            "industry": "1e4c91077c0e34e1e1c3f9a2204732c2f505f3ca12f2773d06d062038fc198e0",
+            "list_date": "98fd85ec6a86e078717ec4af9e9fa1027d850f036f280b046e920773515a11cd",
+            "name": "89057c82167be43c894647d8acac68436d4e1d52c216107635d99cd2f428aa7f",
+            "symbol": "a108c965ee3e5c06b00ee687e55bb93056061355214a1fafc00d585de2e4af19"
+          },
+          "columns": [
+            "symbol",
+            "exchange",
+            "name",
+            "list_date",
+            "delist_date",
+            "industry"
+          ],
+          "content_sha256": "1df2298286e03f02b9bd6cce390995344cb6f343515c1505cae90b3b838d2f31",
+          "file": "instruments.parquet",
+          "rows": 3717,
+          "size_bytes": 90220
+        },
+        "status.parquet": {
+          "column_sha256": {
+            "is_st": "a689d7003e41961140d2514b5661a0f514387ca76a1150a9ad113156f5e64143",
+            "is_suspended": "1d668df07f7fd76cb5023702730d944f9e68fa76071fb2d33eece40e5cc2d51c",
+            "symbol": "162c6d8790916fedfc897dc22c734cabc8dc2cdd7e829ed85070496a0bda32f1",
+            "trade_date": "faf8b4f7ab29be1f83077c48835fd2429b6b9f51c7b250e28bdcadaa314532cd"
+          },
+          "columns": [
+            "trade_date",
+            "symbol",
+            "is_st",
+            "is_suspended"
+          ],
+          "content_sha256": "8fec6dfcd8600747dc27425def91cf13d15a5a694acbbfc60cb5178f81cd1e85",
+          "file": "status.parquet",
+          "rows": 3913599,
+          "size_bytes": 4828407
+        }
+      },
+      "label": "2015-2019（样本外 1）",
+      "rows_total": 7572075,
+      "summary": {
+        "bars_rows": 3652321,
+        "first_date": "2015-01-05",
+        "last_date": "2019-12-31",
+        "n_symbols": 3715,
+        "n_trade_days": 1219
+      },
+      "written_at": "2026-10-21T08:15:45+08:00"
+    },
+    "processed_2025_2026": {
+      "build_command": "python scripts/build_dataset.py --source gm --start 2025-01-01 --end 2026-10-20 --benchmark 000852 --out data/processed_2025_2026\n# 之后每天：python scripts/update_dataset.py --data-dir data/processed_2025_2026",
+      "data_dir": "data/processed_2025_2026",
+      "dataset_sha256": "b12ca76b1f0799b2485f11efe6c7ea254deb38d990c1ed33d12a73345d94971b",
+      "files": {
+        "bars.parquet": {
+          "column_sha256": {
+            "adj_close": "748ceaf4856784764700af05e98a0af8a0d2f7d02cb2d448ff2045523457c3a3",
+            "amount": "2b38cc6a487a2885e2d8b8c37f4283e59ddb95c5e76421679d573f762aacd3d7",
+            "close": "1676cb3e18d92fb9c1fa6537a1980404a8704d47cdbb99e9ae4c577d76d1620c",
+            "high": "dbb9ff664b860c248630ebc64fb484e0ebd1c068f3efeab1d6b3d9806c28d057",
+            "is_st": "a91b37f774ea4654e776f56aa562941ad4ef0e4d11e89a004ddc15721511f315",
+            "is_suspended": "a39bb1253ca78f496a9a08acc4e369aebfd7f2900e90409543aaf51c4da26193",
+            "limit_down": "d33a64b50e40bdcac8e5668776e864fa32075a5a736e3596928737f5a365764c",
+            "limit_exempt": "f1a05c63a6f96ded7eb1f80a025809f23dae86925e2906d2f89c1e310cdf147a",
+            "limit_up": "e64c1d443b64cd7b9046ba9f0f719d4dfdf0204b6e852f0245a3bbf08f2fe2f4",
+            "low": "9499d0a8e12c4f0f819e542ef9acdf2f147a9336ff168164a2ce87e6b911d134",
+            "open": "e2516fae569d8e8745f01df82b07f43e5ea10c9390e305e678ce147241ee6909",
+            "pre_close": "2b66292d5229b29ac9996294ffae4e25702d749230f9e68489b607a4fbb5629f",
+            "symbol": "50f206c2d0d785cd130f9b5b9cee36153ea3444411bd28fd8b7bb38f2bea739d",
+            "trade_date": "e82b4c9a941ee755c9b51f4e59096bdcd68c8e223dffc7c3c65c7161bcc0339b",
+            "volume": "ae45aa4e759ffc23b18436112649fdea603d4a2a509e06c543878fae459bdc06"
+          },
+          "columns": [
+            "trade_date",
+            "symbol",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "pre_close",
+            "adj_close",
+            "limit_up",
+            "limit_down",
+            "limit_exempt",
+            "is_st",
+            "is_suspended"
+          ],
+          "content_sha256": "8d76f8d6ed9207aeec7d198ee620e6e2090402c87882c8ecbfda729fcfb9fd4d",
+          "file": "bars.parquet",
+          "rows": 1974465,
+          "size_bytes": 68273882
+        },
+        "benchmark.csv": {
+          "column_sha256": {
+            "close": "e6a30780df03bcfe829403d5766831882e7a19541b0ed4ed5b1e69979e722fa1",
+            "symbol": "9ff38313ef9b35f3f48f84b7146a23abfaf3412fde1c81d7d6993eea389db1fa",
+            "trade_date": "375c344d49abd1076dc4845918920258e415aed1f3d4a25eb7942c3095490748"
+          },
+          "columns": [
+            "trade_date",
+            "symbol",
+            "close"
+          ],
+          "content_sha256": "f4067549bca5f315accf9e70438aeab0c1d67092ed147cc43d68417501b17946",
+          "file": "benchmark.csv",
+          "rows": 433,
+          "size_bytes": 12099
+        },
+        "calendar.csv": {
+          "column_sha256": {
+            "trade_date": "375c344d49abd1076dc4845918920258e415aed1f3d4a25eb7942c3095490748"
+          },
+          "columns": [
+            "trade_date"
+          ],
+          "content_sha256": "4c693aba5de362b87fff5c513403131eb941a65c9f3e2538964e9a8595b51d33",
+          "file": "calendar.csv",
+          "rows": 433,
+          "size_bytes": 5208
+        },
+        "instruments.parquet": {
+          "column_sha256": {
+            "delist_date": "a7f06f45f9c2ef2ec4efc5e7603967c231932163583f8f902cc9182c0e0cf152",
+            "exchange": "96348e4a7d11025db15fa088563674f4d4da88437d1afd5565fd604e2c660d15",
+            "industry": "1ac6b4a8b1183e10c1c5c5cc6cf5c149b1b59f19f55de808f713773e0de83a1a",
+            "list_date": "a4ac4cc8af0a1719d9335697a47a48c32675fcdbc5b4c5cce012602f89c5b4a1",
+            "name": "ed03a0eb7385630af1829a230bd6a0d7e78d5de893da813ae6c7f538d541cbd6",
+            "symbol": "cbb26e2a1bcc1ae0ea2e2f4fa180d280f151f2019146342dea8ff5bfd1215ca4"
+          },
+          "columns": [
+            "symbol",
+            "exchange",
+            "name",
+            "list_date",
+            "delist_date",
+            "industry"
+          ],
+          "content_sha256": "485d12ca2ecd59bf1b5e5176b6b81ac40b1fd85af89119888a9ee23100f0afbc",
+          "file": "instruments.parquet",
+          "rows": 4620,
+          "size_bytes": 112408
+        },
+        "status.parquet": {
+          "column_sha256": {
+            "is_st": "e0838bbf3368b82e9f0d556c6a34017de28ce1b4fd36a74826f92bfaac224549",
+            "is_suspended": "5a7d5c68c0ed532fb446feb05b3bea01ef8c18c4a6d74b5265f99ec0d1921ab2",
+            "symbol": "3adf3dc47ab0ac9ca0425cd98d2bd340a734d857f4f3bf52c5145c2d8582bbf5",
+            "trade_date": "1689cd28966133945a26ed19e7517368464abd421998542cd40956bb8447d6db"
+          },
+          "columns": [
+            "trade_date",
+            "symbol",
+            "is_st",
+            "is_suspended"
+          ],
+          "content_sha256": "5b8509a889cdeb4d4b89015052fa127559629cfa3d6eed7a160a9f03a6af4363",
+          "file": "status.parquet",
+          "rows": 1979084,
+          "size_bytes": 3357936
+        }
+      },
+      "label": "2025-01 ~ 2026-10（样本外 2，每日增量更新）",
+      "note": "每日增量更新，指纹随数据增长而变；校验前先确认更新到哪一天",
+      "rows_total": 3959035,
+      "summary": {
+        "bars_rows": 1974465,
+        "first_date": "2025-01-02",
+        "last_date": "2026-10-20",
+        "n_symbols": 4620,
+        "n_trade_days": 433
+      },
+      "written_at": "2026-10-21T08:15:48+08:00"
+    }
+  },
+  "version": 1
+}

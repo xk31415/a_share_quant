@@ -1,6 +1,7 @@
 """数据层：schema 规范、数据加载、质量校验与 point-in-time 查询。"""
 from .asof import latest_known
 from .loader import DataProvider, LocalFileProvider
+from .manifest import describe_dataset, frame_digest, verify_dataset
 from .builders import (
     DEFAULT_BOARDS,
     BuildReport,
@@ -43,4 +44,7 @@ __all__ = [
     "classify_board",
     "select_boards",
     "DEFAULT_BOARDS",
+    "describe_dataset",
+    "verify_dataset",
+    "frame_digest",
 ]

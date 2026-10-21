@@ -6,8 +6,9 @@
 > **回测结果不代表未来收益。**
 > **本项目用于研究，不构成投资建议。**
 >
-> 当前项目尚未接入真实 A 股历史数据；在接入之前，任何回测数字
-> （包括合成数据冒烟测试的数字）都不具备市场含义。
+> 三份真实数据集（2020-2024 / 2015-2019 / 2025-01~2026-10）**不入库**，
+> 仓库里只存它们的指纹 `data/MANIFEST.json`。别人拉下项目后按第 2.1 节
+> 重建并校验指纹，就能确认拿到的是不是同一份数据。
 
 ---
 
@@ -28,6 +29,7 @@ a_share_quant/
 │   ├── settings.yaml        # 回测区间、基准、资金、成本、调仓频率等全局设置
 │   └── universe.yaml        # 股票池过滤规则（按 as_of 时间点求值）
 ├── data/
+│   ├── MANIFEST.json        # 数据集内容指纹（入库；数据本体不入库）
 │   ├── raw/                 # 原始外部数据（不入库）
 │   ├── interim/             # 中间数据（含 synthetic/ 合成冒烟数据）
 │   ├── processed/           # 规范化数据（LocalFileProvider 读取）
@@ -49,6 +51,36 @@ a_share_quant/
 ├── notebooks/ experiments/ results/ reports/
 │   └── review/              # 交叉审查协议与台账（见 reports/review/PROTOCOL.md）
 ```
+
+### 2.1 数据为什么不入库
+
+三份真实数据集合计 **366 MB**，`bars.parquet` 单文件最大 **166 MB**。不入库有三个理由，
+前两个是工程上的，第三个不是：
+
+1. **GitHub 单文件硬限制 100 MB**，`git push` 会直接拒绝；转 LFS 后又受免费额度限制
+   （1 GB 存储 / 1 GB 月流量，别人 clone 三次就耗完）；
+2. **数据每天在长**。`update_dataset.py` 补数据时 parquet 是整体重写，每次提交都是一个
+   新的 66 MB blob，一旦进历史就再也删不掉，几周就能把仓库推到 GB 级；
+3. **数据授权跟账号走**。行情来自掘金 / baostock 的 token，公开转分发通常不在授权范围内。
+
+替代方案是入库**内容指纹**（`data/MANIFEST.json`，17 KB）：行按主键排序、浮点按原始位
+模式、NaN 先抹平后取哈希，所以换 pyarrow/pandas 版本、文件字节变了仍判一致；真正的数据
+差异（少几天、复权因子变了、某列类型变了）会立刻报出来，并指出是哪几列。
+
+```bash
+# 别人拉下项目后：重建 → 校验
+python scripts/build_dataset.py --source gm --start 2020-01-01 --end 2024-12-31 \
+    --benchmark 000852 --out data/processed --verify-manifest
+python scripts/data_manifest.py verify      # 三份一起校验，不一致时退出码 1
+python scripts/data_manifest.py show        # 指纹摘要，不读数据，秒出
+```
+
+这比"发一份数据给我"更强：它验证的是**"你重建出来的和我回测用的逐字段相同"**，
+而不只是"我拿到了某个文件"。注意 `processed_2025_2026` 是每日增量更新的窗口，
+它的指纹会随数据增长而变，校验前先确认更新到哪一天。
+
+暂时拿不到 token 也能把整条链路跑通：`python scripts/generate_synthetic_data.py`
+生成合成数据（30 只 × 780 交易日，seed=42 可复现），或 `--source baostock` 免费拉真数据。
 
 ## 3. 安装
 
@@ -86,9 +118,11 @@ pip install -e ".[dev]"
 python -m pytest tests/
 ```
 
-218 个测试覆盖：
+234 个测试覆盖：
 - 日期对齐、交易日历（`test_dates.py`）；
 - 数据 schema 与校验，含**幸存者偏差哨兵**（`test_data.py`）；
+- **数据集指纹**（`test_data_manifest.py`）：行序/浮点表示不影响指纹，改动一位小数、
+  丢一行、换列类型、改列序都必须被发现，且能指名差异列；
 - 因子计算正确性（`test_factors.py`）；
 - 股票池 point-in-time（`test_universe.py`）；
 - T+1、涨跌停、停牌、佣金/印花税/滑点、组合权重、净值、单边换手（`test_backtest.py`、`test_costs.py`）；

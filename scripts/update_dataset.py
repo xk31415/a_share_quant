@@ -266,6 +266,11 @@ def main() -> None:
     print(f"  bars 截至 {bars2['trade_date'].max().date()}"
           f"，{bars2['symbol'].nunique():,} 只")
     print(f"  updated_at {datetime.now():%Y-%m-%d %H:%M:%S}")
+    # 数据一变，data/MANIFEST.json 里这份数据集的指纹就过期了。不自动改写：
+    # 指纹的用途是"钉住某一版数据"，每天跟着数据走就等于没有指纹。
+    if (PROJECT_ROOT / "data" / "MANIFEST.json").exists():
+        print(f"  [note] 数据已变化，指纹未自动更新；钉住这一版再跑：\n"
+              f"         python scripts/data_manifest.py write --data-dir {d}")
 
 
 if __name__ == "__main__":

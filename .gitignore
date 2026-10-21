@@ -14,6 +14,9 @@ venv/
 .env
 
 # 数据目录：只保留目录结构，不提交数据本体
+# 为什么不入库：三份共 366 MB、bars.parquet 单文件 166 MB 超过 GitHub 100 MB 硬限制；
+# update_dataset 每天整体重写 parquet，提交历史会膨胀到 GB 级；行情授权跟账号走。
+# 入库的是 data/MANIFEST.json（内容指纹），别人重建后用它验证是不是同一份。
 data/raw/*
 data/interim/*
 data/processed*/*
@@ -22,6 +25,7 @@ data/metadata/*
 !data/interim/.gitkeep
 !data/processed/.gitkeep
 !data/metadata/.gitkeep
+!data/MANIFEST.json
 
 # 实验产出（元数据 JSON 是否入库由使用者决定，默认不提交大文件）
 results/*

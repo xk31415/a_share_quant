@@ -2,7 +2,8 @@
 
 > 所有命令均在本机实际验证过。
 > **回测结果不代表未来收益。本项目用于研究，不构成投资建议。**
-> 当前未接入真实 A 股数据，任何回测数字都不具备市场含义。
+> 仓库里**没有行情数据**（体积 + 授权原因，见 README 第 2.1 节），拉下来先按第 5 节
+> 重建；本机已建好三份真实数据集，它们的指纹在 `data/MANIFEST.json`。
 
 ---
 
@@ -33,7 +34,7 @@
 ```bash
 cd /d/a_share_quant
 "C:\Users\67478\.workbuddy\binaries\python\envs\default\Scripts\python.exe" -m pytest
-# -> 218 passed
+# -> 234 passed
 ```
 
 只跑某一类：
@@ -170,6 +171,34 @@ python scripts/build_dataset.py --source baostock --start 2023-01-01 --end 2023-
 6. 停牌标记与成交量自洽
 
 SDK 升级导致字段名变化时，先用 `--probe` 看它到底返回了什么。
+
+### 5.1.1 校验你拉到的数据是不是"报告里那一份"
+
+**数据本体不入库**（366 MB、单文件 166 MB 超 GitHub 100 MB 限制、且授权跟账号走），
+仓库里只有指纹 `data/MANIFEST.json`（17 KB）。重建之后校验一下：
+
+```bash
+# 建完就地校验（不一致时退出码 1）
+python scripts/build_dataset.py --source gm --start 2020-01-01 --end 2024-12-31 \
+    --benchmark 000852 --out data/processed --verify-manifest
+
+# 或者对已有目录批量校验
+python scripts/data_manifest.py verify     # 三份一起，退出码 1 = 有差异
+python scripts/data_manifest.py show       # 指纹摘要，不读数据
+python scripts/data_manifest.py write      # 自己更新过数据后刷新指纹
+```
+
+指纹认**内容**不认字节：行按 `(trade_date, symbol)` 排序、浮点按 float64 原位模式、
+NaN 先抹平，所以换 pyarrow/pandas 版本重写一遍仍判一致；真正的差异（少几天、
+改了某个价格、某列类型变了）会立刻报出来，并**指名是哪几列**：
+
+```
+[fail] processed  (D:\a_share_quant\data\processed)
+       - bars.parquet 内容不同（差异列：close, adj_close）
+```
+
+注意 `processed_2025_2026` 是每日增量更新的窗口，它的指纹会随数据增长而变化——
+校验前先确认更新到哪一天，不然会得到"不一致"这个正确但无用的结论。
 
 ### 5.2 手工准备数据（用别的源）
 
