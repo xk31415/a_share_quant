@@ -204,3 +204,63 @@ def test_summarize_includes_fee_from_unmatched_fills():
     s = summarize(matched, unmatched)
     assert s["total_fee"] == 12
     assert s["n_unmatched_fills"] == 1
+
+
+# ---------------------------------------------------------------- R06 F-31
+def test_summarize_never_emits_nan_ratios():
+    """R06 F-31：完全未成交时比率必须是 0，不能是 NaN。
+
+    函数说明写的是"分母为 0 时返回 0，不返回 NaN 混进报告"，实现原来相反。
+    NaN 会被 json.dumps 写成非标准字面量，严格 JSON 解析器读不了。
+    """
+    orders = _orders([("A", "buy", 100, 10.0)])
+    fills = normalize_fills(_fills([], with_fee=True))
+    matched, unmatched = match_orders(orders, fills)
+    s = summarize(matched, unmatched)
+    assert s["n_filled"] == 0 and s["fill_ratio"] == 0.0
+    assert s["fee_bps"] == 0.0 and s["weighted_slip_bps"] == 0.0
+    # 必须真的不是 NaN，而不是"碰巧等于某个东西"
+    assert s["fee_bps"] == s["fee_bps"]
+    assert s["weighted_slip_bps"] == s["weighted_slip_bps"]
+
+
+def test_summarize_json_is_strict_parseable_when_nothing_filled():
+    """同上，但走到产出那一步：文件必须能被**严格** JSON 解析器读。
+
+    Python 的 json 默认容忍 NaN，所以只在跨语言读这个文件时才会炸。
+    """
+    import json
+
+    def _reject(x):
+        raise ValueError(f"非标准 JSON 常量: {x}")
+
+    orders = _orders([("A", "buy", 100, 10.0)])
+    matched, unmatched = match_orders(orders, normalize_fills(_fills([])))
+    text = json.dumps(summarize(matched, unmatched), ensure_ascii=False,
+                      default=float)
+    assert json.loads(text, parse_constant=_reject)  # 不抛异常即通过
+
+
+def test_fills_digest_ignores_row_order_but_catches_new_fills():
+    """R06 F-26 的幂等保护：同一批成交换个行序必须认出来是同一批。
+
+    用文件字节或原始行序做指纹的话，重排成交顺序就会被判成"另一批成交"，
+    重复入账的保护形同虚设。
+    """
+    import importlib.util
+    from pathlib import Path
+
+    p = Path(__file__).resolve().parents[1] / "scripts" / "reconcile.py"
+    spec = importlib.util.spec_from_file_location("reconcile_script", p)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    a = mod._fills_digest(normalize_fills(_fills(
+        [("A", "buy", 100, 10.0, 5), ("B", "sell", 200, 20.0, 8)])))
+    b = mod._fills_digest(normalize_fills(_fills(
+        [("B", "sell", 200, 20.0, 8), ("A", "buy", 100, 10.0, 5)])))
+    c = mod._fills_digest(normalize_fills(_fills(
+        [("A", "buy", 101, 10.0, 5), ("B", "sell", 200, 20.0, 8)])))
+    assert a == b, "重排成交顺序不该被判成另一批成交"
+    assert a != c, "改一股也必须认出来是新的一批"

@@ -239,7 +239,9 @@ def summarize(matched: pd.DataFrame, unmatched: pd.DataFrame,
     if matched.empty:
         n = {"n_orders": 0, "n_filled": 0, "n_partial": 0, "n_missing": 0,
              "n_over": 0, "fill_ratio": 0.0}
-        slip_bps = fee_bps = float("nan")
+        # 分母为 0 时返回 0，不返回 NaN——NaN 会被 json.dumps 写成非标准
+        # 字面量，严格 JSON 解析器（JS/R）读不了这个文件（R06 F-31）。
+        slip_bps = fee_bps = 0.0
         total_fee = 0.0
     else:
         counts = matched["status"].value_counts().to_dict()
@@ -257,13 +259,13 @@ def summarize(matched: pd.DataFrame, unmatched: pd.DataFrame,
         notional = float((filled["fill_shares"] * filled["fill_price"]).sum())
         slip_bps = (float((filled["slip_bps"] * filled["fill_shares"] *
                            filled["fill_price"]).sum() / notional)
-                    if notional > 0 else float("nan"))
+                    if notional > 0 else 0.0)
         # 无对应委托的成交也是真花了钱，必须计入总费用——
         # 否则"实际 vs 模型"的差额会被这部分抵消，看起来反而更省。
         unmatched_fee = float(unmatched["fee"].sum()) \
             if unmatched is not None and "fee" in unmatched.columns else 0.0
         total_fee = float(matched["fee"].sum()) + unmatched_fee
-        fee_bps = (total_fee / notional * 1e4) if notional > 0 else float("nan")
+        fee_bps = (total_fee / notional * 1e4) if notional > 0 else 0.0
 
     out = dict(n)
     out["total_fee"] = total_fee

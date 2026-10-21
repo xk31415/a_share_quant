@@ -22,11 +22,22 @@
     live/<日期>/orders_vs_fills.csv  逐笔比对
     live/<日期>/holdings_gap.csv     成交后持仓 vs 目标持仓
 
-退出码：0 正常；2 有需要人工处理的问题（超卖、成交多于委托、对不上单）。
+退出码：0 正常；2 有需要人工处理的问题（超卖、成交多于委托、对不上单）；
+1 这批成交已经入过账（见下方"重复入账"）。
+
+重复入账（R06 F-26）
+--------------------
+`--save-holdings` 的输出通常是**次日建仓的输入**。同一份成交再跑一次会把股数
+再加一遍（1000 → 1100 → 1200），两次退出码都是 0，错得很隐蔽。因此：
+
+* 入账后在 `<holdings>.digest` 记下这批成交的内容指纹；
+* 再跑同一批成交 → 退出码 1 并拒绝写盘，不会把股数加第二遍；
+* 存在必须人工处理的问题（退出码 2）时**不写盘**——报警不该先落一份错账。
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -68,6 +79,20 @@ def _load_holdings(path: str | None) -> dict[str, int]:
             continue
         out[str(sym).strip()] = int(sh)
     return out
+
+
+def _fills_digest(fills: pd.DataFrame) -> str:
+    """这批成交的内容指纹：同一批成交再跑一次必须能被认出来（R06 F-26）。
+
+    用**逐行哈希**而不是文件字节——重排成交顺序、改 CSV 换行、换文件名
+    都不该被判成"另一批成交"，否则这个保护形同虚设。
+    """
+    if fills.empty:
+        return "empty"
+    cols = list(fills.columns)
+    ordered = fills[cols].sort_values(by=cols, kind="mergesort").reset_index(drop=True)
+    h = pd.util.hash_pandas_object(ordered, index=False)
+    return hashlib.sha1(h.values.tobytes()).hexdigest()
 
 
 def _model_fee(fills: pd.DataFrame, costs: dict) -> float:
@@ -196,18 +221,39 @@ def main() -> None:
         json.dumps(summary, ensure_ascii=False, indent=1, default=float),
         encoding="utf-8")
 
-    if args.save_holdings:
-        p = Path(args.save_holdings)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame({"symbol": list(new_holdings),
-                      "shares": list(new_holdings.values())}) \
-            .to_csv(p, index=False, encoding="utf-8")
-        print(f"\n新持仓（{len(new_holdings)} 只）已写入 {p}")
-
-    print(f"明细已写入 {out_dir}")
-    # 超卖/超量/对不上单属于必须人工处理的问题，用非零退出码让脚本链能感知
+    # 超卖/超量/对不上单属于必须人工处理的问题，用非零退出码让脚本链能感知。
+    # 必须在写盘**之前**判完——报警若挡不住落盘，账上会先留一份错数（R06 F-26）。
     critical = (summary["n_over"] > 0 or len(unmatched) > 0
                 or any("超过持仓" in w for w in warn_hold))
+
+    if args.save_holdings:
+        if critical:
+            print(f"\n[warn] 存在必须人工处理的问题，未写入 {args.save_holdings}。"
+                  f"先核对成交，再决定是否入账", flush=True)
+        else:
+            dg = _fills_digest(fills)
+            # 查的是**输入**持仓的指纹，不是输出文件的：要判断的是
+            # "这批成交是否已经被这份持仓吸收过"。查输出文件在链式用法
+            # （h1 → h2）下永远是空的，保护形同虚设。
+            prev = Path(str(args.holdings) + ".digest") if args.holdings else None
+            if (prev is not None and prev.exists()
+                    and prev.read_text(encoding="utf-8").strip() == dg):
+                raise SystemExit(
+                    f"这批成交已经入过账（指纹 {dg[:12]}，见 {prev.name}）。\n"
+                    f"再跑一遍会把股数加第二遍，因此拒绝写盘。\n"
+                    f"确认要重跑就先删掉 {prev}。")
+            digest_path = Path(str(args.save_holdings) + ".digest")
+            p = Path(args.save_holdings)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame({"symbol": list(new_holdings),
+                          "shares": list(new_holdings.values())}) \
+                .to_csv(p, index=False, encoding="utf-8")
+            digest_path.write_text(dg, encoding="utf-8")
+            print(f"\n新持仓（{len(new_holdings)} 只）已写入 {p}")
+            print(f"成交指纹 {dg[:12]} 已记入 {digest_path.name}（防重复入账）",
+                  flush=True)
+
+    print(f"明细已写入 {out_dir}")
     sys.exit(2 if critical else 0)
 
 

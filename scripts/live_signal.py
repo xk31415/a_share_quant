@@ -229,11 +229,13 @@ def main() -> None:
     prices = _latest_prices(bars, need, as_of)
 
     # ---- 熔断 2：非季度调仓月（空仓建仓不受限制，否则永远建不了仓）----
-    if (not args.ignore_quarter and holdings
-            and as_of.month not in DEFAULT_REBALANCE_MONTHS):
+    # 只**不下单**，但"检查"必须真的做：原来这里的 return 在 build_plan 之前，
+    # 打印的"本月只检查不下单"其实一笔都没查过（R06 F-30）。
+    check_only = bool(not args.ignore_quarter and holdings
+                      and as_of.month not in DEFAULT_REBALANCE_MONTHS)
+    if check_only:
         print(f"{as_of.date()} 不是季度调仓月 {DEFAULT_REBALANCE_MONTHS}，"
               f"本月只检查不下单。要强制调仓加 --ignore-quarter", flush=True)
-        return
 
     # ---- 总资产：优先用「现金 + 持仓市值」----
     held_value = sum(sh * prices[s] for s, sh in holdings.items() if s in prices)
@@ -288,6 +290,10 @@ def main() -> None:
             f"印花税 {stamp:.2%}（仅卖出）")
 
     print(render_text(plan), flush=True)
+    if check_only:
+        print("\n非季度调仓月：以上只是**检查**，未写委托文件。"
+              "确实要按这些单子调仓，加 --ignore-quarter 重跑。", flush=True)
+        return
     if args.dry_run:
         print("\n--dry-run：未写文件。", flush=True)
         return

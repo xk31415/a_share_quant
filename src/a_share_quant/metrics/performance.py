@@ -259,6 +259,11 @@ def trim_warmup(eq: pd.Series, positions: Optional[pd.DataFrame] = None) -> tupl
         if len(dates):
             start = dates.min()
     if start is None:
+        # 已知分叉（README 限制清单第 28 条 / R06 F-28）：持仓表一旦给出切点，
+        # 净值是否平坦就不再参与判断。若"首次持仓日的净值仍等于初始资金"
+        # （零成本 + 成交日收盘还没把净值打离初始值），这条退路会给出另一个
+        # 切点——实测 warmup=1（持仓）对 warmup=5（平盘）。默认 CostModel 的
+        # 最低佣金 5 元会在成交日改变净值，所以真实回测不触发。
         # 退回"开头连续等于初始值"的长度。只截长度 >=2 的平坦段：
         # 全程持仓的策略首日也等于初始值（长度 1），那不算暖机，
         # 截掉会让年化的起点错位一天。
@@ -348,6 +353,10 @@ def summarize(result: "BacktestResult") -> dict[str, Any]:
         if len(_d):
             active_start = pd.Timestamp(_d.min())
     if active_start is None and len(eq):
+        # 已知偏差（README 限制清单第 29 条 / R06 F-29）：没有持仓表时的退路
+        # 取的正是上面注释说"不能取"的 eq.index[0]——它是首个收益的基准点，
+        # 净值仍等于初始资金。报出的日期会早于净值真正开始变动的那天，
+        # n_cash_only_days 也跟着少算一天。引擎正常产出持仓表时不走这里。
         active_start = eq.index[0]
 
     summary: dict[str, Any] = {

@@ -245,3 +245,25 @@ def test_quote_symbols_covers_full_ranked():
     got = quote_symbols(sample, {"A": 100})
     assert len(got) == 401
     assert ranked[-1] in got and "A" in got
+
+
+# ---------------------------------------------------------------- R06 F-30
+def test_non_quarter_month_really_runs_the_check():
+    """R06 F-30：非季度月打印"只检查不下单"，但检查原来根本没执行。
+
+    熔断 2 的 return 在 build_plan 之前，目标权重、订单、告警一行都出不来。
+    这里守住一条结构性事实：熔断之后到 build_plan 之间不能再有 return。
+    """
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "scripts" / "live_signal.py"
+           ).read_text(encoding="utf-8")
+    i_guard = src.index("check_only = bool(")
+    i_plan = src.index("plan = build_plan(")
+    assert i_guard < i_plan, "熔断判断必须在 build_plan 之前（设标志，不是 return）"
+    assert "return" not in src[i_guard:i_plan], \
+        "熔断与 build_plan 之间不能有 return，否则检查又是空的"
+    # 非季度月必须在"渲染完检查报告之后、写文件之前"结束
+    # （rindex：熔断打印处也有一个 if check_only:，在 build_plan 之前）
+    assert src.rindex("if check_only:") > i_plan
+    assert src.index("write_plan(") > src.rindex("if check_only:")
