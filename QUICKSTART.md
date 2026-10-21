@@ -33,7 +33,7 @@
 ```bash
 cd /d/a_share_quant
 "C:\Users\67478\.workbuddy\binaries\python\envs\default\Scripts\python.exe" -m pytest
-# -> 181 passed
+# -> 218 passed
 ```
 
 只跑某一类：
@@ -250,7 +250,8 @@ python scripts/capacity.py --exp results/EXP-xxxx
 
 **评估纪律**（这几条是踩坑换来的，见 `reports/strategy_log.md`）：
 
-1. 绝对收益先比**全宇宙等权**（2020-2024 为 8.72%/年），比不过就是没做选择；
+1. 绝对收益先比**全宇宙等权**（2020-2024 月频 9.84%/年；日频 8.72% 含再平衡
+   红利，不可用作及格线），比不过就是没做选择；
 2. 因子有效性必须看**同流动性档内的等权对照**——低流动 1/3 等权 24%/年，
    高流动 1/3 只有 0.3%，不分档会把流动性溢价当成 alpha；
 3. 只做多的策略要报**长仓绝对收益**，光看多空价差没有用（A 股不能便捷做空）；

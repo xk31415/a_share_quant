@@ -7,6 +7,7 @@ import pytest
 
 from a_share_quant.metrics import (
     annual_returns,
+    trim_warmup,
     annualized_return,
     annualized_volatility,
     average_holding_period,
@@ -213,3 +214,43 @@ def test_cost_contribution_in_summarize():
     assert "annualized_cost_drag" in s
     assert s["total_costs"] == pytest.approx(50.0)
     assert s["annualized_cost_drag"] == pytest.approx(0.5, rel=1e-3)
+
+
+# ---------------------------------------------------------------- 暖机期
+def test_trim_warmup_drops_flat_prefix():
+    """暖机期净值恒等于初始值，必须从年化/波动里截掉。
+
+    不截的后果实测过：2015-2019 段前 78 个交易日空仓，同期中证1000
+    涨 69.8%，策略记 0 收益，样本外超额被整体压低。
+    """
+    idx = pd.bdate_range("2024-01-01", periods=10)
+    eq = pd.Series([1e6] * 4 + [1e6 * (1 + 0.01 * i) for i in range(1, 7)], index=idx)
+    trimmed, n = trim_warmup(eq)
+    assert n == 4
+    assert len(trimmed) == 6
+
+
+def test_trim_warmup_prefers_positions():
+    """有持仓表时以第一次持仓日为准，比"净值首次变动"更精确。"""
+    idx = pd.bdate_range("2024-01-01", periods=10)
+    eq = pd.Series([1e6] * 5 + [1e6 * (1 + 0.02) ** i for i in range(5)], index=idx)
+    pos = pd.DataFrame({"trade_date": idx[3:], "shares": 100})
+    trimmed, n = trim_warmup(eq, pos)
+    assert n == 3
+    assert trimmed.index[0] == idx[3]
+
+
+def test_trim_warmup_no_flat_prefix_is_noop():
+    idx = pd.bdate_range("2024-01-01", periods=5)
+    eq = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0], index=idx)
+    trimmed, n = trim_warmup(eq)
+    assert n == 0
+    assert len(trimmed) == 5
+
+
+def test_trim_warmup_keeps_all_when_never_moves():
+    """全程空仓时不截（否则序列为空，指标全 NaN）。"""
+    idx = pd.bdate_range("2024-01-01", periods=5)
+    eq = pd.Series([1e6] * 5, index=idx)
+    trimmed, n = trim_warmup(eq)
+    assert n == 0 and len(trimmed) == 5

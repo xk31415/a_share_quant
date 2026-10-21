@@ -1,7 +1,7 @@
 """绩效指标：收益、风险、回撤、换手、持仓与分年度/月度分解。"""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -229,17 +229,60 @@ def cost_contribution(result: "BacktestResult") -> dict[str, float]:
     }
 
 
+# ---------- 暖机期 ----------
+def trim_warmup(eq: pd.Series, positions: Optional[pd.DataFrame] = None) -> tuple[pd.Series, int]:
+    """截掉开头"策略还不可能持仓"的那一段，返回 (截后净值, 被截天数)。
+
+    为什么必须截：回测起点由**数据起点**决定，而 ``min_list_days=60`` 要求
+    上市满 60 个交易日才入池。数据从 2015-01-05 开始时，前 60 个交易日
+    股票池为空，净值恒等于初始资金。这段被计入年化的分母（约 4 个月），
+    而基准在这段时间是活的——2015-01-05~2015-05-04 中证1000 涨了 **69.8%**，
+    策略却记为 0 收益。不截掉，超额会被系统性压低，样本外结论直接失真。
+
+    优先用持仓表判断（第一次有持仓那天之前都是暖机）；没有持仓表时
+    退回"净值首次偏离初始值"。
+    """
+    if eq is None or len(eq) == 0:
+        return eq, 0
+
+    start = None
+    if positions is not None and len(positions) and "trade_date" in positions.columns:
+        dates = pd.to_datetime(positions["trade_date"])
+        if "shares" in positions.columns:
+            dates = dates[positions["shares"].fillna(0) > 0]
+        if len(dates):
+            start = dates.min()
+    if start is None:
+        # 退回"开头连续等于初始值"的长度。只截长度 >=2 的平坦段：
+        # 全程持仓的策略首日也等于初始值（长度 1），那不算暖机，
+        # 截掉会让年化的起点错位一天。
+        flat = (eq - eq.iloc[0]).abs() <= 1e-12
+        n_flat = int(flat.cumprod().sum())
+        if n_flat >= 2 and n_flat < len(eq):
+            start = eq.index[n_flat]
+
+    if start is None:
+        return eq, 0
+    start = pd.Timestamp(start)
+    trimmed = eq[eq.index >= start]
+    if len(trimmed) < 2:              # 全部在暖机内，不截（避免空序列）
+        return eq, 0
+    return trimmed, int(len(eq) - len(trimmed))
+
+
 # ---------- 汇总 ----------
 
 
-def benchmark_metrics(result: "BacktestResult") -> dict[str, Any]:
+def benchmark_metrics(result: "BacktestResult",
+                      ret: Optional[pd.Series] = None) -> dict[str, Any]:
     """相对基准的超额指标；没有基准数据时返回空字典。
 
     基准价来自 ``bars`` 里同代码的行情（由 build_dataset 的 --benchmark 写入），
     缺失时 ``result.benchmark is None``，这里什么都不算——不静默补 0。
     """
     bench = getattr(result, "benchmark", None)
-    ret = result.daily_returns
+    if ret is None:
+        ret = result.daily_returns
     if bench is None or len(bench) < 2 or ret is None or ret.empty:
         return {}
     b = bench.pct_change().reindex(ret.index).fillna(0.0)
@@ -272,17 +315,25 @@ def benchmark_metrics(result: "BacktestResult") -> dict[str, Any]:
 
 def summarize(result: "BacktestResult") -> dict[str, Any]:
     """回测结果汇总（不只有一个最终收益率）。"""
-    eq, ret = result.equity_curve, result.daily_returns
+    eq_full = result.equity_curve
     trades = result.trades
     positions = result.positions
     has_trades = trades is not None and not trades.empty
     has_positions = positions is not None and not positions.empty
+
+    # 暖机期（股票池为空、净值不动）不计入年化/波动/夏普与超额，
+    # 因为它不是策略选择，而是数据起点 + min_list_days 的副产物。
+    eq, warmup_days = trim_warmup(eq_full, positions if has_positions else None)
+    ret = eq.pct_change()
     summary: dict[str, Any] = {
-        "start": str(eq.index[0].date()) if len(eq) else None,
-        "end": str(eq.index[-1].date()) if len(eq) else None,
-        "trading_days": int(len(eq)),
-        "final_equity": float(eq.iloc[-1]) if len(eq) else float("nan"),
-        "cumulative_return": cumulative_return(eq),
+        "start": str(eq_full.index[0].date()) if len(eq_full) else None,
+        "end": str(eq_full.index[-1].date()) if len(eq_full) else None,
+        "trading_days": int(len(eq_full)),
+        "effective_days": int(len(eq)),
+        "warmup_days": int(warmup_days),
+        "first_active_date": str(eq.index[0].date()) if len(eq) else None,
+        "final_equity": float(eq_full.iloc[-1]) if len(eq_full) else float("nan"),
+        "cumulative_return": cumulative_return(eq_full),
         "annualized_return": annualized_return(eq),
         "annualized_volatility": annualized_volatility(ret),
         "sharpe_ratio": sharpe_ratio(ret),
@@ -331,7 +382,7 @@ def summarize(result: "BacktestResult") -> dict[str, Any]:
     summary["annualized_cost_drag"] = cc["annualized_cost_drag"]
     summary["total_turnover"] = cc["total_turnover"]
     # 相对基准的超额指标；没有基准行情时什么都不加（不静默补 0）
-    summary.update(benchmark_metrics(result))
+    summary.update(benchmark_metrics(result, ret))
     return summary
 
 

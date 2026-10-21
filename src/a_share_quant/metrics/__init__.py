@@ -15,6 +15,7 @@ from .performance import (
     plot_equity_curve,
     sharpe_ratio,
     summarize,
+    trim_warmup,
     win_rate,
 )
 
@@ -34,5 +35,6 @@ __all__ = [
     "cost_contribution",
     "summarize",
     "full_report",
+    "trim_warmup",
     "plot_equity_curve",
 ]
