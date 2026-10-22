@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 import pandas as pd
@@ -117,22 +118,22 @@ def _latest_prices(bars: pd.DataFrame, symbols: set[str],
 def _compute_tradeability(bars: pd.DataFrame,
                           status: pd.DataFrame | None,
                           universe: list[str],
-                          as_of: pd.Timestamp) -> tuple[set[str], list[str]]:
-    """计算信号日 as_of 的 (可卖出/解冻代码集合 tradeable, 可新开仓买入代码列表 investable)。
+                          as_of: pd.Timestamp,
+                          held: Iterable[str] = ()) -> tuple[set[str], list[str]]:
+    """计算信号日 as_of 的 (build_plan 用的可交易集合 tradeable, 样本选股池 investable)。
 
-    职责区分（A1 修复，严格对齐回测引擎 `execution.py` 口径）：
-      * ``tradeable``（管**卖** / 持仓是否冻结）：``has_bar − suspended − limit_down_syms``。
-        收盘跌停的已持仓标的次日极大概率卖不出，移出 ``tradeable`` 使其作为**冻结持仓**
-        （计入总仓位、不生成卖单），防止把跌停股的账面市值释放出来去重复买别的票；
-        收盘涨停的已持仓标的保留在 ``tradeable`` 中（涨停买盘充足，允许卖出减仓/清仓）。
-      * ``investable``（管**买** / 选股建仓池）：``universe ∩ (has_bar − suspended − limit_up_syms)``。
-        **不从 tradeable 派生**：收盘涨停的标的移出 ``investable``（不新开仓追涨停），
-        但**收盘跌停的标的保留在 ``investable`` 中**（跌停=卖盘堆积、卖难买易，跌停时买入
-        通常能成交，且回测引擎 `execution.py` 只在卖出时拦 `limit_down`、买入不拦）。
-      * ``status`` 新鲜度守卫（A3 修复）：停牌的权威来源是 `status.parquet`（`bars` 只含
-        有行情的行，`bars.is_suspended` 恒为 False）。若 `status` 非空但不含 `as_of` 当日记录
-        （例如增量更新漏更了 status），显式打印 `[warn] 停牌数据落后 N 天` 告警，绝不静默放行。
+    ``build_plan`` 对 ``tradeable`` 的用法有两处：已持仓不在其中 → 冻结；样本入选者不在其中
+    → 目标 0 股。所以它必须同时满足"持仓能卖"和"新票能买"，按是否持有分开判：
+      * ``tradeable = has_bar − suspended − (limit_down ∩ held)``：只有**已持有**的跌停股冻结
+        （次日大概率卖不出，按原股数占仓位）；未持有的跌停股可买（卖难买易，回测
+        `execution.py` 也只在卖出时拦 `limit_down`），必须能分到股数，否则占着样本名额却 0 股。
+      * ``investable = universe ∩ (has_bar − suspended − (limit_up − held))``：未持有的涨停股
+        不新开仓追涨停；**已持有**的涨停股留在样本里，不能因为当日涨停被踢出样本、清仓。
+      * 这是用 t 日收盘对 t+1 开盘的近似；回测引擎按 t+1 开盘是否触板判定，两者会有个别分歧。
+      * ``status`` 新鲜度守卫：停牌的权威来源是 `status.parquet`（`bars.is_suspended` 恒为
+        False）。``status`` 缺失/为空，或不含 `as_of` 当日记录，都显式打印 `[warn]`，不静默放行。
     """
+    held_set = {str(s) for s in held}
     today = bars[pd.to_datetime(bars["trade_date"]) == as_of].copy()
     has_bar = {str(s) for s in today["symbol"]}
 
@@ -140,7 +141,10 @@ def _compute_tradeability(bars: pd.DataFrame,
     if "is_suspended" in today.columns:
         suspended |= {str(s) for s, v in zip(today["symbol"], today["is_suspended"])
                       if pd.notna(v) and bool(v)}
-    if status is not None and not status.empty:
+    if status is None or status.empty:
+        print(f"[warn] 停牌数据缺失：信号日 {pd.Timestamp(as_of).date()} 前后读不到 status 记录"
+              f"（落后超过回看窗口或读取失败），当日停牌过滤可能漏判！", flush=True)
+    else:
         st_dates = pd.to_datetime(status["trade_date"])
         st_today = status[st_dates == as_of]
         if st_today.empty:
@@ -167,12 +171,9 @@ def _compute_tradeability(bars: pd.DataFrame,
         limit_down_syms = {str(s) for s in today.loc[is_ld, "symbol"]}
         limit_up_syms = {str(s) for s in today.loc[is_lu, "symbol"]}
 
-    # tradeable（管卖/持仓解冻）：有行情、未停牌、未跌停（跌停持仓冻结不卖；涨停持仓允许卖）
-    tradeable = has_bar - suspended - limit_down_syms
-    # investable（管买/选股建仓）：universe ∩ (has_bar − suspended − limit_up_syms)
-    # 跌停股保留在 investable 中（卖难买易，可买不可卖，与回测 execution.py 口径一致）
-    can_buy = has_bar - suspended - limit_up_syms
-    investable = [str(s) for s in universe if str(s) in can_buy]
+    tradeable = has_bar - suspended - (limit_down_syms & held_set)
+    selectable = has_bar - suspended - (limit_up_syms - held_set)
+    investable = [str(s) for s in universe if str(s) in selectable]
     return tradeable, investable
 
 
@@ -327,7 +328,8 @@ def main() -> None:
         status_recent = provider.get_status(st_start, as_of)
     except Exception:
         status_recent = None
-    tradeable, investable = _compute_tradeability(bars, status_recent, universe, as_of)
+    tradeable, investable = _compute_tradeability(bars, status_recent, universe, as_of,
+                                                  held=holdings)
 
     plan = build_plan(
         as_of=as_of, prices=prices, sample=sample,

@@ -334,11 +334,16 @@ def test_live_signal_merges_status_and_blocks_limit_down():
         {"trade_date": as_of, "symbol": "000004", "is_st": False, "is_suspended": False},
     ])
     universe = ["000001", "000002", "000003", "000004"]
-    tradeable, investable = mod._compute_tradeability(bars, status, universe, as_of)
+    tradeable, investable = mod._compute_tradeability(bars, status, universe, as_of, held=[])
     assert "000001" in tradeable and "000001" in investable
     assert "000002" not in tradeable and "000002" not in investable, "status 停牌必须不可买不可卖"
-    assert "000003" not in tradeable and "000003" in investable, "跌停股应不可卖但可买（对齐回测口径 A1）"
-    assert "000004" in tradeable and "000004" not in investable, "涨停股可卖不可新买"
+    assert "000003" in tradeable and "000003" in investable, "未持有的跌停股可买，须能分到股数"
+    assert "000004" in tradeable and "000004" not in investable, "未持有的涨停股不新开仓"
+
+    tradeable, investable = mod._compute_tradeability(bars, status, universe, as_of,
+                                                      held=["000003", "000004"])
+    assert "000003" not in tradeable, "已持有的跌停股冻结（不可卖）"
+    assert "000004" in tradeable and "000004" in investable, "已持有的涨停股留在样本、可卖"
 
 
 def test_live_signal_warns_when_status_lags_behind_as_of(capsys):
@@ -364,5 +369,86 @@ def test_live_signal_warns_when_status_lags_behind_as_of(capsys):
     mod._compute_tradeability(bars, status_lag, ["000001"], as_of)
     out = capsys.readouterr().out
     assert "停牌数据落后" in out and "2026-10-19" in out, f"status 少一天必须打印停牌数据落后告警，实际输出: {out!r}"
+
+
+def _load_live_signal_script():
+    from pathlib import Path
+    import importlib.util
+
+    p = Path(__file__).resolve().parents[1] / "scripts" / "live_signal.py"
+    spec = importlib.util.spec_from_file_location("live_signal_script", p)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _limit_scenario():
+    """A 正常、B 收盘跌停、C 收盘涨停、D/E 正常；样本按 A..E 排名，n=3。"""
+    as_of = pd.Timestamp("2026-10-20")
+    closes = {"A": 10.0, "B": 9.0, "C": 11.0, "D": 10.0, "E": 10.0}
+    bars = pd.DataFrame([
+        {"trade_date": as_of, "symbol": s, "close": c, "limit_up": 11.0, "limit_down": 9.0,
+         "limit_exempt": False, "is_suspended": False} for s, c in closes.items()])
+    status = pd.DataFrame([
+        {"trade_date": as_of, "symbol": s, "is_st": False, "is_suspended": False} for s in closes])
+    return as_of, bars, status, list(closes), {s: 10.0 for s in closes}
+
+
+def test_unheld_limit_down_pick_gets_bought_end_to_end():
+    """未持有的跌停股进了样本，就必须分到目标股数（跌停可买）。
+
+    回归：曾经把所有跌停股移出 tradeable，build_plan 只给 tradeable 定量，
+    结果它占着样本名额却是 0 股，1/n 资金闲置且不顺位补人。
+    """
+    mod = _load_live_signal_script()
+    as_of, bars, status, uni, prices = _limit_scenario()
+    tradeable, investable = mod._compute_tradeability(bars, status, uni, as_of, held=[])
+    plan = build_plan(as_of, prices, Sample(ranked=uni, n=3), investable,
+                      current_holdings={}, capital=1_000_000, position=1.0,
+                      cash_buffer=0.0, tradeable=tradeable)
+    buys = dict(zip(plan.orders["symbol"], plan.orders["shares"]))
+    assert set(buys) == {"A", "B", "D"}, f"跌停的 B 应被买入，实际订单 {buys}"
+    assert all(v > 0 for v in buys.values())
+
+
+def test_held_limit_up_sample_stock_not_cleared_end_to_end():
+    """已持有且仍在样本内的股票当日涨停，不能被当成"不可投资"踢出样本而清仓。"""
+    mod = _load_live_signal_script()
+    as_of, bars, status, uni, prices = _limit_scenario()
+    hold = {"A": 33300, "C": 33300, "D": 33300}
+    tradeable, investable = mod._compute_tradeability(bars, status, uni, as_of, held=hold)
+    plan = build_plan(as_of, prices, Sample(ranked=uni, n=3), investable,
+                      current_holdings=hold, capital=1_000_000, position=1.0,
+                      cash_buffer=0.0, tradeable=tradeable)
+    clears = plan.orders.loc[plan.orders["note"] == "clear", "symbol"].tolist()
+    assert "C" not in clears, f"涨停的持仓 C 被清仓：{plan.orders.values.tolist()}"
+    # B 跌停但未持有、排名第 2，可买 → 前 3 名是 A/B/C
+    assert set(plan.target.loc[plan.target["target_shares"] > 0, "symbol"]) == {"A", "B", "C"}
+
+
+def test_held_limit_down_still_frozen_end_to_end():
+    """已持有的跌停股仍须冻结：不卖、按原股数占仓位。"""
+    mod = _load_live_signal_script()
+    as_of, bars, status, uni, prices = _limit_scenario()
+    hold = {"B": 20000}
+    tradeable, investable = mod._compute_tradeability(bars, status, ["A", "C", "D", "E"], as_of,
+                                                      held=hold)
+    assert "B" not in tradeable
+    plan = build_plan(as_of, prices, Sample(ranked=["A", "C", "D", "E"], n=3), investable,
+                      current_holdings=hold, capital=1_000_000, position=1.0,
+                      cash_buffer=0.0, tradeable=tradeable)
+    b = plan.orders[plan.orders["symbol"] == "B"]
+    assert b.empty or (b["side"] == "hold").all(), f"跌停持仓 B 不应有卖单：{b.values.tolist()}"
+
+
+def test_status_missing_in_window_warns(capsys):
+    """status 在回看窗口内完全为空/读取失败（落后超过窗口）时也必须告警，不能静默放行。"""
+    mod = _load_live_signal_script()
+    as_of, bars, _, uni, _ = _limit_scenario()
+    for st in (None, pd.DataFrame(columns=["trade_date", "symbol", "is_suspended"])):
+        mod._compute_tradeability(bars, st, uni, as_of, held=[])
+        out = capsys.readouterr().out
+        assert "停牌数据" in out and "[warn]" in out, f"status={st!r} 时应告警，实际 {out!r}"
 
 
