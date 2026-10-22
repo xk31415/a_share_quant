@@ -15,6 +15,7 @@ ROOT = Path(r"D:/a_share_quant")
 
 
 def ew_returns(data_dir: Path) -> pd.Series:
+    """日频等权再平衡的月度复合收益（含日频再平衡红利，仅作参考）。"""
     b = pd.read_parquet(data_dir / "bars.parquet")
     b["trade_date"] = pd.to_datetime(b["trade_date"])
     b = b[(b["is_suspended"] == False) & b["adj_close"].notna() & (b["adj_close"] > 0)]
@@ -24,6 +25,30 @@ def ew_returns(data_dir: Path) -> pd.Series:
     mat = b.pivot_table(index="trade_date", columns="symbol", values="ret")
     daily = mat.mean(axis=1)
     return (1 + daily).resample("ME").prod() - 1
+
+
+def monthly_ew_returns(data_dir: Path, min_hist: int = 60) -> pd.Series:
+    """月频等权收益（与 replicate_universe.py 同源：个股月内买入持有，月末等权）。
+
+    注意：必须在全量 bars 上先算 ``cumsum() >= min_hist``（暖机），再按月份切片；
+    若先把 bars 截到 ``>= 04-30`` 再算 ``cumsum() >= 60``，会造成**双重暖机截断**，
+    把 5~7 月的已建仓月份误删（历史坑：2020-2024 因此从 +9.85% 被误算成 +4.95%）。
+    """
+    b = pd.read_parquet(data_dir / "bars.parquet")
+    b["trade_date"] = pd.to_datetime(b["trade_date"])
+    b = b[(b["is_suspended"] == False) & b["adj_close"].notna()
+          & (b["adj_close"] > 0) & (~b["is_st"].fillna(False))]
+    b = b.sort_values(["symbol", "trade_date"])
+    b["ret"] = b.groupby("symbol")["adj_close"].pct_change()
+    b = b.dropna(subset=["ret"])
+    px = b.pivot_table(index="trade_date", columns="symbol", values="adj_close")
+    ok = (px.notna().cumsum() >= min_hist).stack()
+    ok.index.names = ["trade_date", "symbol"]
+    b = b.set_index(["trade_date", "symbol"])
+    b = b[b.index.isin(ok[ok].index)].reset_index()
+    b["ym"] = b["trade_date"].dt.to_period("M")
+    m = (1 + b["ret"]).groupby([b["symbol"], b["ym"]]).prod() - 1
+    return m.unstack(level=0).mean(axis=1)
 
 
 def bench_returns(data_dir: Path, code: str = "000852") -> pd.Series:
@@ -46,12 +71,19 @@ def summarize(name: str, s: pd.Series) -> None:
 
 
 def main() -> None:
-    for tag, d in (("2015-2019", ROOT / "data" / "processed_2015_2019"),
-                   ("2020-2024", ROOT / "data" / "processed")):
+    for tag, d, first_ym in (
+        ("2020-2024", ROOT / "data" / "processed", "2020-05"),
+        ("2015-2019", ROOT / "data" / "processed_2015_2019", "2015-05"),
+        ("2025-2026", ROOT / "data" / "processed_2025_2026", "2025-05"),
+    ):
+        if not (d / "bars.parquet").exists():
+            continue
         print(f"=== {tag}  ({d.name})")
-        ew = ew_returns(d)
-        summarize("全宇宙等权(纯算)", ew)
-        summarize("中证1000", bench_returns(d))
+        m_ew = monthly_ew_returns(d)
+        summarize("月频宇宙等权(全区间)", m_ew)
+        summarize("月频宇宙等权(5月起)", m_ew.loc[m_ew.index >= pd.Period(first_ym, freq="M")])
+        summarize("日频宇宙等权(参考)", ew_returns(d))
+        summarize("中证1000(5月起)", bench_returns(d).loc[lambda s: s.index >= pd.Timestamp(f"{first_ym}-01")])
         print()
 
 

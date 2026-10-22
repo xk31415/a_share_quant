@@ -260,3 +260,55 @@ def test_drop_nonmonotonic_k_keeps_clean_data():
     kept, dropped = drop_nonmonotonic_k(bars)
     assert dropped == []
     assert len(kept) == len(bars)
+
+
+def test_limit_ratio_main_board_st_reform_2026_07_06():
+    """2026-07-06 起沪深主板风险警示股（ST/*ST）涨跌幅由 5% 调整为 10%。"""
+    from a_share_quant.data.builders import limit_ratio
+    assert limit_ratio("600000", "SHSE", "2026-07-03", True) == 0.05
+    assert limit_ratio("600000", "SHSE", "2026-07-06", True) == 0.10
+    assert limit_ratio("000001", "SZSE", "2026-07-03", True) == 0.05
+    assert limit_ratio("000001", "SZSE", "2026-07-06", True) == 0.10
+
+
+def test_assemble_exempts_delisting_first_day_bogus_limit():
+    """退市整理期首日/恢复上市首日源表仍给 ±10% 涨跌停但真实收盘已越界 -> 自动标 limit_exempt。"""
+    raw, post, status, inst, dates = _frames()
+    # 模拟 600000 在首日进入退市整理期首日：前收 10.0，源仍给跌停 9.0，但真实开/收盘跌至 2.0
+    m_raw = (raw["symbol"] == "600000") & (raw["trade_date"] == dates[0])
+    raw.loc[m_raw, ["open", "high", "low", "close"]] = 2.0
+    post.loc[(post["symbol"] == "600000") & (post["trade_date"] == dates[0]), "adj_close"] = 2.0
+
+    report = assemble(raw, post, status, inst, dates)
+    row = report.bars[(report.bars["symbol"] == "600000") & (report.bars["trade_date"] == dates[0])].iloc[0]
+    assert bool(row["limit_exempt"]) is True
+    assert pd.isna(row["limit_down"]) and pd.isna(row["limit_up"])
+    assert any("越过源表给出的涨跌停" in w for w in report.warnings)
+
+
+def test_purge_dropped_symbols_syncs_instruments_and_status():
+    """drop_nonmonotonic_k 剔除代码后必须同步从 instruments 与 status 剔除（防孤儿代码入池）。"""
+    from a_share_quant.data.builders import purge_dropped_symbols
+    raw, post, status, inst, dates = _frames(bad_k=False)
+    # 令 000001 的后复权因子下降
+    post.loc[(post["symbol"] == "000001") & (post["trade_date"] == dates[-1]), "adj_close"] = 1.0
+    report = assemble(raw, post, status, inst, dates)
+    cleaned, dropped = purge_dropped_symbols(report)
+    assert dropped == ["000001"]
+    assert "000001" not in set(cleaned.bars["symbol"])
+    assert "000001" not in set(cleaned.instruments["symbol"])
+    assert "000001" not in set(cleaned.status["symbol"])
+
+
+def test_st_regex_matches_st_and_delisting_consolidation_names():
+    """_ST_RE 必须同时识别 ST/*ST/S*ST 与退市整理期简称（退市XX、XX退），且不误伤普通简称。"""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from build_dataset import _ST_RE
+
+    s = pd.Series(["ST海王", "*ST美丽", "S*ST前锋", "退市海越", "天龙退", "浦发银行", "中退科技"])
+    matched = s.str.upper().str.replace(" ", "", regex=False).str.match(_ST_RE).tolist()
+    assert matched == [True, True, True, True, True, False, False]
+
+

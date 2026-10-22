@@ -40,6 +40,7 @@ from a_share_quant.data.builders import (  # noqa: E402
     BuildReport,
     assemble,
     drop_nonmonotonic_k,
+    purge_dropped_symbols,
     self_check,
     split_symbol,
 )
@@ -71,7 +72,8 @@ def _gm_ts(series) -> pd.Series:
     return d
 
 
-_ST_RE = r"^(\*?ST|S\*?ST)"
+# 匹配 ST / *ST / S*ST 以及退市整理期简称（沪市「退市XX」、深市「XX退」）
+_ST_RE = r"^(\*?ST|S\*?ST|退市)|^.+退$"
 
 
 class GmSource:
@@ -214,7 +216,12 @@ class GmSource:
             ["trade_date", "symbol"])
         out = pd.merge_asof(status.sort_values(["trade_date", "symbol"]), snaps,
                             on="trade_date", by="symbol", direction="backward")
-        out["is_st"] = out["is_st_snap"].fillna(False).astype(bool)
+        # 保留逐日 sec_name 识别出的 ST/退市整理期标记（OR 合并），
+        # 避免退市整理期简称变为「XX退/退市XX」后被月度快照的 is_st=False 覆盖回非 ST。
+        out["is_st"] = (
+            out["is_st"].fillna(False).astype(bool)
+            | out["is_st_snap"].fillna(False).astype(bool)
+        )
         return out.drop(columns=["is_st_snap"])
 
     def fetch_all(self, symbols: list[str], start: str, end: str,
@@ -245,14 +252,19 @@ class GmSource:
         status_raw["trade_date"] = _gm_date(status_raw["trade_date"])
         syms = [split_symbol(s) for s in status_raw["symbol"]]
         # get_history_instruments 实测不返回官方 is_st（即使请求也会被丢掉），
-        # 退化为按当日 sec_name 的 ST/*ST 前缀推导——名称变更当天即生效，
-        # 属 point-in-time，但不是官方标记。
+        # 按当日 sec_name 的 ST/*ST/退市/XX退 推导——名称变更当天即生效，
+        # 属 point-in-time；若源同时返回了 is_st 列则取 OR。
+        name_st = (
+            status_raw["sec_name"].astype(str).str.upper()
+            .str.replace(" ", "", regex=False)
+            .str.match(_ST_RE).fillna(False)
+            if "sec_name" in status_raw.columns
+            else pd.Series(False, index=status_raw.index)
+        )
         if "is_st" in status_raw.columns:
-            is_st = status_raw["is_st"].fillna(False).astype(bool)
+            is_st = status_raw["is_st"].fillna(False).astype(bool) | name_st
         else:
-            is_st = (status_raw["sec_name"].astype(str).str.upper()
-                     .str.replace(" ", "", regex=False)
-                     .str.match(_ST_RE).fillna(False))
+            is_st = name_st
         status = pd.DataFrame({
             "trade_date": status_raw["trade_date"],
             "symbol": [s for s, _ in syms],
@@ -777,12 +789,9 @@ def main() -> None:
 
     # 复权因子被数据源重置的标的必须剔除：k 一旦下降，该股在重置日会凭空
     # 跌 60%~70%，之后的收益全部错位。无法修复（不知道正确因子），只能剔。
+    # 同步从 instruments 与 status 移除，避免孤儿代码仍被选入股票池。
     if not args.keep_bad_adjust:
-        report.bars, dropped = drop_nonmonotonic_k(report.bars)
-        if dropped:
-            report.warnings.append(
-                f"剔除 {len(dropped)} 只复权因子非单调的标的（数据源重置了因子）："
-                f"{dropped[:10]}{'...' if len(dropped) > 10 else ''}")
+        report, _ = purge_dropped_symbols(report)
 
     warnings = self_check(report, allow_missing_limits=args.allow_missing_limits,
                           min_symbols_per_day=args.min_symbols_per_day)

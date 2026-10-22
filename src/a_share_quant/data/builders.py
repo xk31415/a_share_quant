@@ -188,6 +188,25 @@ def assemble(bars_raw: pd.DataFrame, bars_post: pd.DataFrame,
         merged[col] = merged[col].fillna(False).astype(bool)
     merged["limit_exempt"] = merged["limit_exempt"].fillna(False).astype(bool)
 
+    # 源表（如 gm）在退市整理期首日或恢复上市首日仍可能给出 ±10% 的名义涨跌停价，
+    # 但当日实际不设涨跌幅，真实收盘价已越过该名义涨跌停（如 2025-2026 的 13 只退市整理期首日暴跌 -50%~-91%）。
+    # 若保留该名义跌停价，执行层会把当日正常交易误判为跌停封死（blocked:limit_down）。
+    close_num = pd.to_numeric(merged["close"], errors="coerce")
+    lu_num = pd.to_numeric(merged["limit_up"], errors="coerce")
+    ld_num = pd.to_numeric(merged["limit_down"], errors="coerce")
+    breach = (~merged["limit_exempt"]) & (
+        (lu_num.notna() & (close_num > lu_num + 0.011))
+        | (ld_num.notna() & (close_num < ld_num - 0.011))
+    )
+    if breach.any():
+        n_b = int(breach.sum())
+        syms_b = sorted(merged.loc[breach, "symbol"].unique().tolist())[:5]
+        warnings.append(
+            f"{n_b} 行行情的收盘价越过源表给出的涨跌停价（例如 {syms_b}，"
+            f"多为退市整理期首日或恢复上市首日无涨跌幅限制），已改标 limit_exempt=True。")
+        merged.loc[breach, ["limit_up", "limit_down"]] = float("nan")
+        merged.loc[breach, "limit_exempt"] = True
+
     # 基准指数不是可交易证券：没有涨跌停，也不该被自检当成"缺涨跌停价"
     if extra_symbols:
         idx_mask = merged["symbol"].isin({str(s) for s in extra_symbols})
@@ -252,12 +271,35 @@ def drop_nonmonotonic_k(bars: pd.DataFrame,
     return bars[~bars["symbol"].isin(offenders)], offenders
 
 
+def purge_dropped_symbols(report: BuildReport,
+                          tol: float | None = None) -> tuple[BuildReport, list[str]]:
+    """剔除复权因子非单调的标的，并同步从 instruments 与 status 中移除。
+
+    若只从 bars 剔除而留在 instruments/status 中（如 2015-2019 的 000022/000043），
+    UniverseBuilder 仍会把它们当作可投资标的选入股票池，导致下单时触发 blocked:no_bar。
+    """
+    kept_bars, dropped = drop_nonmonotonic_k(report.bars, tol=tol)
+    if not dropped:
+        return report, []
+    drop_set = set(dropped)
+    kept_inst = report.instruments[~report.instruments["symbol"].isin(drop_set)].reset_index(drop=True)
+    kept_status = report.status[~report.status["symbol"].isin(drop_set)].reset_index(drop=True)
+    warns = list(report.warnings)
+    warns.append(
+        f"剔除 {len(dropped)} 只复权因子非单调的标的（已同步从 instruments/status 移除）："
+        f"{dropped[:10]}{'...' if len(dropped) > 10 else ''}")
+    return BuildReport(kept_bars.reset_index(drop=True), kept_inst, kept_status,
+                       report.calendar, warns), dropped
+
+
 # ---------------- 硬校验 ----------------
 
 K_TOL = 1e-6
 
 # 创业板注册制改革：2020-08-24 起涨跌幅由 10% 放宽到 20%
 CHINEXT_REFORM = pd.Timestamp("2020-08-24")
+# 沪深主板风险警示板（ST/*ST）规则调整：2026-07-06 起涨跌幅由 5% 调整为 10%
+MAIN_ST_REFORM = pd.Timestamp("2026-07-06")
 NEW_LISTING_EXEMPT_DAYS = 5   # 注册制新股上市前 5 个交易日无涨跌幅限制
 
 
@@ -265,14 +307,16 @@ def limit_ratio(symbol: str, exchange: str, trade_date, is_st: bool) -> float | 
     """当日涨跌幅比例。返回 ``None`` 表示当日无涨跌幅限制（由调用方按上市天数判断）。
 
     规则表（只覆盖本项目允许的板块）：
-      * 主板（沪 600/601/603/605、深 000/001/002/003）：10%，ST 5%
+      * 主板（沪 600/601/603/605、深 000/001/002/003）：10%，ST 在 2026-07-06 前 5%、之后 10%
       * 创业板（300/301）：2020-08-24 起 20%，之前 10%（ST 同样 20%）
       * 科创板 20%、北交所 30%（默认白名单不含，仅兜底）
     """
     board = classify_board(symbol, exchange)
     ts = pd.Timestamp(trade_date)
     if board == "main_sh" or board == "main_sz":
-        return 0.05 if is_st else 0.10
+        if is_st and ts < MAIN_ST_REFORM:
+            return 0.05
+        return 0.10
     if board == "chinext":
         return 0.20 if ts >= CHINEXT_REFORM else 0.10
     if board == "star":

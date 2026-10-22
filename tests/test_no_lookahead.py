@@ -9,7 +9,7 @@ import pytest
 from a_share_quant.backtest import BacktestConfig, BacktestEngine
 from a_share_quant.backtest.costs import CostModel
 from a_share_quant.data.asof import latest_known
-from a_share_quant.factors import Momentum
+from a_share_quant.factors import AvgAmount, Momentum, Volatility
 from a_share_quant.portfolio import PortfolioRules
 from a_share_quant.strategies import Strategy, TargetPortfolio
 from a_share_quant.universe import UniverseBuilder, UniverseRules
@@ -19,26 +19,28 @@ from helpers import make_bars, make_provider
 
 # ---------- 1) 因子不能读取未来日期 ----------
 
-def test_factor_values_unchanged_when_future_mutated():
+@pytest.mark.parametrize("factor_cls", [Momentum, Volatility, AvgAmount])
+def test_factor_values_unchanged_when_future_mutated(factor_cls):
     dates = pd.bdate_range("2021-01-04", periods=30)
     bars = make_bars(dates, ["AAA"])
     t = dates[19]
-    factor = Momentum(window=5)
+    factor = factor_cls(window=5)
     v_before = factor.compute(bars).loc[t, "AAA"]
 
     # 篡改 t 之后的全部数据（x10）
     bars_future = bars.copy()
     future = pd.to_datetime(bars_future["trade_date"]) > t
-    bars_future.loc[future, ["close", "adj_close", "open", "high", "low"]] *= 10.0
+    bars_future.loc[future, ["close", "adj_close", "open", "high", "low", "amount", "volume"]] *= 10.0
 
     v_after = factor.compute(bars_future).loc[t, "AAA"]
-    assert v_after == v_before
+    assert v_after == pytest.approx(v_before)
 
 
-def test_compute_as_of_equals_full_compute_on_that_date():
+@pytest.mark.parametrize("factor_cls", [Momentum, Volatility, AvgAmount])
+def test_compute_as_of_equals_full_compute_on_that_date(factor_cls):
     dates = pd.bdate_range("2021-01-04", periods=30)
     bars = make_bars(dates, ["AAA", "BBB"])
-    factor = Momentum(window=3)
+    factor = factor_cls(window=3)
     t = dates[20]
     as_of_series = factor.compute_as_of(bars, t)
     full = factor.compute(bars).loc[t]
