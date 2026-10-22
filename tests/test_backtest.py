@@ -125,19 +125,12 @@ def test_limit_down_blocks_sell():
     assert (sell["trade_date"] > d3).any()
 
 
-def test_retried_sells_are_ordered_independent_of_hash_seed():
-    """跌停卖不出的挂单，次日补挂顺序必须按代码排序。
-
-    曾按 set 遍历顺序写回 pending_sells：顺序随 PYTHONHASHSEED 变，现金累加顺序跟着变，
-    同一实验两次运行的 Sharpe/超额在浮点末位上不一致（EXP-20261022-151206-5368 复现）。
-    """
+def _run_buy_then_exit_all_limit_down(syms, dates, limit_down_day, freq):
+    """第一个信号日全仓等权买入，之后信号全部清仓；limit_down_day 当天全体开盘跌停。"""
     from a_share_quant.strategies import Strategy, TargetPortfolio
 
-    syms = [f"S{i:02d}" for i in range(12)]
-    dates = pd.bdate_range("2021-01-04", periods=6)
     bars = make_bars(dates, syms)
-    d3 = pd.Timestamp(dates[2])
-    mask = bars["trade_date"] == d3
+    mask = bars["trade_date"] == pd.Timestamp(limit_down_day)
     bars.loc[mask, "open"] = bars.loc[mask, "limit_down"]
     bars.loc[mask, "low"] = bars.loc[mask, "limit_down"]
     provider = make_provider(dates, syms, bars=bars)
@@ -160,12 +153,38 @@ def test_retried_sells_are_ordered_independent_of_hash_seed():
         cost_model=CostModel(slippage_rate=0.0),
         config=BacktestConfig(start_date=str(dates[0].date()),
                               end_date=str(dates[-1].date()),
-                              rebalance_frequency="D"))
-    trades = engine.run().trades
-    day4 = trades[(trades["direction"] == "sell") & (trades["trade_date"] == dates[3])]
-    retried = day4[day4["note"] == "blocked:no_available_shares"]
+                              rebalance_frequency=freq))
+    return engine.run().trades
+
+
+def test_retried_sells_are_ordered_independent_of_hash_seed():
+    """跌停卖不出的挂单，次日（非调仓日）补挂顺序必须按代码排序。
+
+    曾按 set 遍历顺序写回 pending_sells：顺序随 PYTHONHASHSEED 变，现金累加顺序跟着变，
+    同一实验两次运行的 Sharpe/超额在浮点末位上不一致（EXP-20261022-151206-5368 复现）。
+    """
+    syms = [f"S{i:02d}" for i in range(12)]
+    dates = pd.bdate_range("2021-01-04", periods=13)
+    # 周频：01-08 信号 → 01-11 买入；01-15 信号清仓 → 01-18 跌停卖不出 → 01-19 补挂
+    exit_day, retry_day = pd.Timestamp("2021-01-18"), pd.Timestamp("2021-01-19")
+    trades = _run_buy_then_exit_all_limit_down(syms, dates, exit_day, "W")
+    retried = trades[(trades["direction"] == "sell") & (trades["trade_date"] == retry_day)]
     assert len(retried) == len(syms)
+    assert (retried["shares"] > 0).all()
     assert retried["symbol"].tolist() == sorted(syms)
+
+
+def test_rebalance_day_does_not_double_submit_pending_sell():
+    """调仓执行日新目标已清仓的票，不能再从 pending_sells 补挂第二张卖单。
+
+    曾两张都下：第二张必然 0 股、记成 blocked:no_available_shares，虚增 n_blocked_trades。
+    """
+    syms = [f"S{i:02d}" for i in range(12)]
+    dates = pd.bdate_range("2021-01-04", periods=6)
+    trades = _run_buy_then_exit_all_limit_down(syms, dates, dates[2], "D")
+    assert not (trades["note"] == "blocked:no_available_shares").any()
+    day4 = trades[(trades["direction"] == "sell") & (trades["trade_date"] == dates[3])]
+    assert len(day4) == len(syms) and (day4["shares"] > 0).all()
 
 
 # ---------- 停牌 ----------

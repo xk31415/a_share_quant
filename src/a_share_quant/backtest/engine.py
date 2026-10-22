@@ -1,4 +1,4 @@
-"""回测引擎。
+﻿"""回测引擎。
 
 流程（每个交易日 d）：
     数据 -> 股票池 -> 因子/策略 -> 信号 -> 目标组合 -> 交易约束 -> 订单
@@ -345,10 +345,14 @@ class BacktestEngine:
                     orders = generate_orders(target, state, sizing_equity,
                                              ref_prices, self.lot_size,
                                              cash_buffer=cfg.cash_buffer)
-                # 补挂上一日没卖掉的（目标里已没有的标的）
+                # 补挂上一日没卖掉的（目标里已没有的标的）。generate_orders 已对新目标外的
+                # 持仓全量清仓的，不能再补一张，否则第二张必然 0 股、虚增拦截计数。
+                already_selling = {o.symbol for o in orders if o.direction == "sell"}
                 for sym, sh in list(pending_sells.items()):
                     if sym in target:
                         pending_sells.pop(sym, None)      # 新信号接管
+                    elif sym in already_selling:
+                        continue
                     elif sym in ref_prices and sh > 0:
                         # 注意：不能设 reason。Order.reason 的语义是"本来就下不出去"，
                         # 设了会被执行层当成拒绝单直接跳过（踩过一次）。
