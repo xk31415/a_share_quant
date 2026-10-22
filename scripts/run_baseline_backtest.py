@@ -257,6 +257,7 @@ def main() -> None:
                     "strategy": getattr(strategy, "name", type(strategy).__name__),
                     "window": getattr(strategy, "window", None),
                     "skip": getattr(strategy, "skip", None),
+                    "reverse": getattr(strategy, "reverse", None),
                     "seed": getattr(strategy, "seed", None),
                     "liquidity_pct": getattr(strategy, "liquidity_pct", None),
                     "capacity_aum": getattr(strategy, "capacity_aum", None),

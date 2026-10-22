@@ -362,29 +362,31 @@ def test_summarize_first_active_date_falls_back_to_base_point_without_positions(
 def test_benchmark_metrics_does_not_fill_interior_missing_dates_with_zero():
     """R05 F-19 + A2 + A4：
     ① 基准序列内部缺日不得被 fillna(0.0) 记成 0 收益；
-    ② benchmark_missing_days 与 benchmark_extra_days 必须无条件写入（0 也要写），
-       其中 extra_days = len(bench_clean.index.difference(ret_valid.index))。
+    ② benchmark_missing_days 与 benchmark_extra_days 必须无条件写入（0 也要写）；
+    ③ extra_days 只数策略区间内基准有、策略没有的日子。区间外的基准日（预热期、
+       区间之后）不算——否则正常回测恒报 77 天，告警失效。
     """
     from a_share_quant.metrics.performance import benchmark_metrics
 
-    idx = pd.bdate_range("2024-01-01", periods=6)
-    eq = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0, 105.0], index=idx)
-    # 场景 1：基准缺少中间第 3 天（idx[2]），且多出策略有效收益日（idx[1:]）之外的 2 天
-    extra_days = pd.bdate_range("2024-01-10", periods=2)
-    bench_idx = idx.delete(2).append(extra_days)
-    bench = pd.Series([100.0, 101.0, 103.0, 104.0, 105.0, 106.0, 107.0], index=bench_idx, name="000852")
+    idx = pd.bdate_range("2024-01-01", periods=7)
+    # 策略序列漏了 idx[4]；基准漏了 idx[2]，并在区间前后各多出 2 天
+    eq_idx = idx.delete(4)
+    eq = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0, 105.0], index=eq_idx)
+    before = pd.bdate_range("2023-12-27", periods=2)
+    after = pd.bdate_range("2024-01-15", periods=2)
+    bench_idx = before.append(idx.delete(2)).append(after)
+    bench = pd.Series(range(100, 100 + len(bench_idx)), index=bench_idx, dtype=float, name="000852")
 
     res = _FakeResultWithPositions(eq, None)
     res.benchmark = bench
-    res.daily_returns = eq.pct_change()  # idx[0] 为 NaN，ret_valid 为 idx[1:]
+    res.daily_returns = eq.pct_change()
 
     bm = benchmark_metrics(res, res.daily_returns)
     assert bm["benchmark_missing_days"] == 1
-    # bench_clean 含 idx[0]（首日基准点，不在 ret_valid 中）+ 2 个额外日 = 3
-    assert bm["benchmark_extra_days"] == 3
+    assert bm["benchmark_extra_days"] == 1, "只有区间内的 idx[4] 算多出来的"
 
     # 场景 2：基准仅覆盖 ret_valid（0 缺日、0 多日），两个字段也必须存在且为 0
-    bench_exact = pd.Series([101.0, 102.0, 103.0, 104.0, 105.0], index=idx[1:], name="000852")
+    bench_exact = pd.Series([101.0, 102.0, 103.0, 104.0, 105.0], index=eq_idx[1:], name="000852")
     res.benchmark = bench_exact
     bm_exact = benchmark_metrics(res, res.daily_returns)
     assert "benchmark_missing_days" in bm_exact and bm_exact["benchmark_missing_days"] == 0

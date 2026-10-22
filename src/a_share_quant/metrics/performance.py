@@ -315,7 +315,10 @@ def benchmark_metrics(result: "BacktestResult",
         return {}
     missing_dates = ret_valid.index.difference(bench_clean.index)
     n_missing = int(len(missing_dates))
-    extra_dates = bench_clean.index.difference(ret_valid.index)
+    # 只数策略区间内基准有、策略没有的日子；区间外（预热期被 trim_warmup 截掉的部分）
+    # 本来就该多出来，算进去会让这个字段正常运行时恒非零，失去告警意义。
+    in_window = bench_clean.loc[ret.index.min():ret.index.max()]
+    extra_dates = in_window.index.difference(ret.index)
     n_extra = int(len(extra_dates))
     # 仅在策略与基准共有的日期序列上对齐价格再算 pct_change，避免缺日错位
     common_idx = ret.index.intersection(bench_clean.index)
