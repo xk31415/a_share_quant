@@ -30,7 +30,7 @@
 | `review/rounds/R01~R08` | 八轮审查的原始报告（每轮 Grok 攻击 + Claude 判定） | 想知道某个 bug 的完整争论过程 |
 | `review/R05~R07-brief.md` | 三轮审查的任务书 | 看"怎么提问才能问出真问题" |
 | `regression_review_2026-10-21.md` | 回归审查（新旧口径对照、P0/P1 清单） | 2026-10-21 那次大修的现场记录 |
-| `lookahead_audit.md` | 防未来函数审计（股票池/财务/涨跌停的 as_of 截断） | 改数据层之前必读 |
+| `lookahead_audit.md` | 防未来函数审计。**在合成数据上做的**，§五 那份"接入真实数据后必须重跑"的清单**尚未重跑** | 改数据层之前必读；**是交接的未完成项**，见 `../HANDOVER.md` §8 第 2 条 |
 | `project_audit.md` | 项目结构审计 | 早期体检 |
 | `lowvol_defensive.json` | 低波的 beta 匹配对照（脚本产物） | `scripts/lowvol_defensive_check.py` 的输出 |
 
