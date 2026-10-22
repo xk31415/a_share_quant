@@ -703,6 +703,9 @@ def main() -> None:
                          "该股会凭空暴跌）")
     ap.add_argument("--allow-missing-limits", action="store_true",
                     help="允许涨跌停价缺失（对应配置里关闭 consider_limit_up_down）")
+    ap.add_argument("--exempt-limit-breach", action="store_true",
+                    help="显式将收盘价越过源表涨跌停的行改标为 limit_exempt=True"
+                         "（如退市整理期首日无涨跌幅；默认关闭，只告警不改值）")
     ap.add_argument("--min-symbols-per-day", type=int, default=100)
     ap.add_argument("--chunk-size", type=int, default=100,
                     help="baostock 每片股票数（断点续传的粒度）")
@@ -785,7 +788,8 @@ def main() -> None:
 
     report = assemble(bars_raw, bars_post, status, instruments, calendar,
                       boards=boards,
-                      limit_symbols=set(symbols) if args.limit_symbols else None)
+                      limit_symbols=set(symbols) if args.limit_symbols else None,
+                      exempt_limit_breach=args.exempt_limit_breach)
 
     # 数据源不给涨跌停价时按规则表推算（baostock / QMT 都属此类）
     if report.bars["limit_up"].isna().all() and not args.allow_missing_limits:

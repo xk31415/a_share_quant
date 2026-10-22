@@ -52,6 +52,13 @@ def monthly_ew_returns(data_dir: Path, min_hist: int = 60) -> pd.Series:
 
 
 def bench_returns(data_dir: Path, code: str = "000852") -> pd.Series:
+    """按自然月（resample('ME')）和 12/n 年化公式计算的纯算基准序列。
+
+    口径说明（B5）：本脚本输出的中证1000（5月起）年化为 +1.04% / -12.13% / +8.95%
+    （按自然月 `12/n` 折算），与回测引擎 `metrics.json` 的 `benchmark_annualized_return`
+    （按首次持仓日前一交易日起算的日序列 + `252/d` 折算，为 +1.07% / -12.48% / +9.56%）
+    相差 0.03~0.61pp。各报告主表统一以回测引擎口径为准，本脚本仅作纯算对照。
+    """
     b = pd.read_csv(data_dir / "benchmark.csv", dtype={"symbol": str})
     b["trade_date"] = pd.to_datetime(b["trade_date"].astype(str).str.slice(0, 10))
     b = b[b["symbol"] == code].set_index("trade_date")["close"].sort_index()
@@ -84,6 +91,8 @@ def main() -> None:
         summarize("月频宇宙等权(5月起)", m_ew.loc[m_ew.index >= pd.Period(first_ym, freq="M")])
         summarize("日频宇宙等权(参考)", ew_returns(d))
         summarize("中证1000(5月起)", bench_returns(d).loc[lambda s: s.index >= pd.Timestamp(f"{first_ym}-01")])
+        print("   [注] 本脚本按自然月(12/n)折算，中证1000 为 +1.04%/-12.13%/+8.95%；"
+              "与引擎按回测交易日(252/d)折算的 +1.07%/-12.48%/+9.56% 差 0.03~0.61pp，文档以引擎口径为准。")
         print()
 
 

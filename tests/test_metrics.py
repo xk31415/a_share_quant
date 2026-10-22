@@ -360,21 +360,35 @@ def test_summarize_first_active_date_falls_back_to_base_point_without_positions(
 
 
 def test_benchmark_metrics_does_not_fill_interior_missing_dates_with_zero():
-    """R05 F-19 修复：基准序列内部缺日不得被 fillna(0.0) 记成 0 收益。"""
+    """R05 F-19 + A2 + A4：
+    ① 基准序列内部缺日不得被 fillna(0.0) 记成 0 收益；
+    ② benchmark_missing_days 与 benchmark_extra_days 必须无条件写入（0 也要写），
+       其中 extra_days = len(bench_clean.index.difference(ret_valid.index))。
+    """
     from a_share_quant.metrics.performance import benchmark_metrics
 
     idx = pd.bdate_range("2024-01-01", periods=6)
     eq = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0, 105.0], index=idx)
-    # 基准缺少中间的第 3 天（idx[2]）
-    bench_idx = idx.delete(2)
-    bench = pd.Series([100.0, 101.0, 103.0, 104.0, 105.0], index=bench_idx, name="000852")
+    # 场景 1：基准缺少中间第 3 天（idx[2]），且多出策略有效收益日（idx[1:]）之外的 2 天
+    extra_days = pd.bdate_range("2024-01-10", periods=2)
+    bench_idx = idx.delete(2).append(extra_days)
+    bench = pd.Series([100.0, 101.0, 103.0, 104.0, 105.0, 106.0, 107.0], index=bench_idx, name="000852")
 
     res = _FakeResultWithPositions(eq, None)
     res.benchmark = bench
-    res.daily_returns = eq.pct_change()
+    res.daily_returns = eq.pct_change()  # idx[0] 为 NaN，ret_valid 为 idx[1:]
 
     bm = benchmark_metrics(res, res.daily_returns)
     assert bm["benchmark_missing_days"] == 1
-    # 基准累计收益必须等于 105 / 100 - 1 = 5%（只按公共日期或真实首尾配对，不能因缺日错位）
-    assert bm["benchmark_Missing_Dates_Sample" if "benchmark_Missing_Dates_Sample" in bm else "benchmark_missing_days"] == 1
+    # bench_clean 含 idx[0]（首日基准点，不在 ret_valid 中）+ 2 个额外日 = 3
+    assert bm["benchmark_extra_days"] == 3
+
+    # 场景 2：基准仅覆盖 ret_valid（0 缺日、0 多日），两个字段也必须存在且为 0
+    bench_exact = pd.Series([101.0, 102.0, 103.0, 104.0, 105.0], index=idx[1:], name="000852")
+    res.benchmark = bench_exact
+    bm_exact = benchmark_metrics(res, res.daily_returns)
+    assert "benchmark_missing_days" in bm_exact and bm_exact["benchmark_missing_days"] == 0
+    assert "benchmark_extra_days" in bm_exact and bm_exact["benchmark_extra_days"] == 0
+
+
 

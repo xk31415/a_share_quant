@@ -272,18 +272,29 @@ def test_limit_ratio_main_board_st_reform_2026_07_06():
 
 
 def test_assemble_exempts_delisting_first_day_bogus_limit():
-    """退市整理期首日/恢复上市首日源表仍给 ±10% 涨跌停但真实收盘已越界 -> 自动标 limit_exempt。"""
+    """B3：收盘越过源表涨跌停时，默认路径只告警、不静默改标 limit_exempt；
+    仅当显式传入 exempt_limit_breach=True（CLI --exempt-limit-breach）时才豁免。
+    """
     raw, post, status, inst, dates = _frames()
     # 模拟 600000 在首日进入退市整理期首日：前收 10.0，源仍给跌停 9.0，但真实开/收盘跌至 2.0
     m_raw = (raw["symbol"] == "600000") & (raw["trade_date"] == dates[0])
     raw.loc[m_raw, ["open", "high", "low", "close"]] = 2.0
     post.loc[(post["symbol"] == "600000") & (post["trade_date"] == dates[0]), "adj_close"] = 2.0
 
-    report = assemble(raw, post, status, inst, dates)
-    row = report.bars[(report.bars["symbol"] == "600000") & (report.bars["trade_date"] == dates[0])].iloc[0]
-    assert bool(row["limit_exempt"]) is True
-    assert pd.isna(row["limit_down"]) and pd.isna(row["limit_up"])
-    assert any("越过源表给出的涨跌停" in w for w in report.warnings)
+    # 1) 默认路径：只告警，不静默修改 limit_exempt / limit_up / limit_down
+    rep_default = assemble(raw, post, status, inst, dates)
+    row_def = rep_default.bars[(rep_default.bars["symbol"] == "600000") & (rep_default.bars["trade_date"] == dates[0])].iloc[0]
+    assert bool(row_def["limit_exempt"]) is False, "默认不得静默将越界行改标为 limit_exempt=True"
+    assert pd.notna(row_def["limit_down"]) and pd.notna(row_def["limit_up"])
+    assert any("越过源表给出的涨跌停" in w and "未自动修改" in w for w in rep_default.warnings)
+
+    # 2) 显式开关 exempt_limit_breach=True：改标 limit_exempt=True 并置空名义涨跌停价
+    rep_opt = assemble(raw, post, status, inst, dates, exempt_limit_breach=True)
+    row_opt = rep_opt.bars[(rep_opt.bars["symbol"] == "600000") & (rep_opt.bars["trade_date"] == dates[0])].iloc[0]
+    assert bool(row_opt["limit_exempt"]) is True
+    assert pd.isna(row_opt["limit_down"]) and pd.isna(row_opt["limit_up"])
+    assert any("越过源表给出的涨跌停" in w and "已改标 limit_exempt=True" in w for w in rep_opt.warnings)
+
 
 
 def test_purge_dropped_symbols_syncs_instruments_and_status():

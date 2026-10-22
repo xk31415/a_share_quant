@@ -315,6 +315,8 @@ def benchmark_metrics(result: "BacktestResult",
         return {}
     missing_dates = ret_valid.index.difference(bench_clean.index)
     n_missing = int(len(missing_dates))
+    extra_dates = bench_clean.index.difference(ret_valid.index)
+    n_extra = int(len(extra_dates))
     # 仅在策略与基准共有的日期序列上对齐价格再算 pct_change，避免缺日错位
     common_idx = ret.index.intersection(bench_clean.index)
     if len(common_idx) < 2:
@@ -344,9 +346,9 @@ def benchmark_metrics(result: "BacktestResult",
         "tracking_error": te,
         "information_ratio": float(ann_excess / te) if te > 0 else float("nan"),
         "beta": beta,
+        "benchmark_missing_days": n_missing,
+        "benchmark_extra_days": n_extra,
     }
-    if n_missing > 0:
-        out["benchmark_missing_days"] = n_missing
     return out
 
 

@@ -1078,6 +1078,8 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2015_2019 \
 
 ## 二十、R08 交叉审查修复：十条 + 全量重跑（2026-10-22）
 
+> **接注（2026-10-22 晚，§21.1 修正）**：本节 §20.10 / §20.11 中「超额 vs 宇宙等权」引用的 `+2.38 / +2.67 / +2.91pp`（及非中性 `+2.39 / +2.23 / +13.22pp`），其分母 `+4.95% / -6.02% / +4.18%` 后经 §21.1 查明误做了**双重暖机截断**（漏掉 5~7 月行情），**已作废**。修正为真实对齐窗口宇宙等权（`+9.85% / -6.61% / +17.09%`）后，行业中性反转相对宇宙等权三段为 **`-2.52 / +3.26 / -10.00pp`**（非中性为 `-2.51 / +2.82 / +0.31pp`）。策略本身的引擎回测数字（`EXP-20261022-*`）不变，请结合第二十一节阅读。
+
 判定见 `rounds/R08-claude.md`：F-36~F-45 **十条全部成立**，本机逐条实测。
 
 **这一节和前面十九节不同：F-40 让三段回测的每个数字都变了，三条结论被推翻。**
@@ -1321,17 +1323,17 @@ k_per_industry、单成员行业跳过）。
 
 ### 21.2 真实数据防未来函数审计（`reports/lookahead_audit.md` §五 落地）
 
-在三份真实数据集上完成 `lookahead_audit.md` §五 的全部核查（详见该报告新增的 §六），查出并修补以下真实数据边界问题（均不改变现有 17 组 `EXP-20261022-*` 的回测结果）：
+在三份真实数据集上完成 `lookahead_audit.md` §五 的全部核查（详见该报告新增的 §六），查出并修补以下真实数据边界问题。**注意（B2 修正）：数据层修复需重建数据集才生效；现有 17 组 `EXP-20261022-*` 中，`2025-2026` 60 日反转（`EXP-20261022-151421-2220`）受 `is_st` 滞后与退市整理期简称翻转影响买入了 3 只退市股，按该 3 只在表内全区间成交汇总净贡献约 `+1.3pp` 年化（重建剔除后预计从 `17.40%` 降至约 `16.5%`；若仅计 `2026-07-01` 退市整理期那三次买入则为 `-2,776` 元 / `-0.18pp`），其余实验不受影响**：
 
 | # | 问题 | 实测影响范围 | 改动与验证 |
 |---|---|---|---|
 | 1 | `drop_nonmonotonic_k` 仅从 `bars` 剔除复权因子重置的标的，未从 `instruments` 与 `status` 移除 | `2015-2019` 的 `000022`、`000043` 留在 `instruments` 中被 `UniverseBuilder` 选入池（17 组已发布实验均未抽中，结果未受影响） | `builders.py` 新增 `purge_dropped_symbols(report)`，`build_dataset.py` 改为三表同步移除；新增单测 `test_purge_dropped_symbols_syncs_instruments_and_status` |
-| 2 | 原 `*ST` 股进入退市整理期后简称变为「XX退/退市XX」，gm `get_symbols` 的 `is_st` 翻回 `False`，导致退市前最后 15 日重新入池 | 三段分别有 `7 / 15 / 9` 只退市股在末尾翻回 `False`；2025-2026 反转因此在 `2026-07-01` 买入 `天龙退/恒久退/赛隆退` 并在 10 日后触发强平 | `build_dataset.py` 扩展 `_ST_RE = r"^(\*?ST|S\*?ST|退市)\|^.+退$"`，且 `_attach_st_snapshots` 改为与 `sec_name` 识别结果取 `OR`；写入 README 限制清单第 37 条 |
-| 3 | 退市整理期首日 / 恢复上市首日无涨跌幅限制，但 gm 源仍填 `±10%` 的 `limit_up/limit_down` 且 `limit_exempt=False` | `2020-2024` 有 2 行、`2025-2026` 有 13 行（均为退市整理期首日暴跌 `-50%~-91%`）；17 组实验 0 笔交易撞上这 15 行 | `builders.py::assemble` 自动检测真实收盘越过源表涨跌停的行，改标 `limit_exempt=True` 并置空涨跌停价；新增单测 `test_assemble_exempts_delisting_first_day_bogus_limit` |
-| 4 | 2026-07-06 起沪深主板 ST/*ST 涨跌幅由 `±5%` 调整为 `±10%`，但 `builders.py::limit_ratio` 仍写死 `5%` | `2025-2026` 在 2026-07-06 后有 999 行主板 ST 真实收盘涨跌幅超 `5.5%`；若用 baostock 重建会触发规则表越界报错 | `builders.py::limit_ratio` 新增 `MAIN_ST_REFORM = pd.Timestamp("2026-07-06")`；新增单测 `test_limit_ratio_main_board_st_reform_2026_07_06` |
+| 2 | 原 `*ST` 股进入退市整理期后简称变为「XX退/退市XX」，gm `get_symbols` 的 `is_st` 翻回 `False`，导致退市前最后 15 日重新入池 | 三段分别有 `7 / 15 / 9` 只退市股在末尾翻回 `False`。`2025-2026` 反转（`EXP-20261022-151421-2220/trades.csv`）中 3 只退市整理期标的：`300029 天龙退`（买 24,342 / 卖 19,464，`-20.0%`）、`002808 恒久退`（买 24,344 / 卖 24,332，`≈0%`）、`002898 赛隆退`（含 2025-05 戴帽滞后期间一笔共买 43,862 / 卖 64,783，`+47.7%`；仅计 2026-07 退市整理期为买 24,322 / 卖 26,455，`+8.8%`），全表汇总净 `+16,031` 元（占期末权益 `+1.28%`，年化 `17.40% → 约 16.50%`） | `build_dataset.py` 扩展 `_ST_RE = r"^(\*?ST|S\*?ST|退市)\|^.+退$"`，且 `_attach_st_snapshots` 改为与 `sec_name` 识别结果取 `OR`；写入 README 限制清单第 37 条 |
+| 3 | 退市整理期首日 / 恢复上市首日无涨跌幅限制，但 gm 源仍填 `±10%` 的 `limit_up/limit_down` 且 `limit_exempt=False` | `2020-2024` 有 2 行、`2025-2026` 有 13 行（均为退市整理期首日暴跌 `-50%~-91%`）；17 组实验 0 笔交易撞上这 15 行 | **B3 修正**：`builders.py::assemble` 默认**只告警不静默改值**（遵循 AGENTS.md 硬规则 7，防把源数据错误静默合法化），新增显式参数 `exempt_limit_breach=False`（CLI `--exempt-limit-breach`）开启时才改标 `limit_exempt=True`；新增单测 `test_assemble_exempts_delisting_first_day_bogus_limit` 锁定默认不改值与显式开启两条分支 |
+| 4 | 2026-07-06 起沪深主板 ST/*ST 涨跌幅由 `±5%` 调整为 `±10%`（《上海/深圳证券交易所交易规则(2026年修订)》，2026-04-24 发布、2026-07-06 施行），但 `builders.py::limit_ratio` 仍写死 `5%` | `2025-2026` 在 2026-07-06 后有 999 行主板 ST 真实收盘涨跌幅超 `5.5%`；若用 baostock 重建会触发规则表越界报错 | `builders.py::limit_ratio` 新增 `MAIN_ST_REFORM = pd.Timestamp("2026-07-06")` 并注明法规依据；新增单测 `test_limit_ratio_main_board_st_reform_2026_07_06` |
 | 5 | `test_no_lookahead.py` 的因子篡改测试仅测了 `Momentum`，未覆盖 `Volatility` 与 `AvgAmount` | 文档称三个示例因子均已覆盖，实际缺两个 | `test_no_lookahead.py` 改为 `@pytest.mark.parametrize("factor_cls", [Momentum, Volatility, AvgAmount])` |
-| 6 | **实盘信号 `scripts/live_signal.py` 只读 `bars.is_suspended` 且未冻结跌停持仓** | `bars.is_suspended` 在真实数据中恒为 `False`，且收盘跌停股原来仍留在 `tradeable` 中，与 `live_readiness.md` §7.2「停牌/跌停持仓冻结」脱节 | 新增 `_compute_tradeability(bars, status, universe, as_of)`：合并 `status.is_suspended`，将跌停持仓（`close <= limit_down + 1e-4`）移出 `tradeable`（冻结不卖、算入总仓位），将涨停股移出 `investable`（不新开仓追买涨停）；新增单测锁定 |
-| 7 | `TopNMomentum` 未接入 `--liquidity` 与 `--capacity-aum` 选股过滤、`benchmark_metrics` 内部缺日填 0（F-19）、`update_dataset.py` 未同步剔除 `status/instruments` 非单调 `k` 标的、缺 `gm` 时抛原始 traceback（P4） | 命令行传参对动量静默无效；增量更新可能产生缺日或孤儿代码 | ① `TopNMomentum` 接入 `liquidity_pct` 与 `capacity_aum`；② `benchmark_metrics` 改为按公共日期截面配对并报 `benchmark_missing_days`；③ `update_dataset.py` 同步从三表剔除非单调 `k` 标的；④ `GmSource` 缺 `gm` 时提示 `Python314` 路径。全量测试 **269 → 279 passed** |
+| 6 | **实盘信号 `scripts/live_signal.py` 只读 `bars.is_suspended`、未冻结跌停持仓、且 `investable` 从 `tradeable` 派生导致跌停股被顺带禁买（A1/A3）** | `bars.is_suspended` 恒为 `False`；若 `investable` 从 `tradeable` 派生会把跌停股也禁买（与回测 `execution.py` 只拦跌停卖、不拦跌停买口径不一致）；且 `status` 落后于 `as_of` 时无告警 | `_compute_tradeability` 拆清职责：`tradeable`（管卖）= `has_bar − suspended − limit_down_syms`，`investable`（管买）= `universe ∩ (has_bar − suspended − limit_up_syms)`（跌停可买不可卖，对齐回测）；当 `status` 非空但缺 `as_of` 记录时显式打印 `[warn] 停牌数据落后 N 天`；新增单测锁定 |
+| 7 | `TopNMomentum` 未接入 `--liquidity` 与 `--capacity-aum`、`benchmark_metrics` 内部缺日填 0 且 `benchmark_missing_days=0` 不落盘 / 缺 `benchmark_extra_days`（F-19/A2/A4）、`update_dataset.py` 未同步剔除 `status/instruments` 非单调 `k` 标的、缺 `gm` 时抛原始 traceback（P4） | 命令行传参对动量静默无效；`metrics.json` 缺日为 0 时无字段、多日不记；增量更新可能产生孤儿代码 | ① `TopNMomentum` 接入 `liquidity_pct` 与 `capacity_aum`；② `benchmark_metrics` 按公共日期配对，并**无条件写入** `benchmark_missing_days` 与 `benchmark_extra_days`（0 也写）；③ `update_dataset.py` 三表同步剔除非单调 `k`；④ `GmSource` 缺 `gm` 时提示 `Python314` 路径。全量测试 **269 → 280 passed** |
 
 ---
 

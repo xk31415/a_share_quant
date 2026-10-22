@@ -110,7 +110,8 @@ def assemble(bars_raw: pd.DataFrame, bars_post: pd.DataFrame,
              status_raw: pd.DataFrame, instruments: pd.DataFrame,
              calendar: Sequence, boards: Sequence[str] = DEFAULT_BOARDS,
              limit_symbols: Iterable[str] | None = None,
-             extra_symbols: Iterable[str] | None = None) -> BuildReport:
+             extra_symbols: Iterable[str] | None = None,
+             exempt_limit_breach: bool = False) -> BuildReport:
     """装配四张表。
 
     参数
@@ -124,6 +125,8 @@ def assemble(bars_raw: pd.DataFrame, bars_post: pd.DataFrame,
     limit_symbols 只保留这些代码（小样本调试用）
     extra_symbols 额外保留的代码（基准指数）：**只留在 bars 里做对照**，
                   不进 instruments，因此不会被股票池选中、也不会参与交易
+    exempt_limit_breach 是否把收盘价越过源表涨跌停的行改标为 limit_exempt=True（默认 False，
+                  只告警不改值，遵循 AGENTS.md 硬规则 7，需显式开启 --exempt-limit-breach）
     """
     warnings: list[str] = []
     inst = instruments.copy()
@@ -190,7 +193,8 @@ def assemble(bars_raw: pd.DataFrame, bars_post: pd.DataFrame,
 
     # 源表（如 gm）在退市整理期首日或恢复上市首日仍可能给出 ±10% 的名义涨跌停价，
     # 但当日实际不设涨跌幅，真实收盘价已越过该名义涨跌停（如 2025-2026 的 13 只退市整理期首日暴跌 -50%~-91%）。
-    # 若保留该名义跌停价，执行层会把当日正常交易误判为跌停封死（blocked:limit_down）。
+    # B3：默认只显式告警、不静默改值（防止把源数据错误静默合法化，遵循 AGENTS.md 硬规则 7）；
+    # 仅当调用方显式传入 exempt_limit_breach=True（CLI --exempt-limit-breach）时才改标 limit_exempt=True。
     close_num = pd.to_numeric(merged["close"], errors="coerce")
     lu_num = pd.to_numeric(merged["limit_up"], errors="coerce")
     ld_num = pd.to_numeric(merged["limit_down"], errors="coerce")
@@ -201,11 +205,16 @@ def assemble(bars_raw: pd.DataFrame, bars_post: pd.DataFrame,
     if breach.any():
         n_b = int(breach.sum())
         syms_b = sorted(merged.loc[breach, "symbol"].unique().tolist())[:5]
-        warnings.append(
-            f"{n_b} 行行情的收盘价越过源表给出的涨跌停价（例如 {syms_b}，"
-            f"多为退市整理期首日或恢复上市首日无涨跌幅限制），已改标 limit_exempt=True。")
-        merged.loc[breach, ["limit_up", "limit_down"]] = float("nan")
-        merged.loc[breach, "limit_exempt"] = True
+        if exempt_limit_breach:
+            warnings.append(
+                f"{n_b} 行行情的收盘价越过源表给出的涨跌停价（例如 {syms_b}，"
+                f"多为退市整理期首日或恢复上市首日无涨跌幅限制），已改标 limit_exempt=True。")
+            merged.loc[breach, ["limit_up", "limit_down"]] = float("nan")
+            merged.loc[breach, "limit_exempt"] = True
+        else:
+            warnings.append(
+                f"{n_b} 行行情的收盘价越过源表给出的涨跌停价（例如 {syms_b}），"
+                f"默认未自动修改（若确属退市整理期首日等无涨跌幅情形，可加 --exempt-limit-breach 显式豁免）。")
 
     # 基准指数不是可交易证券：没有涨跌停，也不该被自检当成"缺涨跌停价"
     if extra_symbols:
@@ -298,7 +307,8 @@ K_TOL = 1e-6
 
 # 创业板注册制改革：2020-08-24 起涨跌幅由 10% 放宽到 20%
 CHINEXT_REFORM = pd.Timestamp("2020-08-24")
-# 沪深主板风险警示板（ST/*ST）规则调整：2026-07-06 起涨跌幅由 5% 调整为 10%
+# 沪深主板风险警示板（ST/*ST）规则调整：依据《上海/深圳证券交易所交易规则（2026年修订）》
+# （2026-04-24 发布、2026-07-06 施行），主板风险警示股票价格涨跌幅限制比例由 5% 调整为 10%。
 MAIN_ST_REFORM = pd.Timestamp("2026-07-06")
 NEW_LISTING_EXEMPT_DAYS = 5   # 注册制新股上市前 5 个交易日无涨跌幅限制
 

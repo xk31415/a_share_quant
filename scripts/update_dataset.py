@@ -84,6 +84,8 @@ def main() -> None:
                     help="同时刷新证券列表（新上市/退市日期变化），默认开启")
     ap.add_argument("--no-refresh-instruments", dest="refresh_instruments",
                     action="store_false")
+    ap.add_argument("--exempt-limit-breach", action="store_true",
+                    help="显式将收盘价越过源表涨跌停的行改标为 limit_exempt=True（默认只告警不改值）")
     ap.add_argument("--dry-run", action="store_true", help="只报告，不写盘")
     args = ap.parse_args()
 
@@ -170,7 +172,8 @@ def main() -> None:
 
     print("[4/5] 装配新窗口")
     report = assemble(raw, post, status_new, inst,
-                      calendar=cal_slice, boards=boards)
+                      calendar=cal_slice, boards=boards,
+                      exempt_limit_breach=args.exempt_limit_breach)
     if report.bars["limit_up"].isna().all():
         print("      源未提供涨跌停价，按规则表推算")
         report.bars, w = derive_limits(report.bars, report.instruments, report.calendar)
