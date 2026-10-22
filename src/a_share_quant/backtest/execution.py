@@ -223,7 +223,10 @@ class ExecutionSimulator:
             price = self.cost_model.sell_price(open_px)
             turnover = shares * price
             cost = self.cost_model.sell_cost(turnover)
-            portfolio.sell(od.symbol, shares, price, cost)
+            # 现金回笼按复权口径（R08 F-40）：估值走 k/adj_ref，卖出也必须走，
+            # 否则送转/分红之后一卖出就凭空亏损。`cost` 仍按原始成交额，见 sell()。
+            portfolio.sell(od.symbol, shares, price, cost,
+                           row.get("adj_factor", 1.0))
             fills.append(Fill(od.symbol, "sell", shares, price, cost, "filled",
                               capped=capped))
 

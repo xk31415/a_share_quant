@@ -168,6 +168,11 @@ def main() -> None:
     provider = LocalFileProvider(data_dir)
     cal = provider.get_calendar()
     as_of = _resolve_as_of(cal, args.as_of)
+    # 季度调仓月的判断要用**请求日**的月份，不是回滚后交易日的月份（R08 F-43）。
+    # 实测：请求 2023-04-01（季度月）回滚到 2023-03-31（非季度月），判断直接翻转，
+    # 该调仓的一天被当成"只检查"跳过；2025-11-01 则反过来，非季度月被当成季度月下单。
+    quarter_month = (pd.Timestamp(args.as_of).normalize().month
+                     if args.as_of else as_of.month)
 
     # ---- 熔断 1：数据新鲜度 ----
     stale_days = (pd.Timestamp.today().normalize() - as_of).days
@@ -232,10 +237,11 @@ def main() -> None:
     # 只**不下单**，但"检查"必须真的做：原来这里的 return 在 build_plan 之前，
     # 打印的"本月只检查不下单"其实一笔都没查过（R06 F-30）。
     check_only = bool(not args.ignore_quarter and holdings
-                      and as_of.month not in DEFAULT_REBALANCE_MONTHS)
+                      and quarter_month not in DEFAULT_REBALANCE_MONTHS)
     if check_only:
-        print(f"{as_of.date()} 不是季度调仓月 {DEFAULT_REBALANCE_MONTHS}，"
-              f"本月只检查不下单。要强制调仓加 --ignore-quarter", flush=True)
+        print(f"{as_of.date()}（请求月 {quarter_month}）不是季度调仓月 "
+              f"{DEFAULT_REBALANCE_MONTHS}，本月只检查不下单。"
+              f"要强制调仓加 --ignore-quarter", flush=True)
 
     # ---- 总资产：优先用「现金 + 持仓市值」----
     held_value = sum(sh * prices[s] for s, sh in holdings.items() if s in prices)

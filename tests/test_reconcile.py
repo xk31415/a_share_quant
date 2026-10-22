@@ -333,19 +333,55 @@ def test_digest_ignores_column_layout_and_dtype():
                        ("B", "sell", 200, 20.0, 8.0)]) != ref
 
 
-def test_digest_key_includes_date_so_cross_day_is_not_a_duplicate():
-    """R07 F-33：判定键必须带日期，否则连续两天空成交会被误判成重复。
+def test_digest_does_not_depend_on_the_date_or_on_empty_batches():
+    """R07 F-33 + R08 F-37：日期不参与指纹，空批次不产生指纹。
 
-    空批次的指纹恒为 `empty`，只看内容的话第二天必定被拦——
-    而空批次本来就没有可重复入账的股数，这次拦截纯属误伤。
+    R07 用「日期 + 指纹」当判定键来修跨天误伤，结果**日期本身成了绕过手段**：
+    改一下 `--as-of` 就能把同一份成交连加三次（1000 → 1100 → 1200 → 1300）。
+    现在指纹只由股数决定，日期只写进历史供人看；空批次返回空串、不记历史，
+    于是连续两天空成交不会互相误伤。
+    """
+    import inspect
+
+    mod = _load_script()
+    assert mod._fills_digest(normalize_fills(_fills([]))) == "", \
+        "空批次不应产生指纹"
+    # 指纹函数的签名里根本没有日期——换 --as-of 不可能改变它
+    assert "as_of" not in inspect.signature(mod._fills_digest).parameters
+    one = normalize_fills(_fills([("A", "buy", 100, 10.0, 5.0)]))
+    again = normalize_fills(_fills([("A", "buy", 100, 10.0, 5.0)]))
+    assert mod._fills_digest(one) == mod._fills_digest(again)
+
+
+def test_digest_ignores_price_to_two_decimals():
+    """R08 F-36：明细价加权后与券商两位小数汇总价，指纹必须相同。
+
+    两笔 100 股 @10.01 与 @10.02 加权是 10.015，`round(3)` 记 10.015；
+    券商「交割单」按两位小数写一行 `200 @ 10.02`，指纹对不上，股数被再加一遍
+    （实测 1200 → 1400）。价格干脆不进指纹——决定持仓变化的硬信息只有股数。
+    """
+    detail = _digest_of([("A", "buy", 100, 10.01, 5.0),
+                         ("A", "buy", 100, 10.02, 5.0)])
+    summary = _digest_of([("A", "buy", 200, 10.02, 10.0)])
+    exact = _digest_of([("A", "buy", 200, 10.015, 10.0)])
+    assert detail == summary, "两位小数的汇总价必须认得出是同一批"
+    assert detail == exact
+
+
+def test_digest_history_blocks_any_earlier_batch_not_just_the_last(tmp_path):
+    """R08：判定看的是**历史**，不是"最后一批"。
+
+    只记最后一批时，`h0 -A→ h1 -B→ h2` 之后拿 h2 重跑 A 不拦——A 的股数
+    早就在 h2 里了。历史列表把这条补上。
     """
     mod = _load_script()
-    empty = normalize_fills(_fills([]))
-    assert mod._fills_digest(empty) == "empty"
-    assert mod._digest_key(empty, "2026-10-20") != mod._digest_key(empty, "2026-10-21")
-    # 同一天同一批内容，键必须相同（这是要拦的场景）
-    one = normalize_fills(_fills([("A", "buy", 100, 10.0, 5.0)]))
-    assert mod._digest_key(one, "2026-10-20") == mod._digest_key(one, "2026-10-20")
+    p = tmp_path / "holdings.digest"
+    mod._append_digest(p, "2026-10-20", "aaaa")
+    mod._append_digest(p, "2026-10-21", "bbbb")
+    hist = mod._digest_history(p)
+    assert "aaaa" in hist, "旧批次不能被最后一批顶掉"
+    assert "bbbb" in hist
+    assert "cccc" not in hist
 
 
 def test_infer_as_of_reads_the_date_directory_name():
@@ -454,3 +490,114 @@ def test_stale_unmatched_file_is_removed_after_the_fix(tmp_path):
     assert json.loads((day2 / "reconcile.json").read_text(
         encoding="utf-8"))["n_unmatched_fills"] == 0
     assert not (day2 / "unmatched_fills.csv").exists(), "残留文件应被清理"
+
+
+# ---------------------------------------------------------------- R08 F-37/F-38/F-39
+def _cli(root, day, fills, *extra, holdings=None, save=None):
+    """更底层的 CLI 调用：holdings / save 可以显式不传。"""
+    import subprocess
+    import sys
+
+    cmd = [sys.executable, str(root / "scripts" / "reconcile.py"),
+           "--orders", str(day), "--fills", str(fills)]
+    if holdings is not None:
+        cmd += ["--holdings", str(holdings)]
+    if save is not None:
+        cmd += ["--save-holdings", str(save)]
+    cmd += list(extra)
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", cwd=str(root)).returncode
+
+
+def test_changing_as_of_does_not_bypass_the_duplicate_guard(tmp_path):
+    """R08 F-37：`--as-of` 不能成为绕过重复入账保护的手段。
+
+    R07 把「日期 + 指纹」做进判定键，于是同一份成交只要换一个 `--as-of`
+    就能连加：1000 → 1100 → 1200 → 1300，三次退出码全是 0。
+    现在日期只写进历史供人看，判定只比对股数指纹。
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    day = tmp_path / "2026-10-20"
+    day.mkdir()
+    (day / "orders.csv").write_text("symbol,side,shares,price\nA,buy,100,10.0\n",
+                                    encoding="utf-8")
+    fills = tmp_path / "f.csv"
+    fills.write_text("symbol,side,shares,price,fee\nA,buy,100,10.0,5.0\n",
+                     encoding="utf-8")
+    h = tmp_path / "h0.csv"
+    h.write_text("symbol,shares\nA,1000\n", encoding="utf-8")
+
+    assert _cli(root, day, fills, holdings=h, save=tmp_path / "h1.csv") == 0
+    # 换一个 --as-of，指纹没变，必须拦住
+    assert _cli(root, day, fills, "--as-of", "2026-10-21",
+                holdings=tmp_path / "h1.csv", save=tmp_path / "h2.csv") == 1
+    assert not (tmp_path / "h2.csv").exists()
+    # 再换回来也一样
+    assert _cli(root, day, fills, holdings=tmp_path / "h1.csv",
+                save=tmp_path / "h3.csv") == 1
+
+
+def test_report_is_not_rewritten_when_holdings_passed_without_saving(tmp_path):
+    """R08 F-38：不传 `--save-holdings` 的重跑也必须查指纹，不能改报告。
+
+    原条件 `if args.save_holdings and not fills.empty`，于是「不写持仓、只写报告」
+    的那次重跑完全不查指纹：退出码 0，`n_holdings_diff` 0→2、`abs_value_gap` 0→3300，
+    第一次的正确报告被按重复入账算出的偏离盖掉。
+    """
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    day = tmp_path / "d"
+    day.mkdir()
+    (day / "orders.csv").write_text(
+        "symbol,side,shares,price\nA,buy,100,10.0\nB,sell,200,20.0\n", encoding="utf-8")
+    (day / "target.csv").write_text(
+        "symbol,target_shares,price\nA,1100,10.0\nB,300,20.0\n", encoding="utf-8")
+    fills = tmp_path / "f.csv"
+    fills.write_text(
+        "symbol,side,shares,price,fee\nA,buy,100,10.0,5.0\nB,sell,200,20.0,8.0\n",
+        encoding="utf-8")
+    h0 = tmp_path / "h0.csv"
+    h0.write_text("symbol,shares\nA,1000\nB,500\n", encoding="utf-8")
+    h1 = tmp_path / "h1.csv"
+
+    assert _cli(root, day, fills, holdings=h0, save=h1) == 0
+    before = (day / "reconcile.json").read_text(encoding="utf-8")
+    assert json.loads(before)["n_holdings_diff"] == 0
+
+    # 不传 --save-holdings 的重跑：必须退出码 1，且报告一字不改
+    assert _cli(root, day, fills, holdings=h1) == 1
+    assert (day / "reconcile.json").read_text(encoding="utf-8") == before
+
+
+def test_existing_holdings_file_is_never_overwritten_by_an_empty_start(tmp_path):
+    """R08 F-39：`--save-holdings` 指向已存在持仓、又没传 `--holdings` 时必须拒绝。
+
+    按空仓对账会把整份持仓盖成"这一笔成交的结果"。成交全是买入的那天不触发
+    超卖保护，退出码 0、标准输出无提示——实测 `A,1000 / B,500` 被盖成 `A,100`，
+    1500 股一起没了。次日建仓会按"只有 100 股"重算整批仓位。
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    day = tmp_path / "d"
+    day.mkdir()
+    (day / "orders.csv").write_text("symbol,side,shares,price\nA,buy,100,10.0\n",
+                                    encoding="utf-8")
+    fills = tmp_path / "f.csv"
+    fills.write_text("symbol,side,shares,price,fee\nA,buy,100,10.0,5.0\n",
+                     encoding="utf-8")
+    book = tmp_path / "book.csv"
+    book.write_text("symbol,shares\nA,1000\nB,500\n", encoding="utf-8")
+    before = book.read_text(encoding="utf-8")
+
+    # 不传 --holdings：拒绝，文件不变
+    assert _cli(root, day, fills, save=book) != 0
+    assert book.read_text(encoding="utf-8") == before, "持仓文件不该被覆盖"
+
+    # 显式承认"成交前确实空仓"才放行
+    assert _cli(root, day, fills, "--from-empty", save=book) == 0
+    assert "A,100" in book.read_text(encoding="utf-8")

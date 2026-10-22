@@ -267,3 +267,59 @@ def test_non_quarter_month_really_runs_the_check():
     # （rindex：熔断打印处也有一个 if check_only:，在 build_plan 之前）
     assert src.rindex("if check_only:") > i_plan
     assert src.index("write_plan(") > src.rindex("if check_only:")
+
+
+# ---------------------------------------------------------------- R08 F-43
+def test_quarter_month_check_uses_the_requested_month_not_the_rolled_back_day():
+    """R08 F-43：季度调仓月的判断要用**请求日**的月份。
+
+    非交易日的 `--as-of` 会被回滚到上一交易日，于是 2023-04-01（季度月）
+    变成 2023-03-31（非季度月），该调仓的一天被当成"只检查"跳过；
+    2025-11-01 则反过来，非季度月被当成季度月下单。
+
+    判断逻辑嵌在 `main()` 里（需要数据目录才能跑），所以这里守住两条结构事实：
+    ① 存在 `quarter_month` 且取自 `args.as_of`；② `check_only` 用的是它。
+    """
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "scripts" / "live_signal.py"
+           ).read_text(encoding="utf-8")
+
+    i = src.index("quarter_month = (")
+    seg = src[i:i + 300]
+    assert "args.as_of" in seg, "quarter_month 必须取自请求日"
+
+    j = src.index("check_only = bool(")
+    assert "quarter_month not in DEFAULT_REBALANCE_MONTHS" in src[j:j + 250], \
+        "check_only 必须用 quarter_month，不能用回滚后的 as_of.month"
+
+    # 回滚本身要保留：数据对账确实要用交易日
+    assert "_resolve_as_of(cal, args.as_of)" in src
+
+
+# ---------------------------------------------------------------- R08 F-43
+def test_quarter_month_check_uses_the_requested_month_not_the_rolled_back_day():
+    """R08 F-43：季度调仓月的判断要用**请求日**的月份。
+
+    非交易日的 `--as-of` 会被回滚到上一交易日，于是 2023-04-01（季度月）
+    变成 2023-03-31（非季度月），该调仓的一天被当成"只检查"跳过；
+    2025-11-01 则反过来，非季度月被当成季度月下单。
+
+    判断逻辑嵌在 `main()` 里（需要数据目录才能跑），所以这里守住两条结构事实：
+    ① 存在 `quarter_month` 且取自 `args.as_of`；② `check_only` 用的是它。
+    """
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "scripts" / "live_signal.py"
+           ).read_text(encoding="utf-8")
+
+    i = src.index("quarter_month = (")
+    seg = src[i:i + 300]
+    assert "args.as_of" in seg, "quarter_month 必须取自请求日"
+
+    j = src.index("check_only = bool(")
+    assert "quarter_month not in DEFAULT_REBALANCE_MONTHS" in src[j:j + 250], \
+        "check_only 必须用 quarter_month，不能用回滚后的 as_of.month"
+
+    # 回滚本身要保留：数据对账确实要用交易日
+    assert "_resolve_as_of(cal, args.as_of)" in src

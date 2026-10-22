@@ -298,7 +298,12 @@ class BacktestEngine:
             # --- 开盘前：T+1 释放昨日及更早持有的份额 ---
             state.start_of_day()
 
-            # --- 退市清算：已过退市日、当天又无行情的持仓，按最后已知价强平 ---
+            # --- 退市清算：已到退市日的持仓一律清掉 ---
+            # 不判"当天有没有行情"：退市了就是不能再持有。当天还有行情的票，
+            # 用最后已知价结算是保守选择（真实世界退市整理期价格通常更低）。
+            # 清掉之后当天**不许再买回**，否则会「强平 -> 同一信号买回 -> 次日再强平」
+            # 空转（R08 F-42：原注释写"当天又无行情"，但代码只判了日期）。
+            forced_today: set[str] = set()
             for sym in list(state.positions):
                 dd = delist_dates.get(sym)
                 if dd is None or d < dd:
@@ -307,12 +312,16 @@ class BacktestEngine:
                 px = last_prices.get(sym)
                 if pos is None or px is None:
                     continue          # 从没估过价的（极罕见），留给估值环节报错
-                state.sell(sym, pos.shares, px, 0.0)
+                # 记强平**前**的股数：sell() 会把 pos.shares 减到 0，
+                # 之后再读就是 0（R08 F-41）。
+                forced_shares = pos.shares
+                state.sell(sym, forced_shares, px, 0.0, last_k.get(sym, 1.0))
                 trade_rows.append({
                     "trade_date": d, "symbol": sym, "direction": "sell",
-                    "shares": pos.shares, "price": px, "cost": 0.0,
+                    "shares": forced_shares, "price": px, "cost": 0.0,
                     "note": "forced:delisted", "capped": False})
                 pending_sells.pop(sym, None)
+                forced_today.add(sym)
 
             # --- 开盘：执行上一信号日生成的目标权重（当日开盘价撮合） ---
             if (pending_weights is not None or pending_sells) and not day_bars.empty:
@@ -328,8 +337,12 @@ class BacktestEngine:
                                                     tradeable, last_prices, last_k)
                 orders = []
                 target = pending_weights or {}
+                if forced_today:
+                    # 今天刚被退市强平的票，不能再进目标（R08 F-42）
+                    target = {k: v for k, v in target.items()
+                              if k not in forced_today}
                 if pending_weights is not None:
-                    orders = generate_orders(pending_weights, state, sizing_equity,
+                    orders = generate_orders(target, state, sizing_equity,
                                              ref_prices, self.lot_size,
                                              cash_buffer=cfg.cash_buffer)
                 # 补挂上一日没卖掉的（目标里已没有的标的）

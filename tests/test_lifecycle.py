@@ -112,3 +112,55 @@ def test_unfilled_sell_does_not_leak_across_new_target():
     result = _engine(provider, Seq([{"AAA": 1.0}, {}, {"AAA": 0.5}]), dates).run()
     # 只要不抛异常、且有成交即可；核心是"旧卖单不会和新买单一起来回打架"
     assert (result.trades["note"] == "filled").any()
+
+
+# ---------------------------------------------------------------- R08 F-41/F-42
+def test_force_liquidation_records_the_shares_it_actually_sold():
+    """R08 F-41：强平成交记录的股数不能是 0。
+
+    原实现先 ``state.sell()`` 把 ``pos.shares`` 减到 0，再记录 ``pos.shares``，
+    于是每条 ``forced:delisted`` 都是 ``shares=0``。权益是对的（现金按强平前
+    股数入账），错的是成交记录 —— 而成交记录是事后核对与成本归因的输入，
+    「卖出股数合计」会永远少一块。
+    """
+    dates = pd.bdate_range("2024-01-02", periods=5)
+    bars = _bars(dates[:2], [
+        (10.0, 10.2, 9.8, 10.0, 11.0, 9.0, 10.0),
+        (10.0, 10.2, 9.8, 10.0, 11.0, 9.0, 10.0),
+    ])
+    inst = pd.DataFrame([{"symbol": "AAA", "exchange": "SZSE", "name": "x",
+                          "list_date": pd.Timestamp("2010-01-01"),
+                          "delist_date": dates[2]}])
+    provider = make_provider(dates, ["AAA"], bars=bars, instruments=inst)
+    result = _engine(provider, Seq([{"AAA": 1.0}]), dates).run()
+
+    forced = result.trades[result.trades["note"] == "forced:delisted"]
+    assert len(forced) == 1
+    assert int(forced.iloc[0]["shares"]) > 0, "强平记录必须写实际卖出的股数"
+    # 卖出股数应当等于退市前最后一天的持仓
+    before = result.positions[result.positions["trade_date"] < pd.Timestamp(dates[2])]
+    assert int(forced.iloc[0]["shares"]) == int(before.iloc[-1]["shares"])
+
+
+def test_delisted_stock_is_not_bought_back_on_the_delist_day():
+    """R08 F-42：退市日当天仍有行情时，强平之后不能又被同一信号买回来。
+
+    原实现只判 ``d < dd``，没判"当天有没有行情"，与注释「当天又无行情」不符。
+    结果是「强平（0 股）→ 当天买回 99,000 → 次日再强平」，持仓永远是 99,000。
+    合成数据的上市区间是 ``d <= delist_date``，这条路径必现。
+    """
+    dates = pd.bdate_range("2024-01-02", periods=5)
+    # 五天都有行情，退市日照样有 bar
+    bars = _bars(dates, [(10.0, 10.2, 9.8, 10.0, 11.0, 9.0, 10.0)] * 5)
+    inst = pd.DataFrame([{"symbol": "AAA", "exchange": "SZSE", "name": "x",
+                          "list_date": pd.Timestamp("2010-01-01"),
+                          "delist_date": dates[2]}])
+    provider = make_provider(dates, ["AAA"], bars=bars, instruments=inst)
+    result = _engine(provider, Seq([{"AAA": 1.0}]), dates).run()
+
+    forced_days = result.trades[result.trades["note"] == "forced:delisted"]
+    assert len(forced_days) == 1, "只应强平一次，不能次日再强平一次"
+    # 退市日之后再没有买入
+    after = result.trades[result.trades["trade_date"] >= pd.Timestamp(dates[2])]
+    assert (after["direction"] == "buy").sum() == 0, "强平之后不许买回"
+    assert result.positions[result.positions["trade_date"] >= pd.Timestamp(dates[2])].empty

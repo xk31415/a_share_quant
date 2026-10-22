@@ -134,7 +134,11 @@ def main() -> None:
                                  industry_map=ind_map,
                                  k_per_industry=args.k_per_industry)
     elif args.strategy == "momentum":
-        strategy = TopNMomentum(top_n=pf.get("max_positions", 20),
+        # top_n 必须跟着 max_pos 走（R08 F-44）。原来写死配置里的 50，
+        # 于是 `--max-positions 10` 时动量仍选 50 只，再由 build_target_weights
+        # 按「权重降序、同权重字典序」截到 10 只——动量是**等权**，
+        # 截断完全按代码字典序，名次信息在截断那一步丢光。
+        strategy = TopNMomentum(top_n=max_pos,
                                 window=int(args.window or bt.get("momentum_window", 60)),
                                 skip=int(args.skip if args.skip is not None else bt.get("momentum_skip", 5)),
                                 reverse=bool(args.reverse))

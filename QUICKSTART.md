@@ -34,7 +34,7 @@
 ```bash
 cd /d/a_share_quant
 "C:\Users\67478\.workbuddy\binaries\python\envs\default\Scripts\python.exe" -m pytest
-# -> 253 passed
+# -> 264 passed
 ```
 
 只跑某一类：

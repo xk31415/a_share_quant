@@ -131,3 +131,61 @@ def test_no_action_data_behaves_like_raw_price():
         got = result.daily_returns.loc[pd.Timestamp(dates[i])]
         assert got == pytest.approx(expected, abs=1e-9), \
             f"{dates[i].date()} 实际 {got:.6f}，按权重 {w:.4f} 预期 {expected:.6f}"
+
+
+class HoldThenExit(Strategy):
+    """前 ``hold`` 次信号满仓，之后空仓 —— 逼出一次真实卖出。
+
+    现有用例全是「买入后一直持有」，卖出那条路一步都走不到，于是
+    「卖出按原始价结算、估值按复权价」这个 P0 长期没被抓到（R08 F-40）。
+    """
+
+    name = "hold_then_exit"
+
+    def __init__(self, hold: int = 3):
+        self.hold = hold
+        self.n = 0
+
+    def generate_target(self, as_of, bars, universe):
+        self.n += 1
+        w = {"AAA": 1.0} if self.n <= self.hold else {}
+        return TargetPortfolio(as_of=pd.Timestamp(as_of).normalize(), weights=w)
+
+
+def test_selling_after_split_returns_full_proceeds():
+    """R08 F-40：10 送 10 之后卖出，回笼现金必须等于持仓市值。
+
+    改前：估值走 ``股数 × 价格 × k/adj_ref``（权益连续），卖出却按
+    ``股数 × 原始价`` 结算，送转那部分凭空消失 —— 10 送 10 的卖出日收益
+    是 **-49.5%**，权益从 100 万掉到 50.5 万。
+    """
+    dates = pd.bdate_range("2021-01-04", periods=6)
+    closes = [10.0, 10.0, 5.0, 5.0, 5.0, 5.0]      # 第 3 天 10 送 10
+    adjs = [10.0] * 6                                # 后复权连续
+    result = _run(_frame(dates, closes, adjs), dates, strategy=HoldThenExit(3))
+
+    sell_days = result.trades[result.trades["direction"] == "sell"]
+    assert len(sell_days) == 1, "应当正好卖出一次"
+    eq = result.equity_curve
+    # 卖出前后权益必须相等：卖的是资产，不是亏损
+    for i in range(1, len(eq)):
+        assert abs(eq.iloc[i] - eq.iloc[i - 1]) < 1e-6, \
+            f"{dates[i].date()} 权益跳变 {eq.iloc[i-1]:,.0f} -> {eq.iloc[i]:,.0f}"
+    assert result.daily_returns.dropna().abs().max() < 1e-9, \
+        "除权与卖出都应是 0 收益"
+
+
+def test_selling_after_cash_dividend_returns_full_proceeds():
+    """R08 F-40：5% 现金分红之后卖出，回笼现金同样要按复权口径。
+
+    改前卖出日收益 -4.95%，权益从 100 万掉到 95.05 万。
+    """
+    dates = pd.bdate_range("2021-01-04", periods=6)
+    closes = [10.0, 10.0, 9.5, 9.5, 9.5, 9.5]
+    adjs = [10.0] * 6
+    result = _run(_frame(dates, closes, adjs), dates, strategy=HoldThenExit(3))
+
+    eq = result.equity_curve
+    for i in range(1, len(eq)):
+        assert abs(eq.iloc[i] - eq.iloc[i - 1]) < 1e-6, \
+            f"{dates[i].date()} 权益跳变 {eq.iloc[i-1]:,.0f} -> {eq.iloc[i]:,.0f}"

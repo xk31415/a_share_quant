@@ -80,7 +80,21 @@ class PortfolioState:
         # 当日买入不计入 available_shares（T+1）
         self.cash -= turnover + cost
 
-    def sell(self, symbol: str, shares: int, price: float, cost: float) -> None:
+    def sell(self, symbol: str, shares: int, price: float, cost: float,
+             adj_factor: float = 1.0) -> None:
+        """卖出并按**复权口径**结算现金（R08 F-40）。
+
+        持仓估值走 ``position_value``（``股数 × 价格 × k/adj_ref``），现金回笼
+        必须同口径，否则除权/分红之后一卖出就凭空亏损：10 送 10 的股票卖出日
+        权益直接腰斩（实测 -49.5%），5% 现金分红是 -4.95%。
+
+        真实世界是「股数变多、价格变低」，这里用「股数不变、按复权价结算」等价
+        表达，好处是不动整手约束与持仓表。
+
+        ``cost`` 仍按**原始成交额**计——真实佣金按实际成交金额收，而实际金额与
+        复权金额差一个 ``k/adj_ref``；这个偏差是 `(1-k/ref) × 费率` 的二阶小量
+        （量级 1e-4），不值得为它改成本模型的调用约定。
+        """
         if shares <= 0:
             raise ValueError("shares must be positive")
         pos = self.positions.get(symbol)
@@ -88,7 +102,9 @@ class PortfolioState:
         if available < shares:
             raise InsufficientShares(
                 f"cannot sell {shares} of {symbol}: available {available}")
-        self.cash += shares * price - cost
+        k = float(adj_factor) if adj_factor and adj_factor > 0 else 1.0
+        ref = pos.adj_ref if pos.adj_ref > 0 else 1.0
+        self.cash += shares * price * (k / ref) - cost
         pos.shares -= shares
         pos.available_shares -= shares
         if pos.shares == 0:
