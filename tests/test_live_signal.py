@@ -300,8 +300,11 @@ def test_quarter_month_check_uses_the_requested_month_not_the_rolled_back_day():
 def test_live_signal_merges_status_and_blocks_limit_down():
     """实盘信号脚本必须：
     ① 合并 status 表的 is_suspended（bars.is_suspended 恒为 False）；
-    ② 将跌停持仓（close <= limit_down + 1e-4）移出 tradeable（冻结，算仓位不挂单）；
-    ③ 将涨停非持仓（close >= limit_up - 1e-4）移出 investable（不新开仓追买涨停）。
+    ② 将跌停持仓（close <= limit_down + 1e-4）移出 tradeable（冻结，算仓位不挂卖单），
+       但**保留在 investable 中**（跌停股卖难买易，可买不可卖，对齐回测 execution.py 口径 — A1）；
+    ③ 将涨停非持仓（close >= limit_up - 1e-4）移出 investable（不新开仓追买涨停），
+       但保留在 tradeable 中（已持仓可卖）；
+    ④ 当 status 非空但缺少 as_of 当日记录（停牌数据落后）时必须显式告警（A3）。
     """
     from pathlib import Path
     import importlib.util
@@ -315,11 +318,11 @@ def test_live_signal_merges_status_and_blocks_limit_down():
     assert hasattr(mod, "_compute_tradeability"), "live_signal.py 应提供 _compute_tradeability 辅助函数"
     as_of = pd.Timestamp("2026-10-20")
     bars = pd.DataFrame([
-        # NORMAL: 正常可交易
+        # NORMAL: 正常可买卖
         {"trade_date": as_of, "symbol": "000001", "close": 10.0, "limit_up": 11.0, "limit_down": 9.0, "limit_exempt": False, "is_suspended": False},
         # SUSP_IN_STATUS: bars 里 is_suspended=False，但 status 表里 is_suspended=True
         {"trade_date": as_of, "symbol": "000002", "close": 10.0, "limit_up": 11.0, "limit_down": 9.0, "limit_exempt": False, "is_suspended": False},
-        # LIMIT_DOWN: 收盘跌停，持仓卖不出，应冻结（不在 tradeable）
+        # LIMIT_DOWN: 收盘跌停，持仓卖不出（不在 tradeable），但新开仓允许买入（在 investable）
         {"trade_date": as_of, "symbol": "000003", "close": 9.0, "limit_up": 11.0, "limit_down": 9.0, "limit_exempt": False, "is_suspended": False},
         # LIMIT_UP: 收盘涨停，已持仓可卖（在 tradeable），但新开仓不选（不在 investable）
         {"trade_date": as_of, "symbol": "000004", "close": 11.0, "limit_up": 11.0, "limit_down": 9.0, "limit_exempt": False, "is_suspended": False},
@@ -333,7 +336,33 @@ def test_live_signal_merges_status_and_blocks_limit_down():
     universe = ["000001", "000002", "000003", "000004"]
     tradeable, investable = mod._compute_tradeability(bars, status, universe, as_of)
     assert "000001" in tradeable and "000001" in investable
-    assert "000002" not in tradeable and "000002" not in investable, "status 停牌必须被拦截"
-    assert "000003" not in tradeable and "000003" not in investable, "跌停持仓必须被冻结"
+    assert "000002" not in tradeable and "000002" not in investable, "status 停牌必须不可买不可卖"
+    assert "000003" not in tradeable and "000003" in investable, "跌停股应不可卖但可买（对齐回测口径 A1）"
     assert "000004" in tradeable and "000004" not in investable, "涨停股可卖不可新买"
+
+
+def test_live_signal_warns_when_status_lags_behind_as_of(capsys):
+    """A3：status 非空但不含 as_of（停牌数据落后于行情）时，必须显式告警，不能静默放行。"""
+    from pathlib import Path
+    import importlib.util
+
+    p = Path(__file__).resolve().parents[1] / "scripts" / "live_signal.py"
+    spec = importlib.util.spec_from_file_location("live_signal_script", p)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    as_of = pd.Timestamp("2026-10-20")
+    prev_day = pd.Timestamp("2026-10-19")
+    bars = pd.DataFrame([
+        {"trade_date": as_of, "symbol": "000001", "close": 10.0, "limit_up": 11.0, "limit_down": 9.0, "limit_exempt": False, "is_suspended": False},
+    ])
+    # status 只到前一天 2026-10-19，缺少 as_of 2026-10-20
+    status_lag = pd.DataFrame([
+        {"trade_date": prev_day, "symbol": "000001", "is_st": False, "is_suspended": False},
+    ])
+    mod._compute_tradeability(bars, status_lag, ["000001"], as_of)
+    out = capsys.readouterr().out
+    assert "停牌数据落后" in out and "2026-10-19" in out, f"status 少一天必须打印停牌数据落后告警，实际输出: {out!r}"
+
 
