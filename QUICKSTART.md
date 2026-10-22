@@ -34,7 +34,7 @@
 ```bash
 cd /d/a_share_quant
 "C:\Users\67478\.workbuddy\binaries\python\envs\default\Scripts\python.exe" -m pytest
-# -> 286 passed
+# -> 287 passed
 ```
 
 只跑某一类：
@@ -145,7 +145,7 @@ python scripts/build_dataset.py --source baostock --start 2023-01-01 --end 2023-
 | 源 | 登录 | 逐日 ST / 停牌 | 历史涨跌停价 | 退市股 | 备注 |
 |---|---|---|---|---|---|
 | `baostock`（默认） | 无需 token | ✅ 官方 `isST` | ❌ 规则表推算 | **1197 只** | 免费；高频调用会断连，已加退避重试 |
-| `gm` | `GM_TOKEN` | ST 由 `sec_name` 推导 | ✅ 官方值 | 按 `get_symbols` 截面还原 | 需独立 Python 环境；调用有 5min/1000 次流控 |
+| `gm` | `GM_TOKEN` | ST 按 `get_symbols` 月度截面还原（最多滞后约 20 个交易日） | ✅ 官方值 | 按 `get_symbols` 截面还原 | 需独立 Python 环境；调用有 5min/1000 次流控 |
 | `qmt` | 本地客户端 | 仅停牌 | ❌ | 待测 | 无历史 ST，只能降级 |
 
 > **两个源的分工**：baostock 逐日给官方 `isST`，做状态表更可靠；gm 给官方逐日涨跌停价，
@@ -155,7 +155,8 @@ python scripts/build_dataset.py --source baostock --start 2023-01-01 --end 2023-
 > 直接拿它当历史全市场会引入幸存者偏差。脚本已改用 `get_symbols(trade_date=...)`
 > 按年取截面再求并集（2020-12-31 截面 4140 只、其中 208 只后来退市）。
 > 另外 `get_history_instruments` **不返回官方 `is_st`**（请求了也会被丢弃），
-> 所以 gm 源的 ST 是按当日 `sec_name` 的 `ST/*ST` 前缀推导的。
+> 而且它和 `get_symbols` 返回的 `sec_name` 都是**当前**简称、不是当日简称（2026-10-23 实测），
+> **不能**用来判历史 ST。gm 源的 ST 只取 `get_symbols(trade_date=...)` 截面的 `is_st`（README 限制清单第 40 条）。
 
 涨跌停价由 `builders.derive_limits` 按交易所规则推算（主板 10%、ST 5%、
 创业板 2020-08-24 后 20%、注册制新股前 5 日无限制），并用**收盘价不得越过涨跌停**
@@ -416,7 +417,7 @@ python -c "import a_share_quant; print(a_share_quant.__version__)"
 | 回测 · 等权基准（合成数据） | 最常用，跑完整回测 |
 | 回测 · 真实数据（data/processed） | 接入真实数据后用这个 |
 | Python · 当前文件 | 调试你正在写的脚本 |
-| pytest · 全部测试 | 断点调试 286 个测试 |
+| pytest · 全部测试 | 断点调试 287 个测试 |
 | pytest · 当前文件 | 只跑光标所在的测试文件 |
 | 生成合成数据 | 重新生成合成数据 |
 
@@ -443,7 +444,7 @@ result.trades[result.trades["note"] != "filled"]     # 看所有被拦截的成�
 
 装好 Python 插件后，左侧出现**烧杯图标**（Testing）：
 
-- 会列出 286 个测试，可以单跑、单挑一个调试；
+- 会列出 287 个测试，可以单跑、单挑一个调试；
 - 改完代码自动重新发现；
 - 建议先跑 `tests/test_no_lookahead.py` —— 它专门抓未来函数，动过因子或引擎就该跑它。
 
