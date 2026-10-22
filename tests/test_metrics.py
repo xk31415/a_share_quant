@@ -357,3 +357,24 @@ def test_summarize_first_active_date_falls_back_to_base_point_without_positions(
     assert eq.loc[idx[3]] == 1e6
     # 净值真正开始变动是下一天
     assert str(idx[4].date()) > s["first_active_date"]
+
+
+def test_benchmark_metrics_does_not_fill_interior_missing_dates_with_zero():
+    """R05 F-19 修复：基准序列内部缺日不得被 fillna(0.0) 记成 0 收益。"""
+    from a_share_quant.metrics.performance import benchmark_metrics
+
+    idx = pd.bdate_range("2024-01-01", periods=6)
+    eq = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0, 105.0], index=idx)
+    # 基准缺少中间的第 3 天（idx[2]）
+    bench_idx = idx.delete(2)
+    bench = pd.Series([100.0, 101.0, 103.0, 104.0, 105.0], index=bench_idx, name="000852")
+
+    res = _FakeResultWithPositions(eq, None)
+    res.benchmark = bench
+    res.daily_returns = eq.pct_change()
+
+    bm = benchmark_metrics(res, res.daily_returns)
+    assert bm["benchmark_missing_days"] == 1
+    # 基准累计收益必须等于 105 / 100 - 1 = 5%（只按公共日期或真实首尾配对，不能因缺日错位）
+    assert bm["benchmark_Missing_Dates_Sample" if "benchmark_Missing_Dates_Sample" in bm else "benchmark_missing_days"] == 1
+

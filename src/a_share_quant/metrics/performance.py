@@ -294,40 +294,60 @@ def benchmark_metrics(result: "BacktestResult",
                       ret: Optional[pd.Series] = None) -> dict[str, Any]:
     """相对基准的超额指标；没有基准数据时返回空字典。
 
-    基准价来自 ``bars`` 里同代码的行情（由 build_dataset 的 --benchmark 写入），
+    基准价来自 ``benchmark.csv``（或 ``bars`` 里同代码的行情），
     缺失时 ``result.benchmark is None``，这里什么都不算——不静默补 0。
+
+    注意（R05 F-19 修复）：不再使用 ``bench.pct_change().reindex(ret.index).fillna(0.0)``。
+    若基准序列内部缺日（如增量更新时 benchmark.csv 漏更一天），旧实现会把缺日填成
+    0 收益、再在下一天把两天涨跌算成一天，导致日超额序列错位。
+    现在仅在策略与基准**共有**的日期截面（``ret.index.intersection(bench.index)``）上
+    计算逐日收益率并配对，同时显式记录 ``benchmark_missing_days``。
     """
     bench = getattr(result, "benchmark", None)
     if ret is None:
         ret = result.daily_returns
     if bench is None or len(bench) < 2 or ret is None or ret.empty:
         return {}
-    b = bench.pct_change().reindex(ret.index).fillna(0.0)
+    bench_clean = bench.dropna().sort_index()
+    # ret 的首日（基准点）为 NaN，有效收益日是 ret.dropna().index
+    ret_valid = ret.dropna()
+    if len(ret_valid) < 2 or len(bench_clean) < 2:
+        return {}
+    missing_dates = ret_valid.index.difference(bench_clean.index)
+    n_missing = int(len(missing_dates))
+    # 仅在策略与基准共有的日期序列上对齐价格再算 pct_change，避免缺日错位
+    common_idx = ret.index.intersection(bench_clean.index)
+    if len(common_idx) < 2:
+        return {}
+    b = bench_clean.reindex(common_idx).pct_change()
     if float(b.std(ddof=1)) == 0.0 and float(b.abs().sum()) == 0.0:
         return {}
     # 逐日配对后再算，避免首日 NaN 把 beta 拖成 nan
-    pair = pd.DataFrame({"r": ret, "b": b}).dropna()
+    pair = pd.DataFrame({"r": ret.reindex(common_idx), "b": b}).dropna()
     if len(pair) < 2:
         return {}
-    ret, b = pair["r"], pair["b"]
-    excess = ret - b
-    n = max(len(b), 1)
-    eq_b = (1.0 + b).cumprod()
+    ret_p, b_p = pair["r"], pair["b"]
+    excess = ret_p - b_p
+    n = max(len(b_p), 1)
+    eq_b = (1.0 + b_p).cumprod()
     te = float(excess.std(ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR))
     ann_excess = float(excess.mean() * TRADING_DAYS_PER_YEAR)
-    var_b = float(b.var(ddof=1))
-    beta = float(np.cov(ret, b, ddof=1)[0, 1] / var_b) if var_b > 0 else float("nan")
-    return {
+    var_b = float(b_p.var(ddof=1))
+    beta = float(np.cov(ret_p, b_p, ddof=1)[0, 1] / var_b) if var_b > 0 else float("nan")
+    out: dict[str, Any] = {
         "benchmark_symbol": str(getattr(bench, "name", "") or ""),
         "benchmark_cumulative_return": float(eq_b.iloc[-1] - 1.0),
         "benchmark_annualized_return": float(eq_b.iloc[-1] ** (TRADING_DAYS_PER_YEAR / n) - 1.0),
-        "benchmark_annualized_volatility": float(b.std(ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR)),
+        "benchmark_annualized_volatility": float(b_p.std(ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR)),
         "excess_cumulative_return": float((1.0 + excess).prod() - 1.0),
         "excess_annualized_return": ann_excess,
         "tracking_error": te,
         "information_ratio": float(ann_excess / te) if te > 0 else float("nan"),
         "beta": beta,
     }
+    if n_missing > 0:
+        out["benchmark_missing_days"] = n_missing
+    return out
 
 
 def summarize(result: "BacktestResult") -> dict[str, Any]:

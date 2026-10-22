@@ -142,6 +142,8 @@ def main() -> None:
                                 window=int(args.window or bt.get("momentum_window", 60)),
                                 skip=int(args.skip if args.skip is not None else bt.get("momentum_skip", 5)),
                                 reverse=bool(args.reverse),
+                                liquidity_pct=args.liquidity,
+                                capacity_aum=args.capacity_aum,
                                 industry_map=ind_map,
                                 k_per_industry=args.k_per_industry)
     else:

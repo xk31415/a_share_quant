@@ -297,29 +297,43 @@ def test_quarter_month_check_uses_the_requested_month_not_the_rolled_back_day():
     assert "_resolve_as_of(cal, args.as_of)" in src
 
 
-# ---------------------------------------------------------------- R08 F-43
-def test_quarter_month_check_uses_the_requested_month_not_the_rolled_back_day():
-    """R08 F-43：季度调仓月的判断要用**请求日**的月份。
-
-    非交易日的 `--as-of` 会被回滚到上一交易日，于是 2023-04-01（季度月）
-    变成 2023-03-31（非季度月），该调仓的一天被当成"只检查"跳过；
-    2025-11-01 则反过来，非季度月被当成季度月下单。
-
-    判断逻辑嵌在 `main()` 里（需要数据目录才能跑），所以这里守住两条结构事实：
-    ① 存在 `quarter_month` 且取自 `args.as_of`；② `check_only` 用的是它。
+def test_live_signal_merges_status_and_blocks_limit_down():
+    """实盘信号脚本必须：
+    ① 合并 status 表的 is_suspended（bars.is_suspended 恒为 False）；
+    ② 将跌停持仓（close <= limit_down + 1e-4）移出 tradeable（冻结，算仓位不挂单）；
+    ③ 将涨停非持仓（close >= limit_up - 1e-4）移出 investable（不新开仓追买涨停）。
     """
     from pathlib import Path
+    import importlib.util
 
-    src = (Path(__file__).resolve().parents[1] / "scripts" / "live_signal.py"
-           ).read_text(encoding="utf-8")
+    p = Path(__file__).resolve().parents[1] / "scripts" / "live_signal.py"
+    spec = importlib.util.spec_from_file_location("live_signal_script", p)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
 
-    i = src.index("quarter_month = (")
-    seg = src[i:i + 300]
-    assert "args.as_of" in seg, "quarter_month 必须取自请求日"
+    assert hasattr(mod, "_compute_tradeability"), "live_signal.py 应提供 _compute_tradeability 辅助函数"
+    as_of = pd.Timestamp("2026-10-20")
+    bars = pd.DataFrame([
+        # NORMAL: 正常可交易
+        {"trade_date": as_of, "symbol": "000001", "close": 10.0, "limit_up": 11.0, "limit_down": 9.0, "limit_exempt": False, "is_suspended": False},
+        # SUSP_IN_STATUS: bars 里 is_suspended=False，但 status 表里 is_suspended=True
+        {"trade_date": as_of, "symbol": "000002", "close": 10.0, "limit_up": 11.0, "limit_down": 9.0, "limit_exempt": False, "is_suspended": False},
+        # LIMIT_DOWN: 收盘跌停，持仓卖不出，应冻结（不在 tradeable）
+        {"trade_date": as_of, "symbol": "000003", "close": 9.0, "limit_up": 11.0, "limit_down": 9.0, "limit_exempt": False, "is_suspended": False},
+        # LIMIT_UP: 收盘涨停，已持仓可卖（在 tradeable），但新开仓不选（不在 investable）
+        {"trade_date": as_of, "symbol": "000004", "close": 11.0, "limit_up": 11.0, "limit_down": 9.0, "limit_exempt": False, "is_suspended": False},
+    ])
+    status = pd.DataFrame([
+        {"trade_date": as_of, "symbol": "000001", "is_st": False, "is_suspended": False},
+        {"trade_date": as_of, "symbol": "000002", "is_st": False, "is_suspended": True},
+        {"trade_date": as_of, "symbol": "000003", "is_st": False, "is_suspended": False},
+        {"trade_date": as_of, "symbol": "000004", "is_st": False, "is_suspended": False},
+    ])
+    universe = ["000001", "000002", "000003", "000004"]
+    tradeable, investable = mod._compute_tradeability(bars, status, universe, as_of)
+    assert "000001" in tradeable and "000001" in investable
+    assert "000002" not in tradeable and "000002" not in investable, "status 停牌必须被拦截"
+    assert "000003" not in tradeable and "000003" not in investable, "跌停持仓必须被冻结"
+    assert "000004" in tradeable and "000004" not in investable, "涨停股可卖不可新买"
 
-    j = src.index("check_only = bool(")
-    assert "quarter_month not in DEFAULT_REBALANCE_MONTHS" in src[j:j + 250], \
-        "check_only 必须用 quarter_month，不能用回滚后的 as_of.month"
-
-    # 回滚本身要保留：数据对账确实要用交易日
-    assert "_resolve_as_of(cal, args.as_of)" in src

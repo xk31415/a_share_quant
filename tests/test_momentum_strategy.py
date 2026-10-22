@@ -142,3 +142,25 @@ def test_single_stock_industry_is_skipped():
     strat = TopNMomentum(top_n=2, window=60, skip=5, industry_map=ind2)
     t = strat.generate_target(dates[-1], bars, list(ind2))
     assert "D1" not in t.weights, "单成员行业不该入选"
+
+
+# ---------------------------------------------------------------- 流动性与容量过滤
+def test_momentum_liquidity_and_capacity_filters():
+    """TopNMomentum 必须支持 liquidity_pct 与 capacity_aum 选股过滤，且默认不启用时输出不变。"""
+    bars, dates = _bars()
+    # 令 A 成交额极小（100 元/日），B/C/D 成交额充足（1e8 元/日）
+    bars.loc[bars["symbol"] == "A", "amount"] = 100.0
+    bars.loc[bars["symbol"] != "A", "amount"] = 1e8
+
+    # 默认不启用：最强动量 A 仍入选
+    plain = TopNMomentum(top_n=1, window=60, skip=5)
+    assert list(plain.generate_target(dates[-1], bars, ["A", "B", "C", "D"]).weights) == ["A"]
+
+    # 启用 liquidity_pct=0.75（剔除最不活跃的 A）：改选次强的 B
+    liq = TopNMomentum(top_n=1, window=60, skip=5, liquidity_pct=0.75)
+    assert list(liq.generate_target(dates[-1], bars, ["A", "B", "C", "D"]).weights) == ["B"]
+
+    # 启用 capacity_aum=1_000_000（A 的 10%×100=10 元 < 100 万，买不进）：改选 B
+    cap = TopNMomentum(top_n=1, window=60, skip=5, capacity_aum=1_000_000.0)
+    assert list(cap.generate_target(dates[-1], bars, ["A", "B", "C", "D"]).weights) == ["B"]
+

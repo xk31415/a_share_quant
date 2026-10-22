@@ -151,7 +151,7 @@ def test_benchmark_without_adj_close_falls_back_to_close():
 
 # ---------------------------------------------------------------- R08 F-44
 def test_momentum_top_n_follows_max_positions():
-    """R08 F-44：动量的 `top_n` 必须跟 `--max-positions` 走。
+    """R08 F-44：动量的 `top_n` 必须跟 `--max-positions` 走，且传入 liquidity_pct / capacity_aum。
 
     原来写死配置里的 50，于是 `--max-positions 10` 时动量仍选 50 只，再由
     `build_target_weights` 按「权重降序、同权重字典序」截到 10 只。动量是**等权**，
@@ -167,27 +167,8 @@ def test_momentum_top_n_follows_max_positions():
     i = src.index('elif args.strategy == "momentum":')
     seg = src[i:src.index("else:", i)]
     assert "top_n=max_pos" in seg, "动量 top_n 必须跟 max_pos"
+    assert "liquidity_pct=args.liquidity" in seg, "动量必须接入 liquidity_pct"
+    assert "capacity_aum=args.capacity_aum" in seg, "动量必须接入 capacity_aum"
     assert 'top_n=pf.get("max_positions"' not in seg, \
         "不能再写死配置里的 max_positions"
 
-
-# ---------------------------------------------------------------- R08 F-44
-def test_momentum_top_n_follows_max_positions():
-    """R08 F-44：动量的 `top_n` 必须跟 `--max-positions` 走。
-
-    原来写死配置里的 50，于是 `--max-positions 10` 时动量仍选 50 只，再由
-    `build_target_weights` 按「权重降序、同权重字典序」截到 10 只。动量是**等权**，
-    所以截断完全按代码字典序——名次信息在截断那一步丢光（实测拿到 000000~000009）。
-
-    低波分支一直用的是 `top_n=max_pos`，只有动量分支是例外，这里防它退回去。
-    """
-    from pathlib import Path
-
-    src = (Path(__file__).resolve().parents[1]
-           / "scripts" / "run_baseline_backtest.py").read_text(encoding="utf-8")
-
-    i = src.index('elif args.strategy == "momentum":')
-    seg = src[i:src.index("else:", i)]
-    assert "top_n=max_pos" in seg, "动量 top_n 必须跟 max_pos"
-    assert 'top_n=pf.get("max_positions"' not in seg, \
-        "不能再写死配置里的 max_positions"

@@ -114,6 +114,53 @@ def _latest_prices(bars: pd.DataFrame, symbols: set[str],
     return out
 
 
+def _compute_tradeability(bars: pd.DataFrame,
+                          status: pd.DataFrame | None,
+                          universe: list[str],
+                          as_of: pd.Timestamp) -> tuple[set[str], list[str]]:
+    """计算信号日 as_of 的 (可交易代码集合 tradeable, 可新开仓代码列表 investable)。
+
+    实盘硬规则（见 `reports/live_readiness.md` §7.2 与 README 第 23 条）：
+      1. 停牌的权威来源是 `status.parquet`（`bars` 只含有行情的行，`bars.is_suspended` 恒为 False）；
+      2. 收盘跌停的持仓（`close <= limit_down + 1e-4` 且非 `limit_exempt`）次日极大概率无法卖出，
+         移出 `tradeable` 使其作为冻结持仓（算入总仓位、不下单），防止拿跌停股的账面市值去重复买别的票；
+      3. 收盘涨停的标的（`close >= limit_up - 1e-4` 且非 `limit_exempt`）移出 `investable`（不新开仓追涨停），
+         但保留在 `tradeable` 中（若已持仓且需减仓/清仓仍允许卖出）。
+    """
+    today = bars[pd.to_datetime(bars["trade_date"]) == as_of].copy()
+    has_bar = {str(s) for s in today["symbol"]}
+
+    suspended: set[str] = set()
+    if "is_suspended" in today.columns:
+        suspended |= {str(s) for s, v in zip(today["symbol"], today["is_suspended"])
+                      if pd.notna(v) and bool(v)}
+    if status is not None and not status.empty:
+        st_today = status[pd.to_datetime(status["trade_date"]) == as_of]
+        if "is_suspended" in st_today.columns:
+            suspended |= {str(s) for s, v in zip(st_today["symbol"], st_today["is_suspended"])
+                          if pd.notna(v) and bool(v)}
+
+    limit_down_syms: set[str] = set()
+    limit_up_syms: set[str] = set()
+    if not today.empty and {"close", "limit_up", "limit_down"}.issubset(today.columns):
+        exempt = (today["limit_exempt"].fillna(False).astype(bool)
+                  if "limit_exempt" in today.columns
+                  else pd.Series(False, index=today.index))
+        c = pd.to_numeric(today["close"], errors="coerce")
+        lu = pd.to_numeric(today["limit_up"], errors="coerce")
+        ld = pd.to_numeric(today["limit_down"], errors="coerce")
+        is_ld = (~exempt) & ld.notna() & c.notna() & (c <= ld + 1e-4)
+        is_lu = (~exempt) & lu.notna() & c.notna() & (c >= lu - 1e-4)
+        limit_down_syms = {str(s) for s in today.loc[is_ld, "symbol"]}
+        limit_up_syms = {str(s) for s in today.loc[is_lu, "symbol"]}
+
+    # tradeable：有行情、未停牌、未跌停（跌停持仓冻结不卖；涨停持仓允许卖）
+    tradeable = has_bar - suspended - limit_down_syms
+    # investable：股票池 ∩ tradeable − 涨停（涨停不新开仓买入）
+    investable = [str(s) for s in universe if str(s) in (tradeable - limit_up_syms)]
+    return tradeable, investable
+
+
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     ap = argparse.ArgumentParser(
@@ -259,15 +306,11 @@ def main() -> None:
             print(f"[warn] 用 --capital {capital:,.0f} 作为总资产；"
                   f"更可靠的是 --cash（现金余额），持仓市值由程序算", flush=True)
 
-    today = bars[bars["trade_date"] == as_of]
-    suspended = set()
-    if "is_suspended" in today.columns:
-        suspended = {str(s) for s, v in zip(today["symbol"], today["is_suspended"])
-                     if bool(v)}
-    has_bar = {str(s) for s in today["symbol"]}
-    tradeable = has_bar - suspended
-    # 可投资池 = 股票池 ∩ 当日有成交，再按样本名次取人
-    investable = [s for s in universe if s in tradeable]
+    try:
+        status_today = provider.get_status(as_of, as_of)
+    except Exception:
+        status_today = None
+    tradeable, investable = _compute_tradeability(bars, status_today, universe, as_of)
 
     plan = build_plan(
         as_of=as_of, prices=prices, sample=sample,

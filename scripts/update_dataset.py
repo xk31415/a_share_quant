@@ -39,6 +39,7 @@ from a_share_quant.data.builders import (  # noqa: E402
     assemble,
     derive_limits,
     drop_nonmonotonic_k,
+    purge_dropped_symbols,
 )
 from a_share_quant.data.incremental import (  # noqa: E402
     KEY,
@@ -194,7 +195,12 @@ def main() -> None:
 
     bars2, dropped = drop_nonmonotonic_k(bars2)
     if dropped:
-        print(f"[warn] 剔除 {len(dropped)} 只复权因子非单调的标的：{dropped[:10]}")
+        drop_set = set(dropped)
+        status2 = status2[~status2["symbol"].isin(drop_set)].reset_index(drop=True)
+        inst = inst[~inst["symbol"].isin(drop_set)].reset_index(drop=True)
+        if len(fresh_inst):
+            fresh_inst = fresh_inst[~fresh_inst["symbol"].isin(drop_set)].reset_index(drop=True)
+        print(f"[warn] 剔除 {len(dropped)} 只复权因子非单调的标的（已同步从 status/instruments 移除）：{dropped[:10]}")
 
     problems = []
     dup = bars2.duplicated(subset=KEY).sum()

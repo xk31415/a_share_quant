@@ -616,7 +616,7 @@ Sharpe 0.679 vs 0.489、最大回撤 -22.5% vs -36.0%。
 3. ~~**查 2020-2024 的 6.2pp 未解释差异**~~（**2026-10-22 已破案**，系旧值 `+4.95%` 误做双重暖机丢掉 5~7 月所致，真实对齐宇宙等权为 **`+9.85%`**，见 §11.2 与 `fix_log.md` 21.1）；
 4. **补股息率 / PE / PB**：三段检验下来量价因子全部不稳，估值/红利是唯一没碰过的信息源。gm 的 `get_instruments` 有 `pe_ttm/pb` 但只给最新快照（前视），point-in-time 需要用财报 `announce_date` 重算；
 5. **反转的两个缺口**：① 查 2020-2024 为什么只有高流动档有效（低中两档 +0.28/-0.61pp）；② 降换手（加持有期约束或调仓阈值，因年换手 9 倍下滑点 0.30% 即归零）；
-6. **容量约束与开盘可成交量口径**：`EqualWeightBaseline` 与 `LowVolatility` 已支持 `--capacity-aum` 选股阶段容量过滤（`TopNMomentum` 尚未接入，且默认关闭）；此外当前容量按全日成交量算，实测开盘量只有全日的 1/5~1/2，需用分钟数据或下调 `max_participation_rate` 修正。
+6. **容量约束与开盘可成交量口径**：`EqualWeightStrategy`、`LowVolatility`、`TopNMomentum` 均已支持 `--capacity-aum` 与 `--liquidity` 选股阶段过滤（默认关闭）；此外当前容量按全日成交量算，实测开盘量只有全日的 1/5~1/2，需用分钟数据或下调 `max_participation_rate` 修正。
 
 ---
 

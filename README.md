@@ -122,7 +122,7 @@ pip install -e ".[dev]"
 python -m pytest tests/
 ```
 
-277 个测试覆盖：
+279 个测试覆盖：
 - 日期对齐、交易日历（`test_dates.py`）；
 - 数据 schema 与校验，含**幸存者偏差哨兵**（`test_data.py`）；
 - **数据集指纹**（`test_data_manifest.py`）：行序/浮点表示不影响指纹，改动一位小数、
@@ -387,11 +387,10 @@ experiment_id、策略名、数据版本指纹、股票池规则、区间、频�
     全序列年化超额 -3.71pp，截断后只剩 -2.52pp。当前三段回测的空仓期全部来自
     股票池预热，所以已发布数字不受影响；**写择时策略之前必须先让指标层知道
     股票池哪天有可交易标的**（R05 F-17，暂未修）；
-27. **基准序列内部缺日会被记成当天 0 收益**。`benchmark_metrics` 里
-    `bench.pct_change().reindex(ret.index).fillna(0.0)`：策略有、基准没有的那天
-    填 0，下一天把两天涨跌算成一天。逐日核过三份数据 `benchmark.csv` 与 `bars`
-    日期完全一致（缺口 0 天），当前超额未受影响；但 `update_dataset` 每日增量
-    会持续制造缺口机会（R05 F-19，暂未修）；
+27. **基准序列内部缺日已改为按公共日期截面配对（不再填 0）**。`benchmark_metrics` 早先用
+    `bench.pct_change().reindex(ret.index).fillna(0.0)`（策略有、基准没有的那天填 0，下一天把两天涨跌算成一天，R05 F-19）；
+    现已改为仅在 `ret.index.intersection(bench.index)` 上配对并显式记录 `benchmark_missing_days`。
+    逐日核过三份数据 `benchmark.csv` 与 `bars` 日期完全一致（缺口 0 天），已发布超额未受影响；
 28. **暖机截断有两条路径，在"首次持仓日净值仍等于初始资金"时会分叉**。
     `trim_warmup` 优先用持仓表（首次有持仓的那天），只有拿不到持仓表时才退回
     "净值开头连续平盘"；两条路径对同一段数据可能给出不同切点——实测 9 日合成序列
@@ -505,9 +504,9 @@ experiment_id、策略名、数据版本指纹、股票池规则、区间、频�
    有效**（低中两档 +0.28/-0.61 接近 0）；② 用保守滑点重估或降换手
    （加持有期约束比提高信号质量容易）。
    这两件事做完之前，反转仍不写成策略推荐；
-6. **补齐动量策略的选股容量约束 & 旧口径章节重跑**：`EqualWeightBaseline` 与 `LowVolatility`
-   已支持 `--capacity-aum` 在选股环节过滤（`strategies/filters.py::capacity_symbols`），
-   但 `TopNMomentum` 尚未接入且默认关闭；另 `strategy_log.md` §2、§3、§8 非参照行与 §9 容量阶梯
+6. **开盘量口径与旧口径章节重跑**：`EqualWeightStrategy`、`LowVolatility`、`TopNMomentum`
+   均已支持 `--capacity-aum` 与 `--liquidity` 在选股环节过滤（`strategies/filters.py`），
+   默认关闭以保持基线输出不变；另 `strategy_log.md` §2、§3、§8 非参照行与 §9 容量阶梯
    若需新口径数字只能重跑（§4、§6、§7 不走 `trim_warmup`，不需重跑）。
 
 复现与下一步的命令（`--reverse` = 选动量最弱的一批，即反转）：

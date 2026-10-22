@@ -93,7 +93,14 @@ class GmSource:
 
     def __init__(self) -> None:
         token = os.environ.get("GM_TOKEN", "").strip()
-        from gm.api import set_token
+        try:
+            from gm.api import set_token
+        except ModuleNotFoundError as exc:
+            raise SystemExit(
+                "当前 Python 环境未安装掘金 SDK（gm）。\n"
+                "本机 gm 安装在独立环境，请改用：\n"
+                "  \"C:\\Program Files\\Python314\\python.exe\" " + " ".join(sys.argv)
+            ) from exc
         if token:
             set_token(token)
         else:

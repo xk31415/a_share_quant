@@ -16,6 +16,7 @@ import pandas as pd
 
 from ..factors import Momentum, pivot_column
 from .base import Strategy, TargetPortfolio
+from .filters import capacity_symbols, liquid_symbols
 
 
 class TopNMomentum(Strategy):
@@ -27,6 +28,9 @@ class TopNMomentum(Strategy):
     window         动量回看窗口（交易日）
     skip           跳过最近多少个交易日（默认 5，约一周）
     reverse        True = 选动量最弱的一批（反转）
+    liquidity_pct  只保留成交额最高的这个比例（0.33 = 前 1/3）；None = 不筛
+    amount_window  成交额均值窗口（交易日）
+    capacity_aum   启用容量约束的 AUM（元）；None = 不启用
     industry_map   代码 -> 行业；给了才启用行业中性选股
     k_per_industry 每个行业取几只（默认 1）
 
@@ -44,6 +48,10 @@ class TopNMomentum(Strategy):
 
     def __init__(self, top_n: int = 50, window: int = 60, skip: int = 5,
                  reverse: bool = False,
+                 liquidity_pct: Optional[float] = None,
+                 amount_window: int = 20,
+                 capacity_aum: Optional[float] = None,
+                 participation_rate: float = 0.10,
                  industry_map: Optional[Mapping[str, str]] = None,
                  k_per_industry: int = 1) -> None:
         if top_n < 1:
@@ -52,14 +60,20 @@ class TopNMomentum(Strategy):
             raise ValueError("window must be >= 1")
         if skip < 0:
             raise ValueError("skip must be >= 0")
+        if liquidity_pct is not None and not 0 < liquidity_pct <= 1:
+            raise ValueError("liquidity_pct must be in (0, 1]")
         self.top_n = top_n
         self.window = window
         self.skip = skip
         # reverse=True 选动量最弱的一批（A 股动量常为负，反向即通常说的"反转"）
         self.reverse = reverse
+        self.liquidity_pct = liquidity_pct
+        self.amount_window = amount_window
+        self.capacity_aum = capacity_aum
+        self.participation_rate = participation_rate
         self.industry_map = dict(industry_map) if industry_map else None
         self.k_per_industry = max(1, int(k_per_industry))
-        self.warmup = window + skip + 1
+        self.warmup = max(window + skip + 1, amount_window)
 
     def generate_target(self, as_of, bars: pd.DataFrame,
                         universe: Sequence[str]) -> TargetPortfolio:
@@ -86,6 +100,21 @@ class TopNMomentum(Strategy):
         mom = pd.to_numeric(mom, errors="coerce").dropna()
         if mom.empty:
             return TargetPortfolio(as_of=ts, weights={})
+
+        if self.liquidity_pct is not None:
+            allow = liquid_symbols(bars, ts, pool, self.liquidity_pct,
+                                   self.amount_window)
+            mom = mom.reindex(sorted(allow)).dropna()
+            if mom.empty:
+                return TargetPortfolio(as_of=ts, weights={})
+
+        if self.capacity_aum is not None:
+            allow = capacity_symbols(bars, ts, pool, self.capacity_aum,
+                                     self.participation_rate,
+                                     1.0 / self.top_n, self.amount_window)
+            mom = mom.reindex(sorted(allow)).dropna()
+            if mom.empty:
+                return TargetPortfolio(as_of=ts, weights={})
 
         if self.industry_map:
             # 行业中性：每个行业内部按动量同方向取 k 只，跨行业等权。
