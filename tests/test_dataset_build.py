@@ -311,15 +311,44 @@ def test_purge_dropped_symbols_syncs_instruments_and_status():
     assert "000001" not in set(cleaned.status["symbol"])
 
 
-def test_st_regex_matches_st_and_delisting_consolidation_names():
-    """_ST_RE 必须同时识别 ST/*ST/S*ST 与退市整理期简称（退市XX、XX退），且不误伤普通简称。"""
+def test_gm_is_st_comes_from_dated_snapshot_not_sec_name(monkeypatch):
+    """gm 的 sec_name 是**当前**简称，不是当日简称（2026-10-23 实测：385 只 ST 状态变过的
+    主板股 2020-2024 每只只有一个 sec_name，与官方 5% 涨跌幅同日切换 0 次）。
+    用它判 ST 等于拿今天的戴帽状态剔除过去的股票。is_st 只能来自 get_symbols 当日截面。
+    """
     import sys
+    import types
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from build_dataset import _ST_RE
+    import build_dataset
 
-    s = pd.Series(["ST海王", "*ST美丽", "S*ST前锋", "退市海越", "天龙退", "浦发银行", "中退科技"])
-    matched = s.str.upper().str.replace(" ", "", regex=False).str.match(_ST_RE).tolist()
-    assert matched == [True, True, True, True, True, False, False]
+    days = ["2021-01-04", "2021-01-05", "2021-01-06"]
+
+    def history(symbol, **kw):
+        return pd.DataFrame({"symbol": "SZSE.002168", "eob": pd.to_datetime(days),
+                             "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
+                             "volume": 1e5, "amount": 1e6, "pre_close": 10.0})
+
+    def get_history_instruments(symbols, **kw):
+        return pd.DataFrame({"symbol": "SZSE.002168", "trade_date": pd.to_datetime(days),
+                             "pre_close": 10.0, "upper_limit": 11.0, "lower_limit": 9.0,
+                             "adj_factor": 1.0, "is_suspended": 0, "sec_name": "ST惠程"})
+
+    def get_symbols(trade_date, **kw):
+        return pd.DataFrame({"symbol": ["SZSE.002168"], "is_st": [False]})
+
+    fake = types.ModuleType("gm.api")
+    fake.ADJUST_NONE = 0
+    fake.history = history
+    fake.get_history_instruments = get_history_instruments
+    fake.get_symbols = get_symbols
+    monkeypatch.setitem(sys.modules, "gm", types.ModuleType("gm"))
+    monkeypatch.setitem(sys.modules, "gm.api", fake)
+
+    src = object.__new__(build_dataset.GmSource)
+    src._ex = {"002168": "SZSE"}
+    _, _, status = src.fetch_all(["002168"], days[0], days[-1], calendar=days)
+    assert not status["is_st"].any(), "简称带 ST 但当日截面 is_st=False，必须判非 ST"
+    assert not hasattr(build_dataset, "_ST_RE")
 
 

@@ -72,23 +72,21 @@ def _gm_ts(series) -> pd.Series:
     return d
 
 
-# 匹配 ST / *ST / S*ST 以及退市整理期简称（沪市「退市XX」、深市「XX退」）
-_ST_RE = r"^(\*?ST|S\*?ST|退市)|^.+退$"
-
-
 class GmSource:
     """掘金量化 gm SDK。token 走环境变量 GM_TOKEN。
 
     实测字段（2026-10）：
       * ``history`` -> symbol/open/high/low/close/volume/amount/pre_close/bob/eob
       * ``get_history_instruments`` 逐日给 pre_close / upper_limit / lower_limit /
-        adj_factor / is_suspended / sec_name —— 涨跌停与复权因子都不用自己算。
-      * 没有 ``is_st`` 列，但**逐日 sec_name** 带 ST 前缀，可据此还原当日 ST 状态。
+        adj_factor / is_suspended —— 涨跌停与复权因子都不用自己算。
+      * 没有 ``is_st`` 列。它（以及 ``get_symbols``）返回的 ``sec_name`` 是**当前**简称，
+        不是当日简称（2026-10-23 实测：385 只 ST 状态变过的主板股 2020-2024 每只只有一个
+        sec_name），**不能**用来判历史 ST。is_st 只取 ``get_symbols`` 当日截面。
     """
 
     name = "gm"
     STATUS_FIELDS = ("symbol,trade_date,pre_close,upper_limit,lower_limit,"
-                     "adj_factor,is_suspended,is_st,sec_name")
+                     "adj_factor,is_suspended,is_st")
     BAR_FIELDS = "symbol,eob,open,high,low,close,volume,amount,pre_close"
 
     def __init__(self) -> None:
@@ -223,12 +221,9 @@ class GmSource:
             ["trade_date", "symbol"])
         out = pd.merge_asof(status.sort_values(["trade_date", "symbol"]), snaps,
                             on="trade_date", by="symbol", direction="backward")
-        # 保留逐日 sec_name 识别出的 ST/退市整理期标记（OR 合并），
-        # 避免退市整理期简称变为「XX退/退市XX」后被月度快照的 is_st=False 覆盖回非 ST。
-        out["is_st"] = (
-            out["is_st"].fillna(False).astype(bool)
-            | out["is_st_snap"].fillna(False).astype(bool)
-        )
+        # 只用截面值。退市整理期截面 is_st 会翻回 False（README 限制清单第 37 条），
+        # 但不能拿 sec_name 补：它是当前简称，补了就是用未来戴帽状态剔除历史股票。
+        out["is_st"] = out["is_st_snap"].fillna(False).astype(bool)
         return out.drop(columns=["is_st_snap"])
 
     def fetch_all(self, symbols: list[str], start: str, end: str,
@@ -259,19 +254,11 @@ class GmSource:
         status_raw["trade_date"] = _gm_date(status_raw["trade_date"])
         syms = [split_symbol(s) for s in status_raw["symbol"]]
         # get_history_instruments 实测不返回官方 is_st（即使请求也会被丢掉），
-        # 按当日 sec_name 的 ST/*ST/退市/XX退 推导——名称变更当天即生效，
-        # 属 point-in-time；若源同时返回了 is_st 列则取 OR。
-        name_st = (
-            status_raw["sec_name"].astype(str).str.upper()
-            .str.replace(" ", "", regex=False)
-            .str.match(_ST_RE).fillna(False)
-            if "sec_name" in status_raw.columns
-            else pd.Series(False, index=status_raw.index)
-        )
+        # 真值由下面的 get_symbols 当日截面覆盖。
         if "is_st" in status_raw.columns:
-            is_st = status_raw["is_st"].fillna(False).astype(bool) | name_st
+            is_st = status_raw["is_st"].fillna(False).astype(bool)
         else:
-            is_st = name_st
+            is_st = pd.Series(False, index=status_raw.index)
         status = pd.DataFrame({
             "trade_date": status_raw["trade_date"],
             "symbol": [s for s, _ in syms],
@@ -288,6 +275,9 @@ class GmSource:
         # 官方值，不受影响。
         if calendar:
             status = self._attach_st_snapshots(status, list(calendar))
+        else:
+            print("[warn] 未传交易日历，取不到 ST 截面，is_st 一律按 False 处理（ST 过滤将失效）",
+                  flush=True)
 
         if not raw_parts:
             return pd.DataFrame(), pd.DataFrame(), status
