@@ -64,3 +64,81 @@ def test_universe_filter_is_respected():
     t = strat.generate_target(dates[-1], bars, ["B", "D"])   # 最强的 A 不在池子里
     assert set(t.weights) <= {"B", "D"}
     assert len(t.weights) == 2
+
+
+# ---------------------------------------------------------------- 行业中性（R08 后续）
+def _industry_bars(n=80):
+    """三个行业各两只，行业间动量明显分层：
+
+    行业内排序都是  1 > 2；行业间  IND1 > IND2 > IND3。
+    于是「非中性取前 2」会全落在 IND1，而「行业中性 k=1」必然每行业一只。
+    """
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    growth = {"A1": 0.0070, "A2": 0.0060,
+              "B1": 0.0050, "B2": 0.0040,
+              "C1": 0.0030, "C2": 0.0020}
+    rows = []
+    for sym, g in growth.items():
+        for i, d in enumerate(dates):
+            px = 10.0 * (1.0 + g) ** i
+            rows.append({"trade_date": d, "symbol": sym, "close": px,
+                         "adj_close": px, "amount": px * 1e6})
+    ind = {"A1": "IND1", "A2": "IND1", "B1": "IND2",
+           "B2": "IND2", "C1": "IND3", "C2": "IND3"}
+    return pd.DataFrame(rows), dates, ind
+
+
+def test_without_industry_map_the_default_output_is_unchanged():
+    """不传 industry_map 时必须走原路径，选股结果与以前逐位一致。
+
+    这个项目的硬约定：给参数加默认值时，默认分支的输出必须不变
+    （曾经给等权加 seed 时把键改了，年化 9.15% → 4.55%）。
+    """
+    bars, dates, _ = _industry_bars()
+    plain = TopNMomentum(top_n=2, window=60, skip=5)
+    explicit_none = TopNMomentum(top_n=2, window=60, skip=5, industry_map=None)
+    a = plain.generate_target(dates[-1], bars, ["A1", "A2", "B1", "B2", "C1", "C2"])
+    b = explicit_none.generate_target(dates[-1], bars, ["A1", "A2", "B1", "B2", "C1", "C2"])
+    assert a.weights == b.weights
+    assert list(a.weights) == ["A1", "A2"], f"非中性取全场前 2，实际 {list(a.weights)}"
+
+
+def test_industry_neutral_picks_one_per_industry_from_each():
+    """行业中性 k=1：必须每个行业各取一只，而不是全落在最强的那个行业。"""
+    bars, dates, ind = _industry_bars()
+    strat = TopNMomentum(top_n=2, window=60, skip=5, industry_map=ind)
+    t = strat.generate_target(dates[-1], bars, list(ind))
+    picked = sorted(t.weights)
+    assert picked == ["A1", "B1", "C1"], f"应每行业最强的，实际 {picked}"
+    assert abs(sum(t.weights.values()) - 1.0) < 1e-12
+    # 等权：3 只各 1/3
+    assert all(abs(w - 1 / 3) < 1e-12 for w in t.weights.values())
+
+
+def test_industry_neutral_respects_reverse_direction():
+    """反转 + 行业中性：每个行业内部取动量**最弱**的那只。"""
+    bars, dates, ind = _industry_bars()
+    strat = TopNMomentum(top_n=2, window=60, skip=5, reverse=True,
+                         industry_map=ind)
+    t = strat.generate_target(dates[-1], bars, list(ind))
+    assert sorted(t.weights) == ["A2", "B2", "C2"], \
+        f"应每行业最弱的，实际 {sorted(t.weights)}"
+
+
+def test_industry_neutral_k_per_industry_takes_k_from_each():
+    bars, dates, ind = _industry_bars()
+    strat = TopNMomentum(top_n=2, window=60, skip=5, industry_map=ind,
+                         k_per_industry=2)
+    t = strat.generate_target(dates[-1], bars, list(ind))
+    assert len(t.weights) == 6, f"3 行业 × 2 只 = 6，实际 {len(t.weights)}"
+
+
+def test_single_stock_industry_is_skipped():
+    """只有一个成员的行业没有"组内选择"，不参与（与低波的实现一致）。"""
+    bars, dates, ind = _industry_bars()
+    ind2 = dict(ind)
+    ind2["D1"] = "IND4"          # 行业里只有 D1 一只
+    bars = pd.concat([bars, bars[bars["symbol"] == "A1"].assign(symbol="D1")])
+    strat = TopNMomentum(top_n=2, window=60, skip=5, industry_map=ind2)
+    t = strat.generate_target(dates[-1], bars, list(ind2))
+    assert "D1" not in t.weights, "单成员行业不该入选"

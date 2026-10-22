@@ -141,7 +141,9 @@ def main() -> None:
         strategy = TopNMomentum(top_n=max_pos,
                                 window=int(args.window or bt.get("momentum_window", 60)),
                                 skip=int(args.skip if args.skip is not None else bt.get("momentum_skip", 5)),
-                                reverse=bool(args.reverse))
+                                reverse=bool(args.reverse),
+                                industry_map=ind_map,
+                                k_per_industry=args.k_per_industry)
     else:
         strategy = EqualWeightStrategy(max_positions=pf.get("max_positions", 20),
                                        seed=int(args.seed),
