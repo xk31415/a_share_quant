@@ -50,6 +50,51 @@ def test_size_positions_zero_budget_is_all_zero():
     assert size_positions(["A"], {"A": 10.0}, 0.0) == {"A": 0}
 
 
+def test_size_positions_rotation_never_pushes_a_name_far_over_target():
+    """补手只能让持仓更接近等权目标，不能把买不起的票的钱堆到便宜票上。
+
+    实测 11 万元 × 40% 分 100 只：每只预算 440 元，绝大多数一手都买不起，
+    轮转把余量全加给了 4 只便宜票，单票权重 36%——等权组合变成了集中持仓。
+    """
+    px = {"CHEAP": 2.0, **{f"E{i}": 50.0 for i in range(9)}}
+    sh = size_positions(list(px), px, 10_000.0)     # 每只预算 1,000
+    assert sh["CHEAP"] * px["CHEAP"] <= 2_000, sh   # 原来是 5,000 股 = 全部预算
+    assert all(sh[f"E{i}"] == 0 for i in range(9))
+
+
+def test_plan_reports_unfunded_names_and_min_equity():
+    """一手超过单只预算 2 倍的票买不进去：必须点名，并给出买齐所需的总资产。"""
+    prices = {"A": 10.0, "B": 10.0, "C": 500.0}
+    plan = build_plan("2026-10-20", prices, Sample(ranked=["A", "B", "C"], n=3),
+                      ["A", "B", "C"], capital=30_000, position=1.0, cash_buffer=0.0)
+    assert plan.unfunded == ["C"]
+    # 每只预算要 ≥ 一手的一半：3 × 50,000 / 2 = 75,000
+    assert plan.min_equity == pytest.approx(75_000.0)
+    assert any("资金不足" in w and "75,000" in w for w in plan.warnings)
+    assert plan.to_json()["unfunded"] == ["C"]
+
+
+def test_plan_counts_names_below_min_trade_value_as_unfunded():
+    """每只预算 1,500 < 最小下单额 2,000：一手买得起，但买单会被过滤掉。
+
+    不算进资金不足的话，结果是一笔不买、屏幕上却写着"无需调仓"。
+    """
+    prices = {"A": 5.0, "B": 5.0}
+    plan = build_plan("2026-10-20", prices, Sample(ranked=["A", "B"], n=2),
+                      ["A", "B"], capital=3_000, position=1.0, cash_buffer=0.0)
+    assert plan.orders.empty
+    assert plan.unfunded == ["A", "B"]
+    assert plan.min_equity == pytest.approx(4_000.0)   # 2 只 × 2,000
+
+
+def test_plan_without_unfunded_names_has_no_capital_warning():
+    prices = {"A": 10.0, "B": 10.0}
+    plan = build_plan("2026-10-20", prices, Sample(ranked=["A", "B"], n=2),
+                      ["A", "B"], capital=100_000, position=1.0, cash_buffer=0.0)
+    assert plan.unfunded == []
+    assert not any("资金不足" in w for w in plan.warnings)
+
+
 # ---------------------------------------------------------------- 差分
 def test_diff_orders_buys_in_lots():
     orders = diff_orders({"A": 1050}, {}, {"A": 10.0})

@@ -594,10 +594,88 @@ def test_existing_holdings_file_is_never_overwritten_by_an_empty_start(tmp_path)
     book.write_text("symbol,shares\nA,1000\nB,500\n", encoding="utf-8")
     before = book.read_text(encoding="utf-8")
 
-    # 不传 --holdings：拒绝，文件不变
-    assert _cli(root, day, fills, save=book) != 0
+    # 不传 --holdings：拒绝（退出码 2 = 人工处理，1 只留给"已入过账"），文件不变
+    assert _cli(root, day, fills, save=book) == 2
     assert book.read_text(encoding="utf-8") == before, "持仓文件不该被覆盖"
 
     # 显式承认"成交前确实空仓"才放行
     assert _cli(root, day, fills, "--from-empty", save=book) == 0
     assert "A,100" in book.read_text(encoding="utf-8")
+
+
+def _buy_only_day(tmp_path):
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    day = tmp_path / "d"
+    day.mkdir()
+    (day / "orders.csv").write_text("symbol,side,shares,price\n000001,buy,100,10.0\n",
+                                    encoding="utf-8")
+    fills = tmp_path / "f.csv"
+    fills.write_text("symbol,side,shares,price,fee\n000001,buy,100,10.0,5.0\n",
+                     encoding="utf-8")
+    book = tmp_path / "holdings.csv"
+    book.write_text("symbol,shares\n600000,1000\n000002,500\n", encoding="utf-8")
+    return root, day, fills, book
+
+
+def test_mistyped_holdings_path_never_wipes_the_real_book(tmp_path):
+    """`--holdings` 路径打错（文件不存在）不能按空仓对账。
+
+    原来只打一行 warn：`--holdings holding.csv --save-holdings holdings.csv`
+    在全是买入的那天退出码 0，实测 100 只持仓被盖成 1 只——F-39 换了个入口。
+    """
+    root, day, fills, book = _buy_only_day(tmp_path)
+    before = book.read_text(encoding="utf-8")
+    assert _cli(root, day, fills, holdings=tmp_path / "holding.csv", save=book) == 2
+    assert book.read_text(encoding="utf-8") == before
+
+
+def test_input_errors_exit_2_not_the_already_booked_code(tmp_path):
+    """格式/输入错误不能用退出码 1：1 的含义是"这批已入过账"，脚本链可能据此跳过。"""
+    root, day, _, book = _buy_only_day(tmp_path)
+    bad = tmp_path / "bad.csv"
+    bad.write_text("code,dir,qty\n000001,buy,100\n", encoding="utf-8")
+    assert _cli(root, day, bad, holdings=book) == 2
+    assert _cli(root, day, tmp_path / "nope.csv", holdings=book) == 2
+    assert _cli(root, tmp_path / "no_day", bad, holdings=book) == 2
+
+
+def test_chinese_broker_export_is_recognised_and_shares_the_digest(tmp_path):
+    """券商中文导出能直接对账；换模板不能绕过重复入账保护（R07 的老问题）。"""
+    root, day, fills, book = _buy_only_day(tmp_path)
+    h1 = tmp_path / "h1.csv"
+    assert _cli(root, day, fills, holdings=book, save=h1) == 0
+    assert "000001,100" in h1.read_text(encoding="utf-8"), "代码前导零必须保住"
+
+    cn = tmp_path / "cn.csv"
+    cn.write_text("证券代码,证券名称,买卖标志,成交数量,成交价格,手续费\n"
+                  "000001,平安银行,证券买入,100,10.0,5.0\n", encoding="utf-8-sig")
+    # 同一批成交换成中文模板：必须被认出是重复
+    assert _cli(root, day, cn, holdings=h1, save=tmp_path / "h2.csv") == 1
+    assert not (tmp_path / "h2.csv").exists()
+    # 中文模板首次入账正常
+    assert _cli(root, day, cn, holdings=book, save=tmp_path / "h3.csv") == 0
+    assert "000001,100" in (tmp_path / "h3.csv").read_text(encoding="utf-8")
+
+
+def test_negative_shares_are_refused_not_dropped():
+    """有的券商把卖出记成负数量。静默丢掉这一行等于这笔卖出没发生，持仓多记。"""
+    from a_share_quant.live.reconcile import normalize_fills
+
+    df = pd.DataFrame({"symbol": ["A", "B"], "side": ["buy", "sell"],
+                       "shares": [100, -200], "price": [10.0, 20.0]})
+    with pytest.raises(ReconcileError, match="负数"):
+        normalize_fills(df)
+    zero = df.assign(shares=[100, 0])          # 撤单行成交数量为 0，可以丢
+    assert normalize_fills(zero)["symbol"].tolist() == ["A"]
+
+
+def test_ambiguous_broker_columns_are_refused():
+    """成交价格与成交均价同时出现时不猜用哪一列。"""
+    from a_share_quant.live.reconcile import normalize_fills
+
+    df = pd.DataFrame({"证券代码": ["000001"], "买卖标志": ["买入"], "成交数量": [100],
+                       "成交价格": [10.0], "成交均价": [10.1]})
+    with pytest.raises(ReconcileError, match="成交价格.*成交均价|成交均价.*成交价格"):
+        normalize_fills(df)

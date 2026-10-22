@@ -15,6 +15,9 @@
     000001,sell,150,11.44,5.09
 
 `side` 接受 `buy/sell`、`买入/卖出`、`证券买入/证券卖出` 等常见写法。
+券商中文导出（证券代码/买卖标志/成交数量/成交价格/费用合计，UTF-8 或 GBK）
+可以直接用；同一目标出现两个候选列（如成交价格和成交均价）时拒绝，不猜。
+`--holdings` 指向的文件必须存在；首次建仓不传 `--holdings`，加 `--from-empty`。
 
 产出
 ----
@@ -22,8 +25,9 @@
     live/<日期>/orders_vs_fills.csv  逐笔比对
     live/<日期>/holdings_gap.csv     成交后持仓 vs 目标持仓
 
-退出码：0 正常；1 这批成交已经入过账（见下方"重复入账"）；
-2 有需要人工处理的问题（超卖、成交多于委托、对不上单）。
+退出码：0 正常；1 这批成交已经入过账（见下方"重复入账"），**只有这一种情况**；
+2 需要人工处理：超卖、成交多于委托、对不上单，以及一切输入错误（文件不存在、
+缺列、列名歧义、`--save-holdings` 已存在却没传 `--holdings`）。
 **链式脚本遇到非 0 必须停下**：1 和 2 都没有写持仓。
 
 重复入账（R06 F-26，R07 F-32/F-33/F-34 修正）
@@ -62,6 +66,7 @@ import pandas as pd
 import yaml
 
 from a_share_quant.live.reconcile import (
+    FILL_SYMBOL_COLUMNS,
     ReconcileError,
     aggregate_fills,
     apply_fills,
@@ -77,7 +82,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def _read_csv(path: Path, what: str) -> pd.DataFrame:
     if not path.exists():
         raise SystemExit(f"找不到{what}：{path}")
-    return pd.read_csv(path, dtype={"symbol": str})
+    dtype = {c: str for c in FILL_SYMBOL_COLUMNS}
+    try:
+        return pd.read_csv(path, dtype=dtype, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        return pd.read_csv(path, dtype=dtype, encoding="gbk")
 
 
 def _load_holdings(path: str | None) -> dict[str, int]:
@@ -85,8 +94,9 @@ def _load_holdings(path: str | None) -> dict[str, int]:
         return {}
     p = Path(path)
     if not p.exists():
-        print(f"[warn] 持仓文件不存在（{p}），按空仓对账", flush=True)
-        return {}
+        # 路径打错时按空仓对账，全是买入的那天退出码 0，真实持仓被整份盖掉。
+        raise SystemExit(f"持仓文件不存在：{p}。路径打错了？"
+                         f"成交前确实空仓就不要传 --holdings，改加 --from-empty")
     df = pd.read_csv(p, dtype={"symbol": str})
     if not {"symbol", "shares"}.issubset(df.columns):
         raise SystemExit(f"持仓文件缺列：需要 symbol,shares（{p}）")
@@ -382,4 +392,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit as exc:
+        # `raise SystemExit("说明")` 默认退出码 1，会和"已入过账"混淆；
+        # 输入错误一律按 2（人工处理）退出。
+        if isinstance(exc.code, str):
+            print(exc.code, file=sys.stderr, flush=True)
+            sys.exit(2)
+        raise

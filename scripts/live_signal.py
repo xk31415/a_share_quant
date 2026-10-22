@@ -210,6 +210,9 @@ def main() -> None:
     ap.add_argument("--min-trade-value", type=float,
                     default=DEFAULT_MIN_TRADE_VALUE,
                     help="单笔低于此金额不下单（省最低佣金）")
+    ap.add_argument("--max-unfunded", type=float, default=0.10,
+                    help="资金不足（一手超过 2 倍单只预算）的目标占比超过此值时"
+                         "拒绝写委托：等权组合已名不副实，需要加资金或调大 --position")
     args = ap.parse_args()
 
     settings = _load_config(str(root / args.config))
@@ -242,7 +245,7 @@ def main() -> None:
     if stale_days > MAX_STALE_DAYS:
         raise SystemExit(
             f"数据最后交易日 {as_of.date()}，距今 {stale_days} 天 "
-            f"（阈值 {MAX_STALE_DAYS}）。先用 build_dataset 更新数据，"
+            f"（阈值 {MAX_STALE_DAYS}）。先用 update_dataset 更新数据，"
             f"不要用过期行情出单。")
 
     rules = UniverseRules.from_yaml(root / args.universe_config) \
@@ -358,6 +361,13 @@ def main() -> None:
             f"印花税 {stamp:.2%}（仅卖出）")
 
     print(render_text(plan), flush=True)
+    n_funded_base = len(plan.target[plan.target["tradeable"]]) if len(plan.target) else 0
+    if plan.unfunded and len(plan.unfunded) > args.max_unfunded * max(n_funded_base, 1):
+        raise SystemExit(
+            f"\n资金不足的目标 {len(plan.unfunded)}/{n_funded_base} 只，超过 "
+            f"--max-unfunded {args.max_unfunded:.0%}，**未写委托文件**。\n"
+            f"按仓位 {args.position:.0%} 买齐约需总资产 {plan.min_equity:,.0f} 元；"
+            f"加资金、调大 --position，或接受偏离时调大 --max-unfunded。")
     if check_only:
         print("\n非季度调仓月：以上只是**检查**，未写委托文件。"
               "确实要按这些单子调仓，加 --ignore-quarter 重跑。", flush=True)

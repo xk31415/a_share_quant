@@ -26,6 +26,17 @@ SIDE_ALIASES = {
 ORDER_COLUMNS = ["symbol", "side", "shares", "price"]
 FILL_COLUMNS = ["symbol", "side", "shares", "price"]
 
+# 券商中文导出的列名。只收"成交"口径：委托数量/委托价格不是成交，不能映射。
+# 费用只认**合计**列——手续费/佣金在不同券商里时含时不含印花税、过户费，猜了就错。
+FILL_COLUMN_ALIASES = {
+    "symbol": ("证券代码", "股票代码", "代码"),
+    "side": ("买卖标志", "买卖方向", "操作", "委托类别"),
+    "shares": ("成交数量", "成交股数"),
+    "price": ("成交价格", "成交均价"),
+    "fee": ("费用合计", "交易费用", "总费用"),
+}
+FILL_SYMBOL_COLUMNS = ("symbol",) + FILL_COLUMN_ALIASES["symbol"]
+
 
 class ReconcileError(ValueError):
     """对账发现必须人工处理的问题（方向错、超卖、对不上单）。"""
@@ -39,12 +50,31 @@ def normalize_side(value) -> str:
     return key
 
 
+def _rename_broker_columns(fills: pd.DataFrame) -> pd.DataFrame:
+    """中文列名 → 标准列名。同一目标出现两个候选列时报错，不猜用哪个。"""
+    cols = [str(c).strip() for c in fills.columns]
+    rename = {}
+    for target, aliases in FILL_COLUMN_ALIASES.items():
+        hits = [c for c in (target,) + aliases if c in cols]
+        if len(hits) > 1:
+            raise ReconcileError(f"成交表里 {hits} 都能当作 {target}，无法确定用哪一列；"
+                                 f"删掉多余的列或改成标准列名 {target}")
+        if hits and hits[0] != target:
+            rename[hits[0]] = target
+    out = fills.copy()
+    out.columns = cols
+    return out.rename(columns=rename)
+
+
 def normalize_fills(fills: pd.DataFrame) -> pd.DataFrame:
     """校验并规范化成交表。
 
-    必需列：symbol / side / shares / price；可选 fee。
+    必需列：symbol / side / shares / price；可选 fee。也认券商中文导出的列名
+    （见 ``FILL_COLUMN_ALIASES``），规范化后的结果与标准列名完全一致，
+    因此重复入账指纹不随导出模板变化。
     返回按 (symbol, side) 排好序的新表，**不修改入参**。
     """
+    fills = _rename_broker_columns(fills)
     missing = set(FILL_COLUMNS) - set(fills.columns)
     if missing:
         raise ReconcileError(f"成交表缺列：{sorted(missing)}")
@@ -58,6 +88,14 @@ def normalize_fills(fills: pd.DataFrame) -> pd.DataFrame:
         bad = out[out["shares"].isna() | out["price"].isna()]
         raise ReconcileError(f"成交表有 {len(bad)} 行股数/价格无法解析："
                              f"{bad['symbol'].head(5).tolist()}")
+    frac = out["shares"] != out["shares"].round()
+    if frac.any():
+        raise ReconcileError(f"成交股数不是整数：{out.loc[frac, 'symbol'].head(5).tolist()}"
+                             f"（可能把成交金额当成了数量）")
+    neg = out["shares"] < 0
+    if neg.any():
+        raise ReconcileError(f"成交股数为负数：{out.loc[neg, 'symbol'].head(5).tolist()}。"
+                             f"方向请放在 side 列，股数一律写正数")
     out["shares"] = out["shares"].astype(int)
     out = out[out["shares"] > 0]
     if "fee" in out.columns:

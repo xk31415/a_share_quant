@@ -132,6 +132,10 @@ def size_positions(symbols: Sequence[str], prices: Mapping[str, float],
     不做这一步的后果实测过：50 只票每只向下取整浪费 1000~3000 元，
     累积几万元躺在账上，同时尾部买单被压成 0 股（`blocked:insufficient_cash`
     107 次 → 26 次就是这一处）。
+
+    补完后单只市值不得超过 **2 × 每只预算**。没有这条，资金不够时余量会全堆到
+    便宜票上（11 万 × 40% 分 100 只，实测 4 只票、单票 36%）。一手超过 2 倍
+    预算的票因此永远是 0 股，由 ``build_plan`` 报告为资金不足。
     """
     symbols = [str(s) for s in symbols]
     if not symbols:
@@ -153,7 +157,8 @@ def size_positions(symbols: Sequence[str], prices: Mapping[str, float],
         added = False
         for sym in gaps:
             lot_cost = float(prices[sym]) * lot_size
-            if lot_cost <= remaining + 1e-9:
+            value = shares[sym] * float(prices[sym])
+            if lot_cost <= remaining + 1e-9 and value + lot_cost <= 2 * per + 1e-9:
                 shares[sym] += lot_size
                 remaining -= lot_cost
                 added = True
@@ -228,6 +233,8 @@ class LivePlan:
     target: pd.DataFrame = field(default_factory=pd.DataFrame)
     orders: pd.DataFrame = field(default_factory=pd.DataFrame)
     warnings: list[str] = field(default_factory=list)
+    unfunded: list[str] = field(default_factory=list)
+    min_equity: float = 0.0
 
     @property
     def buy_amount(self) -> float:
@@ -251,6 +258,8 @@ class LivePlan:
             "n_orders": int(len(self.orders)),
             "buy_amount": round(self.buy_amount, 2),
             "sell_amount": round(self.sell_amount, 2),
+            "unfunded": list(self.unfunded),
+            "min_equity": round(self.min_equity, 2),
             "warnings": list(self.warnings),
         }
 
@@ -363,6 +372,24 @@ def build_plan(as_of, prices: Mapping[str, float], sample: Sample,
         target_shares[sym] = int(sh)          # 冻结持仓的目标就是现状
 
     orders = diff_orders(target_shares, holdings, prices, lot_size, min_trade_value)
+
+    # 资金不足 = 目标 0 股（一手超过 2 倍单只预算），或空仓且买单被最小下单额滤掉
+    buying = {o["symbol"] for o in orders if o["side"] == "buy"}
+    unfunded = [s for s in picked_tradeable
+                if target_shares.get(s, 0) == 0
+                or (holdings.get(s, 0) == 0 and s not in buying)] if budget > 0 else []
+    min_equity = 0.0
+    if picked_tradeable:
+        max_lot = max(float(prices[s]) * lot_size for s in picked_tradeable)
+        need_per = max(max_lot / 2, float(min_trade_value))
+        need_budget = len(picked_tradeable) * need_per
+        min_equity = (need_budget / (1.0 - float(cash_buffer)) + frozen_value) / float(position)
+    if unfunded:
+        warnings.append(
+            f"资金不足：{len(unfunded)}/{len(picked_tradeable)} 只买不进"
+            f"（一手超过单只预算 2 倍，或单只预算低于最小下单额 {min_trade_value:,.0f} 元）："
+            f"{unfunded[:8]}" + ("..." if len(unfunded) > 8 else "")
+            + f"。全部买齐约需总资产 {min_equity:,.0f} 元（仓位 {position:.0%}）")
     # 不可交易的标的：把任何要动的单改成"冻结"提示，避免下达无法成交的委托
     for od in orders:
         if od["symbol"] in frozen and od["note"] != "hold":
@@ -394,7 +421,8 @@ def build_plan(as_of, prices: Mapping[str, float], sample: Sample,
     plan = LivePlan(as_of=ts, equity=equity, investable=budget,
                     position=float(position), n_target=len(picked),
                     holdings=pd.DataFrame(held_rows), target=target_df,
-                    orders=orders_df, warnings=warnings)
+                    orders=orders_df, warnings=warnings,
+                    unfunded=unfunded, min_equity=min_equity)
 
     available = cash + plan.sell_amount
     if plan.buy_amount > available + 1e-6:
