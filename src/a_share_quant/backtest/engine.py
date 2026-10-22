@@ -356,7 +356,9 @@ class BacktestEngine:
                 fills = simulator.execute(orders, day_bars, state, last_k)
 
                 # 卖单没成交（跌停/停牌/无量/部分成交）就留到下一日继续挂
-                for sym in {o.symbol for o in orders if o.direction == "sell"}:
+                # 必须排序：pending_sells 的插入顺序决定次日补挂顺序和现金累加顺序，
+                # 按 set 遍历会随 PYTHONHASHSEED 变，同一实验两次运行浮点末位不一致。
+                for sym in sorted({o.symbol for o in orders if o.direction == "sell"}):
                     pos = state.positions.get(sym)
                     if pos is not None and pos.shares > 0 and sym not in target:
                         pending_sells[sym] = pos.shares

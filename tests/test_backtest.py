@@ -125,6 +125,49 @@ def test_limit_down_blocks_sell():
     assert (sell["trade_date"] > d3).any()
 
 
+def test_retried_sells_are_ordered_independent_of_hash_seed():
+    """跌停卖不出的挂单，次日补挂顺序必须按代码排序。
+
+    曾按 set 遍历顺序写回 pending_sells：顺序随 PYTHONHASHSEED 变，现金累加顺序跟着变，
+    同一实验两次运行的 Sharpe/超额在浮点末位上不一致（EXP-20261022-151206-5368 复现）。
+    """
+    from a_share_quant.strategies import Strategy, TargetPortfolio
+
+    syms = [f"S{i:02d}" for i in range(12)]
+    dates = pd.bdate_range("2021-01-04", periods=6)
+    bars = make_bars(dates, syms)
+    d3 = pd.Timestamp(dates[2])
+    mask = bars["trade_date"] == d3
+    bars.loc[mask, "open"] = bars.loc[mask, "limit_down"]
+    bars.loc[mask, "low"] = bars.loc[mask, "limit_down"]
+    provider = make_provider(dates, syms, bars=bars)
+
+    class _BuyThenExit(Strategy):
+        name = "buy_then_exit"
+
+        def __init__(self):
+            self.n = 0
+
+        def generate_target(self, as_of, bars, universe):
+            self.n += 1
+            w = {s: 1.0 / len(syms) for s in syms} if self.n == 1 else {}
+            return TargetPortfolio(as_of=pd.Timestamp(as_of).normalize(), weights=w)
+
+    engine = BacktestEngine(
+        provider=provider, strategy=_BuyThenExit(),
+        universe_builder=UniverseBuilder(provider, UniverseRules(min_list_days=0)),
+        portfolio_rules=PortfolioRules(max_positions=len(syms), max_weight_per_stock=1.0),
+        cost_model=CostModel(slippage_rate=0.0),
+        config=BacktestConfig(start_date=str(dates[0].date()),
+                              end_date=str(dates[-1].date()),
+                              rebalance_frequency="D"))
+    trades = engine.run().trades
+    day4 = trades[(trades["direction"] == "sell") & (trades["trade_date"] == dates[3])]
+    retried = day4[day4["note"] == "blocked:no_available_shares"]
+    assert len(retried) == len(syms)
+    assert retried["symbol"].tolist() == sorted(syms)
+
+
 # ---------- 停牌 ----------
 
 def test_suspension_blocks_trading_from_status_table():
