@@ -13,7 +13,7 @@
 3. `reports/review/LEDGER.md`——哪些坑已经查过、查到了什么
 4. 你要改的那份报告的相关章节
 
-**不要一上来读 `fix_log.md`（1279 行）**，那是编年史，需要追某个具体结论时再查。
+**不要一上来读 `fix_log.md`（约 1280+ 行）**，那是编年史，需要追某个具体结论时再查。
 
 ---
 
@@ -137,14 +137,21 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
 # 因子研究（IC、十分档、流动性三档内收益、行业中性 IC）
 python scripts/factor_research.py --data-dir data/processed
 
-# 每日数据更新（只补尾部 5 个交易日，不要全量重建）
-python scripts/update_dataset.py --data-dir data/processed_2025_2026
-
 # 实盘信号 → 对账
 python scripts/live_signal.py --data-dir data/processed_2025_2026 \
     --cash 110000 --holdings live/holdings.csv --position 0.40
 python scripts/reconcile.py --orders live/<日期> --fills fills/<日期>.csv \
     --holdings live/holdings.csv --save-holdings live/holdings.csv
+```
+
+**红线：`update_dataset.py` 不是常用命令。** 仅当主人明确要求时才跑。
+需要装了掘金 gm 的 Python314（HANDOVER §3：`C:\Program Files\Python314\python.exe`），
+会改 `data/`。跑之前先 `python scripts/data_manifest.py verify`。
+审查轮默认禁止，也不要跑 `build_dataset.py`。
+
+```bash
+# 只补尾部 5 个交易日，不要全量重建。未获主人明确要求时不要执行。
+python scripts/update_dataset.py --data-dir data/processed_2025_2026
 ```
 
 **`reconcile.py` 的退出码**（链式脚本遇非 0 必须停下）：

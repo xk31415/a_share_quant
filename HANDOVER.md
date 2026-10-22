@@ -80,12 +80,16 @@ open reports/strategy_log.md          # 从 §11 开始看
 
 **超额（相对中证1000）**
 
-| 策略 | 2020-2024 | 2015-2019 |
-|---|---|---|
-| 等权 50 只 | +9.59pp，IR 0.925 | +2.48pp，IR 0.397 |
-| 低波·行业中性 | +10.65pp，IR 0.741 | +5.59pp，IR 0.429 |
-| 12-1 动量 | -9.26pp，IR -0.576 | +2.63pp，IR 0.250 |
-| 60 日反转 | +7.24pp，IR 0.397 | +10.09pp，IR 0.858 |
+| 策略 | 2020-2024 | 2015-2019 | 2025-2026 |
+|---|---|---|---|
+| 等权 50 只 | +9.59pp，IR 0.925 | +2.48pp，IR 0.397 | -4.16pp，IR -0.309 |
+| 低波·行业中性 | +10.65pp，IR 0.741 | +5.59pp，IR 0.429 | -5.58pp，IR -0.263 |
+| 12-1 动量 | -9.26pp，IR -0.576 | +2.63pp，IR 0.250 | 样本不足 |
+| 60 日反转 | +7.24pp，IR 0.397 | +10.09pp，IR 0.858 | +6.92pp，IR 为正 |
+
+2025-2026 列对齐 `reports/live_readiness.md`：等权 / 低波的超额与 IR 见该文超额表；
+动量标样本不足；反转 +6.92pp 是该文「+7.24 / +10.09 / +6.92pp」的第三段，
+IR 只写了「全正」，这里不补具体数字。
 
 ### 四条结论
 
@@ -115,7 +119,7 @@ open reports/strategy_log.md          # 从 §11 开始看
 | `reports/review/LEDGER.md` | 交叉审查台账（R01~R08） | 想知道哪些坑已经查过 |
 
 **历史归档，只在追溯时看**（数字已作废）：
-`reports/fix_log.md`（1279 行修复编年史）、`reports/regression_review_2026-10-21.md`、
+`reports/fix_log.md`（约 1280+ 行修复编年史）、`reports/regression_review_2026-10-21.md`、
 `reports/lookahead_audit.md`、`reports/project_audit.md`、`reports/review/rounds/`。
 
 ---
@@ -184,7 +188,7 @@ open reports/strategy_log.md          # 从 §11 开始看
 - [ ] 能跑通 §3 的第 2 条命令，拿到 `annualized_return ≈ 0.061083`
 - [ ] 读完了 §4 的四条结论和 §6 的八条约定
 - [ ] 知道 `results/EXP-20261022-*` 才是当前数字
-- [ ] GitHub 仓库权限已转移（`https://github.com/xk31415/a_share_quant`）
+- [ ] 能 clone/push `xk31415/a_share_quant`（`https://github.com/xk31415/a_share_quant`），本机 Python 两条路径可用（见 §3）
 
 **离开时交接**：
 
