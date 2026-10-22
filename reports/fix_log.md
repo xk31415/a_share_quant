@@ -1323,17 +1323,61 @@ k_per_industry、单成员行业跳过）。
 
 ### 21.2 真实数据防未来函数审计（`reports/lookahead_audit.md` §五 落地）
 
-在三份真实数据集上完成 `lookahead_audit.md` §五 的全部核查（详见该报告新增的 §六），查出并修补以下真实数据边界问题。**注意（B2 修正）：数据层修复需重建数据集才生效；现有 17 组 `EXP-20261022-*` 中，`2025-2026` 60 日反转（`EXP-20261022-151421-2220`）受 `is_st` 滞后与退市整理期简称翻转影响买入了 3 只退市股，按该 3 只在表内全区间成交汇总净贡献约 `+1.3pp` 年化（重建剔除后预计从 `17.40%` 降至约 `16.5%`；若仅计 `2026-07-01` 退市整理期那三次买入则为 `-2,776` 元 / `-0.18pp`），其余实验不受影响**：
+在三份真实数据集上完成 `lookahead_audit.md` §五 的全部核查（详见该报告新增的 §六），查出并修补以下真实数据边界问题。**注意（B2 修正）：数据层修复需重建数据集才生效；现有 17 组 `EXP-20261022-*` 中，`2025-2026` 60 日反转（`EXP-20261022-151421-2220`）受 `is_st` 滞后与退市整理期简称翻转影响买入了 3 只退市股，按该 3 只在表内全区间成交汇总净贡献约 `+1.3pp` 年化（重建剔除后预计从 `17.40%` 降至约 `16.5%`——不计再投资的粗估，**存疑**；若仅计 `2026-07-01` 退市整理期那三次买入则为 `-2,776` 元 / `-0.18pp`），其余实验不受影响**：
 
 | # | 问题 | 实测影响范围 | 改动与验证 |
 |---|---|---|---|
 | 1 | `drop_nonmonotonic_k` 仅从 `bars` 剔除复权因子重置的标的，未从 `instruments` 与 `status` 移除 | `2015-2019` 的 `000022`、`000043` 留在 `instruments` 中被 `UniverseBuilder` 选入池（17 组已发布实验均未抽中，结果未受影响） | `builders.py` 新增 `purge_dropped_symbols(report)`，`build_dataset.py` 改为三表同步移除；新增单测 `test_purge_dropped_symbols_syncs_instruments_and_status` |
-| 2 | 原 `*ST` 股进入退市整理期后简称变为「XX退/退市XX」，gm `get_symbols` 的 `is_st` 翻回 `False`，导致退市前最后 15 日重新入池 | 三段分别有 `7 / 15 / 9` 只退市股在末尾翻回 `False`。`2025-2026` 反转（`EXP-20261022-151421-2220/trades.csv`）中 3 只退市整理期标的：`300029 天龙退`（买 24,342 / 卖 19,464，`-20.0%`）、`002808 恒久退`（买 24,344 / 卖 24,332，`≈0%`）、`002898 赛隆退`（含 2025-05 戴帽滞后期间一笔共买 43,862 / 卖 64,783，`+47.7%`；仅计 2026-07 退市整理期为买 24,322 / 卖 26,455，`+8.8%`），全表汇总净 `+16,031` 元（占期末权益 `+1.28%`，年化 `17.40% → 约 16.50%`） | `build_dataset.py` 扩展 `_ST_RE = r"^(\*?ST|S\*?ST|退市)\|^.+退$"`，且 `_attach_st_snapshots` 改为与 `sec_name` 识别结果取 `OR`；写入 README 限制清单第 37 条 |
+| 2 | 原 `*ST` 股进入退市整理期后简称变为「XX退/退市XX」，gm `get_symbols` 的 `is_st` 翻回 `False`，导致退市前最后 15 日重新入池 | 三段分别有 `7 / 15 / 9` 只退市股在末尾翻回 `False`。`2025-2026` 反转（`EXP-20261022-151421-2220/trades.csv`）中 3 只退市整理期标的：`300029 天龙退`（买 24,342 / 卖 19,464，`-20.0%`）、`002808 恒久退`（买 24,344 / 卖 24,332，`≈0%`）、`002898 赛隆退`（含 2025-05 戴帽滞后期间一笔共买 43,862 / 卖 64,783，`+47.7%`；仅计 2026-07 退市整理期为买 24,322 / 卖 26,455，`+8.8%`），全表汇总净 `+16,031` 元（占期末权益 `+1.28%`，年化 `17.40% → 约 16.50%`，粗估、存疑） | `build_dataset.py` 扩展 `_ST_RE = r"^(\*?ST|S\*?ST|退市)\|^.+退$"`，且 `_attach_st_snapshots` 改为与 `sec_name` 识别结果取 `OR`；写入 README 限制清单第 37 条 |
 | 3 | 退市整理期首日 / 恢复上市首日无涨跌幅限制，但 gm 源仍填 `±10%` 的 `limit_up/limit_down` 且 `limit_exempt=False` | `2020-2024` 有 2 行、`2025-2026` 有 13 行（均为退市整理期首日暴跌 `-50%~-91%`）；17 组实验 0 笔交易撞上这 15 行 | **B3 修正**：`builders.py::assemble` 默认**只告警不静默改值**（遵循 AGENTS.md 硬规则 7，防把源数据错误静默合法化），新增显式参数 `exempt_limit_breach=False`（CLI `--exempt-limit-breach`）开启时才改标 `limit_exempt=True`；新增单测 `test_assemble_exempts_delisting_first_day_bogus_limit` 锁定默认不改值与显式开启两条分支 |
 | 4 | 2026-07-06 起沪深主板 ST/*ST 涨跌幅由 `±5%` 调整为 `±10%`（《上海/深圳证券交易所交易规则(2026年修订)》，2026-04-24 发布、2026-07-06 施行），但 `builders.py::limit_ratio` 仍写死 `5%` | `2025-2026` 在 2026-07-06 后有 999 行主板 ST 真实收盘涨跌幅超 `5.5%`；若用 baostock 重建会触发规则表越界报错 | `builders.py::limit_ratio` 新增 `MAIN_ST_REFORM = pd.Timestamp("2026-07-06")` 并注明法规依据；新增单测 `test_limit_ratio_main_board_st_reform_2026_07_06` |
 | 5 | `test_no_lookahead.py` 的因子篡改测试仅测了 `Momentum`，未覆盖 `Volatility` 与 `AvgAmount` | 文档称三个示例因子均已覆盖，实际缺两个 | `test_no_lookahead.py` 改为 `@pytest.mark.parametrize("factor_cls", [Momentum, Volatility, AvgAmount])` |
-| 6 | **实盘信号 `scripts/live_signal.py` 只读 `bars.is_suspended`、未冻结跌停持仓、且 `investable` 从 `tradeable` 派生导致跌停股被顺带禁买（A1/A3）** | `bars.is_suspended` 恒为 `False`；若 `investable` 从 `tradeable` 派生会把跌停股也禁买（与回测 `execution.py` 只拦跌停卖、不拦跌停买口径不一致）；且 `status` 落后于 `as_of` 时无告警 | `_compute_tradeability` 拆清职责：`tradeable`（管卖）= `has_bar − suspended − limit_down_syms`，`investable`（管买）= `universe ∩ (has_bar − suspended − limit_up_syms)`（跌停可买不可卖，对齐回测）；当 `status` 非空但缺 `as_of` 记录时显式打印 `[warn] 停牌数据落后 N 天`；新增单测锁定 |
-| 7 | `TopNMomentum` 未接入 `--liquidity` 与 `--capacity-aum`、`benchmark_metrics` 内部缺日填 0 且 `benchmark_missing_days=0` 不落盘 / 缺 `benchmark_extra_days`（F-19/A2/A4）、`update_dataset.py` 未同步剔除 `status/instruments` 非单调 `k` 标的、缺 `gm` 时抛原始 traceback（P4） | 命令行传参对动量静默无效；`metrics.json` 缺日为 0 时无字段、多日不记；增量更新可能产生孤儿代码 | ① `TopNMomentum` 接入 `liquidity_pct` 与 `capacity_aum`；② `benchmark_metrics` 按公共日期配对，并**无条件写入** `benchmark_missing_days` 与 `benchmark_extra_days`（0 也写）；③ `update_dataset.py` 三表同步剔除非单调 `k`；④ `GmSource` 缺 `gm` 时提示 `Python314` 路径。全量测试 **269 → 280 passed** |
+| 6 | **实盘信号 `scripts/live_signal.py` 只读 `bars.is_suspended`、未冻结跌停持仓、且 `investable` 从 `tradeable` 派生导致跌停股被顺带禁买（A1/A3）** | `bars.is_suspended` 恒为 `False`；若 `investable` 从 `tradeable` 派生会把跌停股也禁买（与回测 `execution.py` 只拦跌停卖、不拦跌停买口径不一致）；且 `status` 落后于 `as_of` 时无告警 | `_compute_tradeability` 拆清职责：`tradeable`（管卖）= `has_bar − suspended − limit_down_syms`，`investable`（管买）= `universe ∩ (has_bar − suspended − limit_up_syms)`（跌停可买不可卖，对齐回测）；当 `status` 非空但缺 `as_of` 记录时显式打印 `[warn] 停牌数据落后 N 天`；新增单测锁定。**（2026-10-23 已更新：这一版本身有两个回归——未持有的跌停股 0 股、已持有的涨停股被清仓；且 `status` 整窗为空时不告警。见第二十二节）** |
+| 7 | `TopNMomentum` 未接入 `--liquidity` 与 `--capacity-aum`、`benchmark_metrics` 内部缺日填 0 且 `benchmark_missing_days=0` 不落盘 / 缺 `benchmark_extra_days`（F-19/A2/A4）、`update_dataset.py` 未同步剔除 `status/instruments` 非单调 `k` 标的、缺 `gm` 时抛原始 traceback（P4） | 命令行传参对动量静默无效；`metrics.json` 缺日为 0 时无字段、多日不记；增量更新可能产生孤儿代码 | ① `TopNMomentum` 接入 `liquidity_pct` 与 `capacity_aum`；② `benchmark_metrics` 按公共日期配对，并**无条件写入** `benchmark_missing_days` 与 `benchmark_extra_days`（0 也写）；③ `update_dataset.py` 三表同步剔除非单调 `k`；④ `GmSource` 缺 `gm` 时提示 `Python314` 路径。全量测试 **269 → 280 passed**（已更新：实际为 281，文档误记，见第二十二节） |
+
+---
+
+## 二十二、整仓回归审查（2026-10-23）
+
+范围：全量 `pytest`、`data_manifest.py verify`、`results/` 下 18 组 `EXP-20261022-*`（即文档所称的 17 组，加上审计之后才产生的 2025-2026 等权重复运行 `225810-7019`）全部重跑并逐项比对 `metrics.json`，
+以及把前两轮的改动当攻击面重试。数据校验 3/3 通过；未重建数据集。
+
+### 22.1 实盘信号：A1 修复引入的两个回归 + A3 守卫的绕过
+
+| | 内容 |
+|---|---|
+| 问题 | `build_plan` 的 `tradeable` 同时管"持仓冻结"和"入选者能否分到股数"。上一版 `_compute_tradeability` ① 把**所有**收盘跌停股移出 `tradeable`，② 把**所有**收盘涨停股移出样本池，③ `status` 在 10 日回看窗口内为空/读取失败时不告警（只在"非空但缺当日"时告警）。 |
+| 复现 | 样本 A..E、`n=3`、100 万。① 空仓、B 跌停：订单只有 A/D 各 50,000 股，B 进样本但 0 股，1/3 资金闲置。② 持有 A/C/D、C 涨停：发出 `C sell 33300 clear`，A/D 各加仓 16,700。③ `status=None` 或空表：无任何输出。 |
+| 改动 | `scripts/live_signal.py::_compute_tradeability(..., held=holdings)`：`tradeable = has_bar − suspended − (limit_down ∩ held)`，`investable = universe ∩ (has_bar − suspended − (limit_up − held))`；`status` 为空/None 时打印 `[warn] 停牌数据缺失`。 |
+| 验证 | 新增 4 个端到端用例（走到 `build_plan` 出单，不只断言集合），修前红、修后绿；旧用例里"跌停股不在 `tradeable`"这条断言本身固化了 bug，已改为按持有/未持有分别断言。README 第 39 条。 |
+
+### 22.2 回测引擎不是逐位可复现的
+
+| | 内容 |
+|---|---|
+| 问题 | `engine.py` 用 `for sym in {o.symbol ...}`（set）写回 `pending_sells`，次日补挂卖单顺序和现金累加顺序随 `PYTHONHASHSEED` 变。 |
+| 复现 | 首轮重跑 18 组中 `EXP-20261022-151206-5368`（60 日反转 2015-2019）与原产物不一致：Sharpe `0.05046435561355845 → 0.0504643556135583`，超额、IR、两个月的月收益同样只差末位，年化/波动/beta 完全相同。`PYTHONHASHSEED=1` 两次结果相同，`=2` 时 Sharpe 为 `0.050464355613557624`。 |
+| 改动 | 改为 `sorted(...)`；新增 `test_retried_sells_are_ordered_independent_of_hash_seed`（12 只同日跌停，修前三个种子给出三种顺序全红，修后全绿）。 |
+| 验证 | 修后再重跑 18 组：其余 17 组逐位一致；`151206-5368` 在 `1e-12` 相对容差内一致（年化 `-0.03787974748185241 → …252`），三个哈希种子下 `metrics.json` 与 `trades.csv` 哈希完全相同，Sharpe 固定为 `0.050464355613557624`。所有报告中该组数字（`-3.79%` / `0.050`）在展示精度上不变；`results/` 原产物未覆盖。README 第 41 条①。 |
+
+顺带发现但**未修**：调仓日新目标已清仓的票又被 `pending_sells` 补挂一遍，记一行 0 股 `blocked:no_available_shares`，16 组每组 0~2 行，只让 `n_blocked_trades` 多计（README 第 41 条②，"16 组"指 `1*` 开头的 16 个编号，两组等权重复运行未统计）。
+
+### 22.3 `benchmark_extra_days` 恒为 77~280，告警失效
+
+| | 内容 |
+|---|---|
+| 问题 | 上一轮按审查给的公式 `bench_clean.index.difference(ret_valid.index)` 实现，把 `trim_warmup` 截掉的预热期基准日、首日基准点都算成"多出来的"。首轮重跑实测 18 组落盘值为 77~280（2025-2026 等权为 78），正常运行恒非零。 |
+| 改动 | 只数 `[ret.index.min(), ret.index.max()]` 区间内基准有、策略没有的日子。该字段上一轮才加，已发布的 `metrics.json` 里没有它，不涉及旧结果。 |
+| 验证 | 测试改为区间前后各多 2 天 + 区间内策略漏 1 天：旧实现给 6、新实现给 1（先红后绿）。18 组真实回测重跑后全部为 0。 |
+
+### 22.4 文档表述
+
+- `HANDOVER.md` 坑 #4 "+22.5pp" 是 F-40 修前值 → 改为 `+25.46pp（F-40 修前 +22.52pp）`；
+- `HANDOVER.md` 结论 1、`README.md` 第 22 条："完全由/100% 来自抽样噪声"——T+1 口径下 2015-2019 段为 `-2.18σ`，已出 `±2σ`，改为"主要是…，该段存疑"；
+- 60 日反转 2025-2026 的 `17.40%` 在 HANDOVER 主表加脚注（含约 `+1.3pp` 退市股贡献）；所有"重建后约 16.5%"标为不计再投资的粗估、存疑；
+- 测试数：上一版文档写 280，实际 281（`test_live_signal.py` 28 个用例未计全）；本轮 **281 → 286 passed**（+4 实盘信号、+1 引擎），全仓已更新；
+- 限制清单 38 → 41 条（新增第 39、40、41 条）；第 40 条记录 `sec_name` 推导 ST 是否为时点数据尚未实证（存疑），附重建后的验证方法；
+- `run_baseline_backtest.py` 的实验记录 `parameters` 补 `reverse` 字段（只影响 `experiments/*.json` 元数据；此前反转与正向动量的记录无法区分）。
 
 ---
 
