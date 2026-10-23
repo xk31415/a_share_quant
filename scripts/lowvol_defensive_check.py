@@ -46,7 +46,7 @@ def load_eq(exp: str) -> pd.Series:
     不截的话这张表会用"全区间"口径：2020-2024 的等权是 9.15%，
     而主口径（`metrics.summarize`）是 9.81%——同一策略两个数，跨节对比
     就会减出假的差额（R05 F-23）。这里直接调主口径的 `trim_warmup`，
-    保证这张表和 `live_readiness.md` 第 3 节用同一条规则。
+    保证这张表和 `reports/research.md` §3用同一条规则。
     """
     d = ROOT / "results" / exp
     df = pd.read_csv(d / "equity_curve.csv", parse_dates=["trade_date"]).set_index("trade_date")

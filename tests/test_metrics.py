@@ -323,7 +323,7 @@ def test_trim_warmup_two_paths_diverge_when_first_position_day_is_still_flat():
 
     持仓表路径优先，一旦拿到切点就不再看净值是否平坦。默认成本模型的最低佣金
     5 元会在成交日把净值打离初始值，真实回测不触发——所以要锁的是两件事：
-    ① 不触发时两条路径必须一致；② 触发时确实分叉（已知，见 README 第 28 条）。
+    ① 不触发时两条路径必须一致；② 触发时确实分叉（已知，见 README 限制清单第 19 条）。
     """
     idx = pd.bdate_range("2024-01-01", periods=9)
     eq = pd.Series([1e6] * 6 + [1.01e6, 1.02e6, 1.03e6], index=idx)
@@ -344,7 +344,7 @@ def test_trim_warmup_two_paths_diverge_when_first_position_day_is_still_flat():
 def test_summarize_first_active_date_falls_back_to_base_point_without_positions():
     """R06 F-29：没有持仓表时 first_active_date 报的是净值仍等于初始资金那天。
 
-    这是已知偏差（README 限制清单第 29 条），暂未修。测试锁住"它确实如此"，
+    这是已知偏差（README 限制清单第 20 条），暂未修。测试锁住"它确实如此"，
     将来改掉必须同步改 README 与 performance.py 的注释。
     """
     from a_share_quant.metrics import summarize

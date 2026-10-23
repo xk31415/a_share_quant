@@ -8,12 +8,12 @@
 
 ## 0. 开工前必读（按顺序，不要跳）
 
-1. `HANDOVER.md` §4（当前数字）+ §6（八条约定）+ §7（十个坑）
-2. `README.md` 第 12 节 **41 条限制清单**——你要动的东西，大概率在某一条里
-3. `reports/review/LEDGER.md`——哪些坑已经查过、查到了什么
-4. 你要改的那份报告的相关章节
+1. `HANDOVER.md` §1（交付结论）+ §6（八条约定）+ §7（十个坑）
+2. `README.md` 第 12 节 **29 条已知限制**——你要动的东西，大概率在某一条里
+3. `reports/research.md`（研究结论与实盘判定）或 `reports/lookahead_audit.md`（改数据层/因子层之前）
 
-**不要一上来读 `fix_log.md`（约 1360+ 行）**，那是编年史，需要追某个具体结论时再查。
+2026-10-23 之前的修复编年史与交叉审查记录（`fix_log.md`、`reports/review/`）只在 git 历史里，
+需要追某个具体结论时用 `git log -- <路径>` 查，代码注释里的 `R05 F-16` 这类编号指向它们。
 
 ---
 
@@ -21,8 +21,8 @@
 
 | # | 规则 | 怎么检查 |
 |---|---|---|
-| 1 | 改代码后跑 `python -m pytest` | 期望 **287 passed**；失败不许说"完成" |
-| 2 | 改口径后 `grep` 全文找旧数字 | `grep -rn "旧值" README.md reports/*.md`，每处都要有"已更新/已作废"标注 |
+| 1 | 改代码后跑 `python -m pytest` | 期望 **296 passed**；失败不许说"完成" |
+| 2 | 改口径后 `grep` 全文找旧数字 | `grep -rn "旧值" *.md reports/*.md src scripts tests config`，旧数字直接改成新值，不要并列"新值（旧值）" |
 | 3 | 加默认参数时，默认分支输出逐位不变 | 用旧结果回归一次，写进测试 |
 | 4 | 新发现的坑写进 `README.md` 限制清单 | 编号递增，写清触发条件与后果 |
 | 5 | commit 消息用中文 | 这个项目没有外部协作者 |
@@ -105,12 +105,13 @@ R06 把 `critical` 判定前移到写盘之前，以为修完了。R07 指出**�
 
 按这个顺序，缺一步都不算：
 
-1. **跑测试**：`python -m pytest` → 287 passed（新增测试要能失败过——先让它红，再让它绿）；
+1. **跑测试**：`python -m pytest` → 296 passed（新增测试要能失败过——先让它红，再让它绿）；
 2. **复现攻击**：把你的修复当成攻击面，按对方可能绕过的方式再试一遍
    （换格式、换参数、换顺序、换目录）；
 3. **回归旧结果**：如果改了默认分支，用改动前的产物对比，必须逐位一致；
 4. **grep 全文**：旧数字、旧表述、旧结论；
-5. **写修复日志**：`reports/fix_log.md`，按"问题 → 改动 → 验证"三段式，**附前后数字**。
+5. **写清楚留痕**：commit 消息按"问题 → 改动 → 验证"写，**附前后数字**；修完仍有残留影响的
+   （现有数据或 `results/` 没重建、只修了一半）追加进 `README.md` 限制清单。文档只写当前状态，不写编年史。
 
 **做不到第 2 步的修复，等于没修。** 你自己测一遍"看它过不过"，等于把写代码时
 的心智模型又跑了一遍。
@@ -121,7 +122,7 @@ R06 把 `critical` 判定前移到写盘之前，以为修完了。R07 指出**�
 
 ```bash
 # 测试
-python -m pytest                                  # 全量，287 passed
+python -m pytest                                  # 全量，296 passed
 python -m pytest tests/test_reconcile.py -q       # 单文件
 
 # 回测（三段之一，约 30 秒 ~ 3 分钟）
@@ -137,15 +138,15 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
 # 因子研究（IC、十分档、流动性三档内收益、行业中性 IC）
 python scripts/factor_research.py --data-dir data/processed
 
-# 实盘信号 → 对账
+# 实盘信号 → 对账（演练请用 --sample/--out-dir 指向临时目录，不要碰 live/）
 python scripts/live_signal.py --data-dir data/processed_2025_2026 \
-    --cash 110000 --holdings live/holdings.csv --position 0.40
+    --cash 1000000 --holdings live/holdings.csv --position 0.40
 python scripts/reconcile.py --orders live/<日期> --fills fills/<日期>.csv \
     --holdings live/holdings.csv --save-holdings live/holdings.csv
 ```
 
 **红线：`update_dataset.py` 不是常用命令。** 仅当主人明确要求时才跑。
-需要装了掘金 gm 的 Python314（HANDOVER §3：`C:\Program Files\Python314\python.exe`），
+需要装了掘金 gm 的 Python314（`C:\Program Files\Python314\python.exe`），
 会改 `data/`。跑之前先 `python scripts/data_manifest.py verify`。
 审查轮默认禁止，也不要跑 `build_dataset.py`。
 
@@ -156,8 +157,10 @@ python scripts/update_dataset.py --data-dir data/processed_2025_2026
 
 **`reconcile.py` 的退出码**（链式脚本遇非 0 必须停下）：
 `0` 正常 /
-`1` 这批成交已入过账（或 `--save-holdings` 已有文件却没传 `--holdings`）——**没写持仓** /
-`2` 必须人工处理（超卖/超量/对不上单）——**没写持仓，只写报告**。
+`1` 只表示这批成交已入过账——**什么都没写** /
+`2` 必须人工处理：超卖/超量/对不上单（**只写报告，不写持仓**），或任何输入错误
+（文件不存在、缺列、列名歧义、`--holdings` 路径不存在、`--save-holdings` 已存在却没传 `--holdings`）。
+`live_signal.py` 非 0 退出 = 没写委托文件（数据过期、资金不足、文件缺失等）。
 
 ---
 

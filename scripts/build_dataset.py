@@ -221,7 +221,7 @@ class GmSource:
             ["trade_date", "symbol"])
         out = pd.merge_asof(status.sort_values(["trade_date", "symbol"]), snaps,
                             on="trade_date", by="symbol", direction="backward")
-        # 只用截面值。退市整理期截面 is_st 会翻回 False（README 限制清单第 37 条），
+        # 只用截面值。退市整理期截面 is_st 会翻回 False（README 限制清单第 4 条），
         # 但不能拿 sec_name 补：它是当前简称，补了就是用未来戴帽状态剔除历史股票。
         out["is_st"] = out["is_st_snap"].fillna(False).astype(bool)
         return out.drop(columns=["is_st_snap"])
