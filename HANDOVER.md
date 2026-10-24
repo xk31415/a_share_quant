@@ -27,7 +27,7 @@
 
 ### 2.1 前置检查（每次开始前）
 
-- [ ] `python -m pytest` → **296 passed**
+- [ ] `python -m pytest` → **332 passed**
 - [ ] `python scripts/data_manifest.py verify`：2020-2024 与 2015-2019 两份 `[ok]`
       （2025-2026 每日更新后不一致属正常）
 - [ ] 基线回测 `annualized_return = 0.0610828468971103`（命令见 `QUICKSTART.md` §1）

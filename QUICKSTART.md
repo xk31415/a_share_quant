@@ -20,7 +20,7 @@
 健康检查：
 
 ```bash
-python -m pytest                        # 296 passed（不读真实数据）
+python -m pytest                        # 332 passed（不读真实数据）
 python scripts/data_manifest.py verify  # 三份数据集各一行 [ok]；2025-2026 每日更新后会显示不一致，属正常
 python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
     --start 2025-01-01 --end 2026-10-20 --benchmark 000852
@@ -41,6 +41,17 @@ python scripts/run_baseline_backtest.py --data-dir data/processed \
 # 60 日反转 / 12-1 动量
 ... --strategy momentum --window 60 --skip 0 --reverse
 ... --strategy momentum --window 252 --skip 21
+
+# 炒作苗头观察池：paper / 观察仿真，不是买卖建议，不进实盘接线。
+# 参数与 CSV 列见 reports/hype_watch.md。没有已验证收益，不要把这次的净值写进研究结论。
+python scripts/run_baseline_backtest.py --strategy hype_watch \
+    --data-dir data/processed_2025_2026 --start 2025-01-01 --end 2026-10-20 \
+    --themes path/to/themes.csv
+# 回放晨报名单（默认仍要过涨停家数和超额门槛；只回放名单时把 csv_require_trigger 设为 false）
+python scripts/run_baseline_backtest.py --strategy hype_watch \
+    --data-dir data/processed_2025_2026 --themes path/to/themes.csv \
+    --watchlist path/to/morning.csv
+
 # 容量压力测试：放大本金并在选股环节启用容量约束
 ... --capital 500000000 --capacity-aum 500000000
 

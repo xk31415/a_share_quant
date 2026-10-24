@@ -102,8 +102,8 @@ class ExecutionSimulator:
 
     约束（均可配置开关）：
       * 停牌（is_suspended 或无行情行）-> 不成交；
-      * 开盘价 >= 涨停价 -> 买入不成交（保守假设：一字涨停买不到）；
-      * 开盘价 <= 跌停价 -> 卖出不成交；
+      * 成交参考价 >= 涨停价 -> 买入不成交（默认参考价是开盘价：一字涨停买不到）；
+      * 成交参考价 <= 跌停价 -> 卖出不成交；
       * 买入按整手递减直至现金可负担；**现金不足时按比例同时缩减全部买单**，
         而不是按顺序把靠后的标的整笔丢弃（后者会造成与代码字典序相关的偏差）。
     """
@@ -111,7 +111,8 @@ class ExecutionSimulator:
     def __init__(self, cost_model: CostModel, lot_size: int = 100,
                  enforce_limit: bool = True,
                  enforce_suspension: bool = True,
-                 max_participation_rate: float = 0.0) -> None:
+                 max_participation_rate: float = 0.0,
+                 price_col: str = "open") -> None:
         self.cost_model = cost_model
         self.lot_size = lot_size
         self.enforce_limit = enforce_limit
@@ -121,6 +122,11 @@ class ExecutionSimulator:
         self.max_participation_rate = float(max_participation_rate)
         if not 0.0 <= self.max_participation_rate <= 1.0:
             raise ValueError("max_participation_rate must be in [0, 1]")
+        # 默认 open：与历史回测逐位一致。close 只在调用方显式指定时使用，
+        # 涨跌停是否封板也看这同一列，不另换一根价格。
+        if price_col not in ("open", "close"):
+            raise ValueError("price_col must be 'open' or 'close'")
+        self.price_col = price_col
 
     # ---- 内部工具 ----
     @staticmethod
@@ -186,7 +192,7 @@ class ExecutionSimulator:
             if self.enforce_suspension and bool(row.get("is_suspended", False)):
                 fills.append(Fill(od.symbol, "sell", 0, 0.0, 0.0, "blocked:suspended"))
                 continue
-            open_px = float(row["open"])
+            open_px = float(row[self.price_col])
             limit_down = row.get("limit_down")
             exempt = bool(row.get("limit_exempt", False))
             if self.enforce_limit and not exempt:
@@ -243,7 +249,7 @@ class ExecutionSimulator:
             if self.enforce_suspension and bool(row.get("is_suspended", False)):
                 fills.append(Fill(od.symbol, "buy", 0, 0.0, 0.0, "blocked:suspended"))
                 continue
-            open_px = float(row["open"])
+            open_px = float(row[self.price_col])
             limit_up = row.get("limit_up")
             exempt = bool(row.get("limit_exempt", False))
             if self.enforce_limit and not exempt:

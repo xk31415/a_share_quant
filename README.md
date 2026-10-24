@@ -18,7 +18,7 @@
   实盘链路按这个方案实现；
 - 三份真实数据集（2020-2024 / 2015-2019 / 2025-01~2026-10）**不入库**，仓库只存内容指纹
   `data/MANIFEST.json`；
-- 296 个测试；当前权威回测结果是 `results/EXP-20261022-*`。
+- 332 个测试；当前权威回测结果是 `results/EXP-20261022-*`。
 
 ## 2. 项目结构
 
@@ -35,7 +35,7 @@ a_share_quant/
 │   ├── data/                # schema、loader、validation、builders、incremental
 │   ├── universe/            # 动态股票池（point-in-time）
 │   ├── factors/             # 因子框架 + 示例因子
-│   ├── strategies/          # 等权 / 动量（含反转）/ 低波，流动性与容量过滤
+│   ├── strategies/          # 等权 / 动量（含反转）/ 低波 / 观察池仿真（paper）
 │   ├── portfolio/           # 目标权重构建
 │   ├── backtest/            # 引擎、撮合、成本、持仓（T+1）
 │   ├── metrics/             # 绩效指标与分解报表
@@ -44,7 +44,7 @@ a_share_quant/
 ├── scripts/                 # 数据构建与更新、回测、因子研究、实盘信号、对账
 ├── tests/                   # pytest（含未来函数专项）
 ├── live/                    # sample.json（冻结样本，入库）+ 每日委托与持仓（不入库）
-├── reports/                 # research.md、lookahead_audit.md、lowvol_defensive.json
+├── reports/                 # research.md、lookahead_audit.md、hype_watch.md、lowvol_defensive.json
 └── results/ experiments/    # 回测产物与实验元数据（不入库）
 ```
 
@@ -55,7 +55,7 @@ a_share_quant/
 ```bash
 python -m venv .venv
 pip install -e ".[dev]"
-python -m pytest            # 296 passed；测试不读真实数据
+python -m pytest            # 332 passed；测试不读真实数据
 ```
 
 核心依赖：`pandas / numpy / scipy / matplotlib / pyyaml / pyarrow`。没有 GPU、没有数据库。
@@ -64,7 +64,8 @@ python -m pytest            # 296 passed；测试不读真实数据
 股票池 point-in-time；T+1、涨跌停、停牌、整手、成本、净值、单边换手；公司行动（除权日收益≈0、
 卖出按复权价结算）；引擎启动守卫（缺涨跌停价报错、编程式调用也跑校验）；交易权限（板块白名单、
 引擎强制股票池）；数据装配与涨跌停规则表；策略（散列抽样可复现、行业中性、容量过滤）；
-基准与指数代码撞车；实盘信号（整手、清仓带零股、冻结持仓、涨跌停两侧、资金不足拒单）；
+基准与指数代码撞车；观察池仿真（paper only，涨停家数与超额门槛、晨报 CSV、断路、T+1）；
+实盘信号（整手、清仓带零股、冻结持仓、涨跌停两侧、资金不足拒单）；
 增量更新；成交对账（四种成交状态、重复入账指纹、券商中文列名、退出码）；**未来函数专项**
 （`tests/test_no_lookahead.py`）。
 
@@ -144,7 +145,7 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
 # 期望 annualized_return = 0.0610828468971103
 ```
 
-常用参数：`--strategy equal_weight|momentum|low_vol`、`--window/--skip/--reverse`（动量与反转）、
+常用参数：`--strategy equal_weight|momentum|low_vol|hype_watch`、`--window/--skip/--reverse`（动量与反转）、
 `--industry-neutral`、`--liquidity`、`--capital`、`--capacity-aum`、`--freq D|W|M`、`--seed`。
 
 产物写入 `results/EXP-<id>/`，元数据（数据指纹、规则、参数、Git commit）写入 `experiments/EXP-<id>.json`：
@@ -199,6 +200,11 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
 
 **新策略**：继承 `Strategy`，实现 `generate_target(as_of, bars, universe) -> TargetPortfolio`，
 只输出目标权重，不做 I/O、不算成本、不下单。参考 `strategies/equal_weight.py`。
+
+**观察池仿真**（`--strategy hype_watch`）是 paper / 观察仿真：题材涨停家数和相对基准的超额
+达到先验门槛才记入观察池，下一交易日按开盘或收盘撮合。不接入 `live_signal.py` /
+`live_auto.py`，没有已验证收益，不进入研究判定。参数、晨报 CSV 和纯规则路径见
+[`reports/hype_watch.md`](reports/hype_watch.md)。
 
 **复现实验**：同一 commit + 同一数据指纹 + 同一配置。三段回测已在不同 pandas/pyarrow 版本上
 独立复现到 float64 逐位相同。
@@ -308,6 +314,16 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
     这类票超过目标数的 `--max-unfunded`（默认 10%）时拒绝写委托，并给出买齐所需总资产。
     2026-10-20 冻结样本、100 只、40% 仓位：总资产 80 万通过（1 只买不进），60 万被拒（28 只）。
     "全部买齐所需总资产"由最贵的一只决定（当前约 201 万），会明显高于实际可用的门槛。
+30. **炒作苗头观察池（`hype_watch`）只做 paper / 观察仿真**。不接入 `live_signal.py` /
+    `live_auto.py`，日志和 `paper_summary.json` 不是买卖建议，也没有任何一段被验证的收益
+    可以写进研究判定。纯规则路径要有 `themes.csv`（`start_date` 必填，缺了直接报错，不会把
+    当前成分回填到历史）；只有 `bars` 上的当日 `theme` / `industry` 列时才退回行情里的标签，
+    用 `industry` 会告警，静态分类与限制第 5 条一样有微弱前视。观察窗口 T+1/T+3/T+5
+    的收盘收益是事后指标，信号日不可知，不参与目标权重。断路器用信号日收盘前已实现的权益
+    （含当日，丢掉更晚的点），空仓从下一交易日执行；回撤是近 20 个交易日的滚动峰值，
+    不是从回测起点起的历史高点；冷静期按信号日计数。次日成交价若已封板，按既有规则买不进
+    （`blocked:limit_up`）。单边约 0.1% 是配置里的佣金率+滑点率，不是实测滑点，小单还受
+    5 元最低佣金影响，卖出另计印花税。
 
 ## 13. 纪律
 

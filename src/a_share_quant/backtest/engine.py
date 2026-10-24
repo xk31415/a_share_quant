@@ -48,13 +48,15 @@ class BacktestConfig:
     end_date: str
     rebalance_frequency: RebalanceFrequency = "M"
     initial_capital: float = 1_000_000.0
-    execution_price: str = "open"   # t+1 成交参考价列名
+    execution_price: str = "open"   # t+1 成交参考价列名（open 或 close；默认 open）
     benchmark: Optional[str] = None
     cash_buffer: float = 0.01       # 建仓时预留的现金比例（覆盖费用/滑点）
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.cash_buffer < 1.0:
             raise ValueError("cash_buffer must be in [0, 1)")
+        if self.execution_price not in ("open", "close"):
+            raise ValueError("execution_price must be 'open' or 'close'")
 
 
 @dataclass
@@ -257,7 +259,8 @@ class BacktestEngine:
             self.cost_model, lot_size=self.lot_size,
             enforce_limit=self.enforce_limit,
             enforce_suspension=self.enforce_suspension,
-            max_participation_rate=self.max_participation_rate)
+            max_participation_rate=self.max_participation_rate,
+            price_col=cfg.execution_price or "open")
 
         last_prices: dict[str, float] = {}
         last_k: dict[str, float] = {}
@@ -417,6 +420,16 @@ class BacktestEngine:
                 hist = bars.loc[bars["trade_date"] <= d]
                 universe = self.universe_builder.get_universe(d)
                 warnings.extend(getattr(self.universe_builder, "warnings", []) or [])
+                # 可选钩子：账户级状态（例如回撤断路）只能在引擎里看到权益。
+                # 默认策略没有 observe_equity，不调用，输出与以前一致。
+                # 传入的是截至当日收盘、已经算完的权益，供下一交易日执行使用。
+                observe = getattr(self.strategy, "observe_equity", None)
+                if callable(observe):
+                    hist_eq = pd.Series(
+                        {pd.Timestamp(ts): float(val) for ts, val in equity_records},
+                        dtype="float64", name="equity")
+                    hist_eq.index.name = "trade_date"
+                    observe(d, hist_eq)
                 target = self.strategy.generate_target(d, hist, universe)
                 weights, violations = self._enforce_universe(target.weights, universe)
                 for sym, w in violations:
@@ -432,6 +445,7 @@ class BacktestEngine:
                                                        self.portfolio_rules)
             prev_equity = equity
 
+        warnings.extend(list(getattr(self.strategy, "warnings", None) or []))
         warnings.extend(self.universe_builder.finalize_warnings())
 
         equity_curve = pd.Series(dict(equity_records), name="equity")
