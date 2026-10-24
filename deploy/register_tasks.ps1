@@ -3,6 +3,10 @@
 #   powershell -ExecutionPolicy Bypass -File C:\AppData\a_share_quant\deploy\register_tasks.ps1
 # 卸载：
 #   powershell -ExecutionPolicy Bypass -File ...register_tasks.ps1 -Remove
+#
+# 注意：必须用 schtasks /ru /rp 存密码，任务才是「无论是否登录都运行」。
+# 用 Register-ScheduledTask + ServiceAccount 注册出来的会退化成
+# 「只使用交互方式」，RDP 一注销就不跑了 —— 这是踩过的坑。
 
 param(
     [switch]$Remove,
@@ -14,13 +18,17 @@ $ErrorActionPreference = "Stop"
 
 if ($Remove) {
     foreach ($n in @("a_share_quant_data","a_share_quant_trade","a_share_quant_settle")) {
-        Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction SilentlyContinue
+        schtasks /delete /tn $n /f | Out-Null
         Write-Output "removed $n"
     }
     exit 0
 }
 
-# 周一~周五 08:30 / 09:15 / 15:35
+# 交互式运行时提示输入一次密码，用于「无论是否登录都运行」
+$pw = Read-Host -AsSecureString "Administrator 密码（用于计划任务后台运行）"
+$BSTR = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw)
+$Plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+
 $jobs = @(
     @{Name="a_share_quant_data";   Stage="data";   At="08:30"},
     @{Name="a_share_quant_trade";  Stage="trade";  At="09:15"},
@@ -28,16 +36,14 @@ $jobs = @(
 )
 
 foreach ($j in $jobs) {
-    $arg = "scripts\live_auto.py --stage " + $j.Stage
-    $action = New-ScheduledTaskAction -Execute $PyData -Argument $arg -WorkingDirectory $Root
-    $t = [datetime]::ParseExact($j.At, "HH:mm", $null)
-    $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $t
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 60) -MultipleInstances IgnoreNew
-    $principal = New-ScheduledTaskPrincipal -UserId "Administrator" -LogonType ServiceAccount -RunLevel Highest
-    Register-ScheduledTask -TaskName $j.Name -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
-    Write-Output ("registered " + $j.Name + "  " + $j.At + "  stage=" + $j.Stage)
+    $tr = '"' + $PyData + '" scripts\live_auto.py --stage ' + $j.Stage
+    schtasks /create /tn $j.Name /tr $tr `
+        /sc weekly /d MON,TUE,WED,THU,FRI /st $j.At `
+        /ru Administrator /rp $Plain /rl HIGHEST /f | Out-Null
+    Write-Output ("registered " + $j.Name + "  " + $j.At)
 }
 
 Write-Output ""
-Write-Output "已注册 3 个任务。查看：Get-ScheduledTask -TaskName a_share_quant_* | Format-Table TaskName,State"
-Write-Output "手动触发一次：Start-ScheduledTask -TaskName a_share_quant_trade"
+Write-Output "已注册 3 个任务（无论是否登录都运行）。"
+Write-Output "查看：schtasks /query /tn a_share_quant_trade /fo LIST /v"
+Write-Output "手动触发：schtasks /run /tn a_share_quant_trade"
