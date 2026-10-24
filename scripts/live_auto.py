@@ -220,19 +220,31 @@ def stage_trade(cfg: dict, log, args) -> int:
 
     # 2) 算信号。--as-of 传【今天】，让季度判断用执行日的月份（R08 F-43）；
     #    数据不够新时 live_signal 自己会回滚到最近交易日。
-    sig_cmd = [py_d, "scripts/live_signal.py",
-               "--data-dir", cfg["data_dir"],
-               "--holdings", cfg["holdings"],
-               "--out-dir", cfg["out_dir"],
-               "--sample", cfg["sample"],
-               "--as-of", date,
-               "--position", str(cfg["position"])]
+    strat = str(cfg.get("strategy", "equal_weight")).lower()
+    if strat == "hype_watch":
+        sig_cmd = [py_d, "scripts/live_signal_hype.py",
+                   "--data-dir", cfg["data_dir"],
+                   "--holdings", cfg["holdings"],
+                   "--out-dir", cfg["out_dir"],
+                   "--as-of", date,
+                   "--position", str(cfg["position"])]
+        themes = cfg.get("themes")
+        if themes and str(themes).lower() not in ("null", "none", ""):
+            sig_cmd += ["--themes", str(themes)]
+    else:
+        sig_cmd = [py_d, "scripts/live_signal.py",
+                   "--data-dir", cfg["data_dir"],
+                   "--holdings", cfg["holdings"],
+                   "--out-dir", cfg["out_dir"],
+                   "--sample", cfg["sample"],
+                   "--as-of", date,
+                   "--position", str(cfg["position"])]
     if cash is not None:
         sig_cmd += ["--cash", str(cash)]
     if cfg.get("ignore_quarter"):
         sig_cmd.append("--ignore-quarter")
 
-    rc = run_step("live_signal", sig_cmd, log, timeout=600)
+    rc = run_step(f"live_signal[{strat}]", sig_cmd, log, timeout=600)
     if rc != 0:
         return rc
 

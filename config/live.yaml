@@ -17,9 +17,12 @@ sample:    live/sample.json
 log_dir:   live/logs
 
 # --- 策略 ---
-# 等权 50 只，季度调仓（1/4/7/10）。position=1.0 表示满仓运行。
+# equal_weight = 等权 50 只，季度调仓（1/4/7/10）
+# hype_watch   = 观察池（日频，题材触发，pool_size 只）
+strategy: hype_watch
 position: 1.0
 ignore_quarter: false      # true = 非季度月也强制调仓
+themes: null               # hype_watch 用：题材成员 CSV 路径（不给则用行业代理）
 
 # --- 下单安全 ---
 auto_trade: true          # true = 真实下单（仿真账户）。false = 只算不下

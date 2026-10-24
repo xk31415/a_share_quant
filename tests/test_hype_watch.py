@@ -567,11 +567,17 @@ def test_csv_loaders_reject_bad_tables(tmp_path):
 
 
 def test_live_entrypoints_do_not_reference_hype_watch():
+    """hype_watch 不接 live_signal / reconcile（那两套是等权专用）。
+
+    **live_auto.py 已解除此限制**（2026-10-24）：用户明确要求观察池策略
+    接入仿真自动化。桥接层是 `scripts/live_signal_hype.py`，只调
+    `generate_target()` 拿权重，不拆 `paper_only` 锁。
+    live_auto.py 通过 config 的 `strategy` 字段路由到不同信号脚本。
+    """
     paths = [
         ROOT / "src/a_share_quant/live/signal.py",
         ROOT / "src/a_share_quant/live/reconcile.py",
         ROOT / "scripts/live_signal.py",
-        ROOT / "scripts/live_auto.py",
         ROOT / "scripts/reconcile.py",
     ]
     for path in paths:
