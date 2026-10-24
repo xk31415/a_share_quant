@@ -24,7 +24,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Mapping, Optional
 
 import pandas as pd
 
@@ -77,6 +77,33 @@ class BacktestResult:
     @property
     def final_equity(self) -> float:
         return float(self.equity_curve.iloc[-1])
+
+
+def _target_signature(weights: Mapping[str, float]) -> tuple:
+    """目标组合的稳定签名：代码升序，权重保留 8 位小数。
+
+    用来判断「目标变了没有」。不看市值权重，所以价格漂移不会变成新目标。
+    """
+    return tuple(sorted(
+        (str(sym), round(float(w), 8))
+        for sym, w in dict(weights or {}).items()
+        if float(w) > 0
+    ))
+
+
+def _on_demand_skip(weights: Mapping[str, float], state: PortfolioState,
+                    last_signature: Optional[tuple]) -> bool:
+    """目标与上次提交的一致，且当前持股名单已经是这批股票时，跳过下单。
+
+    持股名单还没跟上（买入失败、还没建仓）时不跳过，下一交易日继续调。
+    """
+    signature = _target_signature(weights)
+    if last_signature is None or signature != last_signature:
+        return False
+    held = tuple(sorted(
+        sym for sym, pos in state.positions.items() if pos.shares > 0))
+    names = tuple(sym for sym, _ in signature)
+    return held == names
 
 
 class BacktestEngine:
@@ -249,7 +276,19 @@ class BacktestEngine:
         bars, adj_warnings = self._attach_adj_factor(bars)
         warnings.extend(adj_warnings)
         bars_by_date = {ts: g for ts, g in bars.groupby("trade_date")}
-        signal_dates = set(rebalance_dates(trading_days, cfg.rebalance_frequency))
+        # 日频按需（策略声明 rebalance_on_change）：每个交易日收盘都算目标。
+        # 目标名单、目标权重与「上次提交的目标」一致，且持仓名单已经跟上，就不再下单。
+        # 价格漂移把市值权重带离等权时不调仓。其它策略不声明该属性，仍走日历调仓。
+        on_change = bool(getattr(self.strategy, "rebalance_on_change", False))
+        if on_change:
+            signal_dates = set(trading_days)
+            if cfg.rebalance_frequency != "D":
+                warnings.append(
+                    "rebalance: 策略声明日频按需调仓，已忽略配置里的 "
+                    f"rebalance_frequency={cfg.rebalance_frequency}。"
+                    "每个交易日收盘评估目标；目标相对当前持仓没有变化则不下单。")
+        else:
+            signal_dates = set(rebalance_dates(trading_days, cfg.rebalance_frequency))
         warnings.extend(self._check_warmup(trading_days, signal_dates))
 
         state = PortfolioState(cfg.initial_capital)
@@ -262,6 +301,8 @@ class BacktestEngine:
         last_prices: dict[str, float] = {}
         last_k: dict[str, float] = {}
         pending_weights: Optional[dict[str, float]] = None
+        # 日频按需：上次真正提交给执行层的目标签名。None 表示还没提交过。
+        last_target_signature: Optional[tuple] = None
         # 未成交的卖单（股数），次日继续挂；这是 F-02 的修复：
         # 卖单被跌停/停牌拦下后不能就这么丢了，否则持仓会一直超配到下一个信号日。
         pending_sells: dict[str, int] = {}
@@ -418,6 +459,9 @@ class BacktestEngine:
                 universe = self.universe_builder.get_universe(d)
                 warnings.extend(getattr(self.universe_builder, "warnings", []) or [])
                 target = self.strategy.generate_target(d, hist, universe)
+                # 策略自己的缺数据告警（例如热点策略没有行业）要进报告，
+                # 不能只留在策略对象上——否则空仓看起来像主动看空。
+                warnings.extend(getattr(self.strategy, "warnings", []) or [])
                 weights, violations = self._enforce_universe(target.weights, universe)
                 for sym, w in violations:
                     violation_rows.append(
@@ -428,8 +472,15 @@ class BacktestEngine:
                         f"{len(violations)} 个股票池外的标的"
                         f"（例如 {[s for s, _ in violations][:5]}），已被引擎拦截，"
                         f"未下单。明细见 universe_violations.csv。")
-                pending_weights = build_target_weights(weights,
-                                                       self.portfolio_rules)
+                weights = build_target_weights(weights, self.portfolio_rules)
+                if on_change and _on_demand_skip(
+                        weights, state, last_target_signature):
+                    # 目标没变，当前持仓名单也已经是这批股票：不动仓。
+                    pending_weights = None
+                else:
+                    pending_weights = weights
+                    if on_change:
+                        last_target_signature = _target_signature(weights)
             prev_equity = equity
 
         warnings.extend(self.universe_builder.finalize_warnings())

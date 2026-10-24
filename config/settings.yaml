@@ -39,3 +39,17 @@ market_rules:
 
 # 数据目录由命令行 --data-dir 指定（默认 data/interim/synthetic）。
 # 接入真实数据：--data-dir data/processed
+
+# 热点 + 龙头（研究规则，不接入实盘）。数字是先验，不是按收益搜索的结果。
+# 5 个行业 × 2 只 = 10 只，等权正好落在上面的单票上限 10% 上。
+# 入选少于 10 只时，组合层把超出 10% 的权重留成现金，不重新归一。
+# 调仓是日频按需，不读取上面的 rebalance_frequency（月频只给其它策略用）。
+# 每个交易日收盘重算目标；目标名单和权重与上次提交的一致、且持股名单已经跟上，则不下单。
+# 实盘冻结样本的季度调仓仍是另一条链路。
+hotspot_dragonhead:
+  rebalance: daily_on_change  # 日频评估，按需调仓
+  top_k: 5                  # 热点行业数
+  top_m: 2                  # 每个热点行业的龙头只数
+  window: 20                # 行业等权收益与相对强弱的回看交易日
+  amount_window: 20         # 日均成交额回看交易日
+  min_industry_members: 3   # 行业内有效收益样本少于此数则不参与排名

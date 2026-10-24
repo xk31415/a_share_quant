@@ -38,6 +38,10 @@ from a_share_quant.research.experiments import (
     save_experiment,
 )
 from a_share_quant.strategies.equal_weight import EqualWeightStrategy
+from a_share_quant.strategies.hotspot_dragonhead import (
+    HotspotDragonhead,
+    static_industry_map,
+)
 from a_share_quant.strategies.low_vol import LowVolatility
 from a_share_quant.strategies.momentum import TopNMomentum
 from a_share_quant.universe.builder import UniverseBuilder, UniverseRules
@@ -63,7 +67,7 @@ def main() -> None:
     ap.add_argument("--freq", default=None, choices=["D", "W", "M"])
     ap.add_argument("--out", default="results")
     ap.add_argument("--strategy", default="equal_weight",
-                    choices=["equal_weight", "momentum", "low_vol"])
+                    choices=["equal_weight", "momentum", "low_vol", "hotspot"])
     ap.add_argument("--capital", type=float, default=None,
                     help="初始资金（默认取 settings.yaml，1,000,000）")
     ap.add_argument("--industry-neutral", action="store_true",
@@ -77,7 +81,14 @@ def main() -> None:
     ap.add_argument("--liquidity", type=float, default=None,
                     help="只保留成交额最高的这个比例的股票（0.33 = 前 1/3）")
     ap.add_argument("--seed", type=int, default=0, help="等权基准的抽样种子（换一批股票）")
-    ap.add_argument("--window", type=int, default=None, help="动量/反转回看窗口")
+    ap.add_argument("--window", type=int, default=None,
+                    help="动量/反转回看窗口；hotspot 时覆盖热点收益窗口")
+    ap.add_argument("--top-k", type=int, default=None,
+                    help="热点行业数（仅 hotspot，默认见 settings.yaml）")
+    ap.add_argument("--top-m", type=int, default=None,
+                    help="每个热点行业的龙头只数（仅 hotspot）")
+    ap.add_argument("--min-industry-members", type=int, default=None,
+                    help="行业有效样本少于此数不参与热点排名（仅 hotspot）")
     ap.add_argument("--skip", type=int, default=None, help="跳过最近 N 个交易日")
     ap.add_argument("--reverse", action="store_true",
                     help="动量策略反向：选动量最弱的一批（反转）")
@@ -146,6 +157,44 @@ def main() -> None:
                                 capacity_aum=args.capacity_aum,
                                 industry_map=ind_map,
                                 k_per_industry=args.k_per_industry)
+    elif args.strategy == "hotspot":
+        # 研究规则，不接入 live_auto。行业优先在策略内部读 bars.industry；
+        # 这里只把 instruments 的静态分类当作退路。
+        if args.industry_neutral:
+            raise SystemExit(
+                "hotspot 本身按行业选热点，不能和 --industry-neutral 一起用")
+        if args.reverse:
+            raise SystemExit(
+                "hotspot 没有 --reverse；规则固定为强势行业里的相对强势龙头")
+        hd = settings.get("hotspot_dragonhead") or {}
+        static_map = static_industry_map(provider.get_instruments())
+        bars_have_industry = (
+            "industry" in bars_all.columns and bars_all["industry"].notna().any())
+        if not bars_have_industry and static_map is None:
+            print("[warn] hotspot: bars 与 instruments 都没有 industry，"
+                  "信号日会返回空组合（缺数据，不是看空）。"
+                  "需要 bars.industry 逐日快照；"
+                  "scripts/fetch_industry.py 只能补当前静态分类，分组含前视。")
+        if hd.get("rebalance", "daily_on_change") != "daily_on_change":
+            raise SystemExit(
+                "hotspot_dragonhead.rebalance 只能是 daily_on_change"
+                "（每个交易日评估，目标相对当前持仓没变则不下单）")
+        if args.freq not in (None, "D"):
+            print(f"[warn] hotspot 固定日频按需调仓，忽略 --freq {args.freq}")
+        if args.liquidity is not None:
+            print("[warn] hotspot 龙头排序已经包含成交额，忽略 --liquidity")
+        if args.capacity_aum is not None:
+            print("[warn] hotspot 首版没有容量约束，忽略 --capacity-aum")
+        strategy = HotspotDragonhead(
+            top_k=int(args.top_k if args.top_k is not None else hd.get("top_k", 5)),
+            top_m=int(args.top_m if args.top_m is not None else hd.get("top_m", 2)),
+            window=int(args.window if args.window is not None else hd.get("window", 20)),
+            amount_window=int(hd.get("amount_window", 20)),
+            min_industry_members=int(
+                args.min_industry_members if args.min_industry_members is not None
+                else hd.get("min_industry_members", 3)),
+            industry_map=static_map,
+            max_positions=max_pos)
     else:
         strategy = EqualWeightStrategy(max_positions=pf.get("max_positions", 20),
                                        seed=int(args.seed),
@@ -156,10 +205,14 @@ def main() -> None:
         commission_min=cost_cfg.get("commission_min", 5.0),
         stamp_duty_rate=cost_cfg.get("stamp_duty_rate", 0.0005),
         slippage_rate=cost_cfg.get("slippage_rate", 0.0005))
+    # 热点策略自己声明日频按需，不沿用 backtest.rebalance_frequency 的月频。
+    freq = args.freq or bt.get("rebalance_frequency", "M")
+    if getattr(strategy, "rebalance_on_change", False):
+        freq = "D"
     config = BacktestConfig(
         start_date=args.start or bt.get("start_date", "2021-01-04"),
         end_date=args.end or bt.get("end_date", "2023-12-29"),
-        rebalance_frequency=args.freq or bt.get("rebalance_frequency", "M"),
+        rebalance_frequency=freq,
         initial_capital=float(args.capital or bt.get("initial_capital", 1_000_000)),
         benchmark=args.benchmark or bt.get("benchmark"),
         cash_buffer=float(pf.get("cash_buffer", 0.01)))
@@ -232,6 +285,9 @@ def main() -> None:
     report["industry_source"] = industry_source or "none"
     report["n_universe_violations"] = int(len(result.universe_violations)) \
         if result.universe_violations is not None else 0
+    if strategy.name == "hotspot_dragonhead":
+        # 与上面的归因来源分开：归因可以用静态行业，选股信号的来源要单独留痕。
+        report["hotspot_industry_source"] = strategy.industry_source
     with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2, default=str)
     with open(out_dir / "cost_contribution.json", "w", encoding="utf-8") as f:
@@ -242,6 +298,31 @@ def main() -> None:
     except Exception as exc:  # 图形环境异常不阻断回测
         print(f"[warn] plot failed: {exc}")
 
+    parameters = {
+        "max_positions": getattr(strategy, "max_positions",
+                                 getattr(strategy, "top_n", None)),
+        "strategy": getattr(strategy, "name", type(strategy).__name__),
+        "window": getattr(strategy, "window", None),
+        "skip": getattr(strategy, "skip", None),
+        "reverse": getattr(strategy, "reverse", None),
+        "seed": getattr(strategy, "seed", None),
+        "liquidity_pct": getattr(strategy, "liquidity_pct", None),
+        "capacity_aum": getattr(strategy, "capacity_aum", None),
+        "initial_capital": config.initial_capital,
+        "industry_neutral": bool(args.industry_neutral),
+        "k_per_industry": args.k_per_industry if args.industry_neutral else None,
+        "max_weight_per_stock": pf.get("max_weight_per_stock", 0.10),
+        "execution_price": config.execution_price,
+        "lot_size": mr.get("lot_size", 100),
+    }
+    # 只在热点策略上追加，避免其它策略的实验参数键集合变掉。
+    if strategy.name == "hotspot_dragonhead":
+        parameters["top_k"] = strategy.top_k
+        parameters["top_m"] = strategy.top_m
+        parameters["min_industry_members"] = strategy.min_industry_members
+        parameters["amount_window"] = strategy.amount_window
+        parameters["industry_source"] = strategy.industry_source
+        parameters["rebalance_on_change"] = True
     record = ExperimentRecord(
         experiment_id=exp_id,
         strategy_name=strategy.name,
@@ -252,21 +333,7 @@ def main() -> None:
         rebalance_frequency=config.rebalance_frequency,
         transaction_cost=asdict(cost_model),
         slippage=cost_model.slippage_rate,
-        parameters={"max_positions": getattr(strategy, "max_positions",
-                                              getattr(strategy, "top_n", None)),
-                    "strategy": getattr(strategy, "name", type(strategy).__name__),
-                    "window": getattr(strategy, "window", None),
-                    "skip": getattr(strategy, "skip", None),
-                    "reverse": getattr(strategy, "reverse", None),
-                    "seed": getattr(strategy, "seed", None),
-                    "liquidity_pct": getattr(strategy, "liquidity_pct", None),
-                    "capacity_aum": getattr(strategy, "capacity_aum", None),
-                    "initial_capital": config.initial_capital,
-                    "industry_neutral": bool(args.industry_neutral),
-                    "k_per_industry": args.k_per_industry if args.industry_neutral else None,
-                    "max_weight_per_stock": pf.get("max_weight_per_stock", 0.10),
-                    "execution_price": config.execution_price,
-                    "lot_size": mr.get("lot_size", 100)},
+        parameters=parameters,
         benchmark=config.benchmark,
         result_path=str(out_dir),
         git_commit=git_commit(root),
@@ -278,6 +345,8 @@ def main() -> None:
 
     # ---- 汇报 ----
     print(f"\n[experiment] {exp_id}")
+    if strategy.name == "hotspot_dragonhead":
+        print(f"[info] hotspot industry source: {strategy.industry_source}")
     for k, v in summary.items():
         if isinstance(v, float):
             print(f"  {k:32s} {v:,.6f}")
