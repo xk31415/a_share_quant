@@ -27,7 +27,7 @@
 
 ### 2.1 前置检查（每次开始前）
 
-- [ ] `python -m pytest` → **296 passed**
+- [ ] `python -m pytest` → **320 passed**
 - [ ] `python scripts/data_manifest.py verify`：2020-2024 与 2015-2019 两份 `[ok]`
       （2025-2026 每日更新后不一致属正常）
 - [ ] 基线回测 `annualized_return = 0.0610828468971103`（命令见 `QUICKSTART.md` §1）
@@ -118,6 +118,7 @@ gm `sec_name` 判 ST 的未来函数（已撤回）、基准额外日期计数�
 | `QUICKSTART.md` | 操作手册：回测、数据、实盘每日流程、对账、退出码、排错 |
 | `AGENTS.md` | AI 行为约束 |
 | `reports/research.md` | 研究结论、实盘门槛与判定、实盘方案的依据 |
+| `reports/hotspot_dragonhead.md` | 热点+龙头的规则定义（没有回测数字，不接入实盘） |
 | `reports/lookahead_audit.md` | 防未来函数机制、锁定测试、真实数据审计 |
 
 2026-10-23 之前的修复编年史、交叉审查轮次（R01~R08）与按日期的工作记录已从工作区删除，

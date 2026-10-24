@@ -418,6 +418,9 @@ class BacktestEngine:
                 universe = self.universe_builder.get_universe(d)
                 warnings.extend(getattr(self.universe_builder, "warnings", []) or [])
                 target = self.strategy.generate_target(d, hist, universe)
+                # 策略自己的缺数据告警（例如热点策略没有行业）要进报告，
+                # 不能只留在策略对象上——否则空仓看起来像主动看空。
+                warnings.extend(getattr(self.strategy, "warnings", []) or [])
                 weights, violations = self._enforce_universe(target.weights, universe)
                 for sym, w in violations:
                     violation_rows.append(

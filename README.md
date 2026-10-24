@@ -18,7 +18,7 @@
   实盘链路按这个方案实现；
 - 三份真实数据集（2020-2024 / 2015-2019 / 2025-01~2026-10）**不入库**，仓库只存内容指纹
   `data/MANIFEST.json`；
-- 296 个测试；当前权威回测结果是 `results/EXP-20261022-*`。
+- 320 个测试；当前权威回测结果是 `results/EXP-20261022-*`。
 
 ## 2. 项目结构
 
@@ -35,7 +35,7 @@ a_share_quant/
 │   ├── data/                # schema、loader、validation、builders、incremental
 │   ├── universe/            # 动态股票池（point-in-time）
 │   ├── factors/             # 因子框架 + 示例因子
-│   ├── strategies/          # 等权 / 动量（含反转）/ 低波，流动性与容量过滤
+│   ├── strategies/          # 等权 / 动量（含反转）/ 低波 / 热点+龙头
 │   ├── portfolio/           # 目标权重构建
 │   ├── backtest/            # 引擎、撮合、成本、持仓（T+1）
 │   ├── metrics/             # 绩效指标与分解报表
@@ -55,7 +55,7 @@ a_share_quant/
 ```bash
 python -m venv .venv
 pip install -e ".[dev]"
-python -m pytest            # 296 passed；测试不读真实数据
+python -m pytest            # 320 passed；测试不读真实数据
 ```
 
 核心依赖：`pandas / numpy / scipy / matplotlib / pyyaml / pyarrow`。没有 GPU、没有数据库。
@@ -121,7 +121,7 @@ python scripts/data_manifest.py show        # 指纹摘要，不读数据
 | 财务数据（带公告日） | Value / Quality 因子 | ❌ |
 | 估值（PE / PB / 市值）、股息率 | 估值因子、市值中性化、区分低波与红利 | ❌ |
 | 指数成分变更历史 | 成分股池 | ❌ |
-| 逐日行业快照 | 行业归因与行业中性选股 | ❌ 只有当前静态分类 |
+| 逐日行业快照 | 行业归因、行业中性选股、热点+龙头 | ❌ 只有当前静态分类 |
 | 分钟数据 | 开盘可成交量、容量 | ❌ |
 
 ## 5. 配置
@@ -144,8 +144,10 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
 # 期望 annualized_return = 0.0610828468971103
 ```
 
-常用参数：`--strategy equal_weight|momentum|low_vol`、`--window/--skip/--reverse`（动量与反转）、
+常用参数：`--strategy equal_weight|momentum|low_vol|hotspot`、`--window/--skip/--reverse`（动量与反转）、
 `--industry-neutral`、`--liquidity`、`--capital`、`--capacity-aum`、`--freq D|W|M`、`--seed`。
+热点+龙头另有 `--top-k/--top-m/--min-industry-members`，规则见 [`reports/hotspot_dragonhead.md`](reports/hotspot_dragonhead.md)。
+这是研究规则，没有回测数字，不接入实盘。
 
 产物写入 `results/EXP-<id>/`，元数据（数据指纹、规则、参数、Git commit）写入 `experiments/EXP-<id>.json`：
 
@@ -199,6 +201,7 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
 
 **新策略**：继承 `Strategy`，实现 `generate_target(as_of, bars, universe) -> TargetPortfolio`，
 只输出目标权重，不做 I/O、不算成本、不下单。参考 `strategies/equal_weight.py`。
+热点+龙头见 `strategies/hotspot_dragonhead.py` 与 `reports/hotspot_dragonhead.md`。
 
 **复现实验**：同一 commit + 同一数据指纹 + 同一配置。三段回测已在不同 pandas/pyarrow 版本上
 独立复现到 float64 逐位相同。
@@ -308,6 +311,15 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
     这类票超过目标数的 `--max-unfunded`（默认 10%）时拒绝写委托，并给出买齐所需总资产。
     2026-10-20 冻结样本、100 只、40% 仓位：总资产 80 万通过（1 只买不进），60 万被拒（28 只）。
     "全部买齐所需总资产"由最贵的一只决定（当前约 201 万），会明显高于实际可用的门槛。
+
+**研究规则**
+
+30. **热点+龙头在没有逐日行业快照时不能产出研究结论**。规则见 `reports/hotspot_dragonhead.md`。
+    选股优先读 `bars.industry`（截至 as_of 的最后一条非空记录）。没有这列时退回
+    `instruments.industry`，那是 `scripts/fetch_industry.py` 写入的当前证监会行业：
+    用现在的行业回头定义历史热点，分错组会换掉整个热点，前视比行业中性选股更直接。
+    两处都没有时返回空组合并告警，不用全市场动量顶上。空仓是缺数据。
+    在逐日快照接入之前，这条策略即使跑出收益也不进入研究判定。
 
 ## 13. 纪律
 
