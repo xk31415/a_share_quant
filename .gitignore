@@ -55,3 +55,4 @@ _probe/
 # 掘金账户密钥（token / account_id），只存服务器，不入库
 config/gm_account.yaml
 live/logs/
+config/notify.yaml

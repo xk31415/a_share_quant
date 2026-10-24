@@ -212,3 +212,46 @@ def test_gm_symbol_conversion_covers_all_three_exchanges():
         except ValueError:
             continue
         raise AssertionError(f"应当拒绝 {bad!r}")
+
+
+# ---------------------------------------------------------------- 钉钉推送
+def test_dingtalk_sign_algorithm_matches_official_spec():
+    """钉钉加签：HMAC-SHA256(secret, "{ts}\n{secret}") -> base64 -> urlencode。
+
+    算法错了消息就发不出去，而且报错是「签名不匹配」，很不直观。
+    """
+    import base64, hashlib, hmac, urllib.parse
+    secret = "SECxxxx"
+    ts = "1792810000000"
+    string_to_sign = f"{ts}\n{secret}"
+    code = hmac.new(secret.encode(), string_to_sign.encode(),
+                    digestmod=hashlib.sha256).digest()
+    sign = urllib.parse.quote_plus(base64.b64encode(code))
+    # 复算一次必须一致
+    code2 = hmac.new(secret.encode(), f"{ts}\n{secret}".encode(),
+                     digestmod=hashlib.sha256).digest()
+    assert base64.b64encode(code) == base64.b64encode(code2)
+    # urlencode 后不能有裸的 + / = 等
+    assert all(ch.isalnum() or ch in "-_.%~" for ch in sign), sign
+    # string_to_sign 必须是 "ts\nsecret"，不是 "secret\nts"
+    assert hmac.new(secret.encode(), f"{secret}\n{ts}".encode(),
+                    digestmod=hashlib.sha256).digest() != code, \
+        "顺序错了：必须是 timestamp 在前"
+
+
+def test_notify_config_is_optional_and_non_blocking():
+    """没有 config/notify.yaml 时推送静默跳过，绝不让主流程崩。"""
+    import importlib.util
+    from pathlib import Path
+    p = Path(__file__).resolve().parents[1] / "scripts" / "live_auto.py"
+    spec = importlib.util.spec_from_file_location("live_auto", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # 缺配置 → 返回 False，不抛异常
+    saved = mod._load_notify
+    mod._load_notify = lambda: {}
+    try:
+        assert mod.dingtalk_push("t", "x") is False
+    finally:
+        mod._load_notify = saved

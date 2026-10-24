@@ -304,6 +304,67 @@ STAGES = {
 }
 
 
+# ---------- 钉钉推送 ----------
+def _load_notify() -> dict:
+    """读 config/notify.yaml：webhook_url / secret / enabled。"""
+    p = ROOT / "config" / "notify.yaml"
+    if not p.exists():
+        return {}
+    c = load_yaml(p)
+    if not c.get("enabled", True):
+        return {}
+    if not c.get("webhook_url"):
+        return {}
+    return c
+
+
+def dingtalk_push(title: str, text: str, timeout: int = 10) -> bool:
+    """钉钉自定义机器人（加签）。返回是否发送成功。
+
+    失败只打印不抛：**通知挂了不能把交易也拖死**。
+    """
+    import base64
+    import hashlib
+    import hmac
+    import json as _json
+    import time
+    import urllib.parse
+    import urllib.request
+
+    cfg = _load_notify()
+    if not cfg:
+        return False
+    url = str(cfg["webhook_url"])
+    secret = str(cfg.get("secret", ""))
+    if secret:
+        ts = str(round(time.time() * 1000))
+        string_to_sign = f"{ts}\n{secret}"
+        hmac_code = hmac.new(secret.encode("utf-8"),
+                             string_to_sign.encode("utf-8"),
+                             digestmod=hashlib.sha256).digest()
+        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+        url = f"{url}&timestamp={ts}&sign={sign}"
+
+    # markdown 比 text 好读，钉钉支持
+    payload = {
+        "msgtype": "markdown",
+        "markdown": {"title": title, "text": f"### {title}\n\n{text}"},
+    }
+    data = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=data,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        ok = '"errcode":0' in body.replace(" ", "")
+        if not ok:
+            print(f"[warn] 钉钉返回非 0：{body[:200]}", flush=True)
+        return ok
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] 钉钉推送失败：{type(e).__name__}: {e}", flush=True)
+        return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="实盘/仿真日循环主控")
     ap.add_argument("--stage", choices=["data", "trade", "settle", "all"],
@@ -323,15 +384,32 @@ def main() -> int:
 
     stages = ["data", "trade", "settle"] if args.stage == "all" else [args.stage]
     worst = 0
+    results = []          # (stage, rc) 供推送
     for s in stages:
         # --dry-run 下 data 阶段只预览，避免把"演练"和"真更新"混在一起
         rc = STAGES[s](cfg, log, args)
+        results.append((s, rc))
         if rc != 0:
             worst = rc
             if s != "settle":     # settle 允许"已入账"软失败
                 break
     log.write(f"\n[live_auto] done rc={worst}\n")
     log.close()
+
+    # ---- 推送结果（失败不阻断）----
+    if not args.dry_run:
+        ok = worst == 0
+        title = ("[量化] " + ("✅ " if ok else "❌ ")
+                 + f"{args.stage} {'成功' if ok else '失败 rc=' + str(worst)}")
+        lines = [f"**stage**: {args.stage}",
+                 f"**时间**: {dt.datetime.now():%Y-%m-%d %H:%M:%S}",
+                 f"**结果**: {'成功' if ok else '失败 rc=' + str(worst)}"]
+        for s, rc in results:
+            lines.append(f"- {s}: {'✓' if rc == 0 else '✗ rc=' + str(rc)}")
+        lines.append(f"\n日志 `{log_path.name}`")
+        if not ok:
+            lines.append("\n**请尽快查看日志**")
+        dingtalk_push(title, "\n".join(lines))
     return worst
 
 
