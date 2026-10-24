@@ -1,0 +1,27 @@
+# =====================================================================
+# 实盘/仿真自动化配置（live_auto.py 读取）
+# =====================================================================
+
+# --- 解释器（绝对路径，避免 PATH 被谁改了就跑错）---
+# 3.12：数据更新 + 信号 + 对账（pandas 那套）
+# 3.10：掘金交易 gmtrade（该包只有 cp310 的 wheel）
+python_data:  C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe
+python_trade: C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe
+
+# --- 路径（相对项目根）---
+data_dir:  data/processed_2025_2026
+holdings:  live/holdings.csv
+fills_dir: fills
+out_dir:   live
+sample:    live/sample.json
+log_dir:   live/logs
+
+# --- 策略 ---
+# 等权 50 只，季度调仓（1/4/7/10）。position=1.0 表示满仓运行。
+position: 1.0
+ignore_quarter: false      # true = 非季度月也强制调仓
+
+# --- 下单安全 ---
+auto_trade: true          # true = 真实下单（仿真账户）。false = 只算不下
+order_type: limit          # limit = 按委托价挂单；market = 市价
+max_orders: 200            # 超过这个笔数拒绝下单（防呆）

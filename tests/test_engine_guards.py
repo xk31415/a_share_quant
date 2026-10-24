@@ -172,3 +172,43 @@ def test_momentum_top_n_follows_max_positions():
     assert 'top_n=pf.get("max_positions"' not in seg, \
         "不能再写死配置里的 max_positions"
 
+
+
+# ---------------------------------------------------------------- gm_bridge 符号换算
+def test_gm_symbol_conversion_covers_all_three_exchanges():
+    """R09：下单方向对不上下错市场就是真金白银的事故，换算必须锁住。
+
+    内部用 6 位纯代码（`000001`），掘金用 `SZSE.000001`。
+    6/9 开头沪市、0/1/2/3 深市、4/8 北交所。
+    """
+    import importlib.util
+    from pathlib import Path
+
+    p = Path(__file__).resolve().parents[1] / "scripts" / "gm_bridge.py"
+    spec = importlib.util.spec_from_file_location("gm_bridge", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    cases = [
+        ("600000", "SHSE.600000"),   # 沪主板
+        ("688521", "SHSE.688521"),   # 科创板
+        ("900901", "SHSE.900901"),   # 沪 B
+        ("000001", "SZSE.000001"),   # 深主板
+        ("300561", "SZSE.300561"),   # 创业板
+        ("002258", "SZSE.002258"),   # 深主板小板
+        ("430047", "BJSE.430047"),   # 北交所
+        ("830799", "BJSE.830799"),
+    ]
+    for code, expected in cases:
+        assert mod.to_gm_symbol(code) == expected, f"{code} -> {mod.to_gm_symbol(code)}"
+        assert mod.from_gm_symbol(expected) == code
+
+    # 已带前缀的原样返回
+    assert mod.to_gm_symbol("SHSE.600000") == "SHSE.600000"
+    # 非法输入要报错，不能猜
+    for bad in ("60000", "abc", "6000001", ""):
+        try:
+            mod.to_gm_symbol(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"应当拒绝 {bad!r}")
