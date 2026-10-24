@@ -13,6 +13,10 @@
 3. **组合**：入选标的等权，权重和为 1。持仓数超过 ``max_positions`` 时，
    按「更热的行业优先、行业内名次优先」截断，不用代码字典序。
    单票 10% 上限不在这里做，交给 ``PortfolioRules``：不足 10 只时超出部分留成现金。
+4. **调仓**：日频按需（``rebalance_on_change``）。每个交易日收盘重算目标；
+   目标名单和权重与上次提交的一致，且当前持股名单已经是这批股票，则不下单。
+   不读 ``settings.yaml`` 里其它策略用的月频 ``rebalance_frequency``。
+   价格漂移把市值权重带离等权时也不调仓。
 
 防未来函数：
 
@@ -106,6 +110,9 @@ class HotspotDragonhead(Strategy):
     """
 
     name = "hotspot_dragonhead"
+    # 引擎看到这个标记后，每个交易日都调用 generate_target，
+    # 并且只在目标相对当前持仓发生变化时才把权重交给执行层。
+    rebalance_on_change = True
 
     def __init__(self, top_k: int = 5, top_m: int = 2, window: int = 20,
                  amount_window: int = 20, min_industry_members: int = 3,

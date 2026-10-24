@@ -11,7 +11,7 @@ import yaml
 from a_share_quant.backtest import BacktestConfig, BacktestEngine
 from a_share_quant.backtest.costs import CostModel
 from a_share_quant.portfolio import PortfolioRules
-from a_share_quant.strategies import HotspotDragonhead
+from a_share_quant.strategies import EqualWeightStrategy, HotspotDragonhead
 from a_share_quant.strategies.hotspot_dragonhead import (
     MISSING_INDUSTRY_WARNING,
     NO_AMOUNT_WARNING,
@@ -343,6 +343,8 @@ def test_defaults_match_settings_and_fit_the_single_name_cap():
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     hd = raw["hotspot_dragonhead"]
     strat = HotspotDragonhead()
+    assert hd["rebalance"] == "daily_on_change"
+    assert strat.rebalance_on_change is True
     assert strat.top_k == hd["top_k"] == 5
     assert strat.top_m == hd["top_m"] == 2
     assert strat.window == hd["window"] == 20
@@ -370,6 +372,11 @@ def test_baseline_runner_exposes_hotspot_without_touching_live():
     assert "HotspotDragonhead(" in src
     assert "static_industry_map" in src
     assert "max_positions=max_pos" in src
+    assert "daily_on_change" in src
+    assert 'freq = "D"' in src
+    # 热点不读取配置里的月频作为自己的调仓频率
+    assert "rebalance_frequency" not in src[src.index('elif args.strategy == "hotspot":'):
+                                            src.index("else:", src.index('elif args.strategy == "hotspot":'))]
     live = (root / "scripts" / "live_auto.py").read_text(encoding="utf-8")
     assert "hotspot" not in live
     assert "HotspotDragonhead" not in live
@@ -394,3 +401,114 @@ def test_engine_records_missing_industry_warning_once():
     hits = [w for w in result.validation_warnings if "缺少行业" in w]
     assert hits == [MISSING_INDUSTRY_WARNING]
     assert result.trades.empty
+    # 配置写了月频，策略声明日频按需，引擎必须把这件事说出来。
+    assert any("日频按需" in w for w in result.validation_warnings)
+
+
+def _growth_bars(dates, specs):
+    """specs: (symbol, industry, daily_growth, amount)。开高低收同一价格，涨跌停放宽。"""
+    rows = []
+    for i, d in enumerate(dates):
+        for sym, ind, growth, amt in specs:
+            px = round(10.0 * ((1.0 + growth) ** i), 4)
+            prev = round(10.0 * ((1.0 + growth) ** max(i - 1, 0)), 4)
+            rows.append({
+                "trade_date": pd.Timestamp(d),
+                "symbol": sym,
+                "open": px, "high": px, "low": px, "close": px,
+                "volume": 1_000_000.0, "amount": amt,
+                "adj_close": px, "pre_close": prev,
+                "limit_up": round(px * 1.10, 4),
+                "limit_down": round(px * 0.90, 4),
+                "is_suspended": False, "is_st": False,
+                "industry": ind,
+            })
+    return pd.DataFrame(rows)
+
+
+def _filled_dates(trades: pd.DataFrame) -> list:
+    if trades is None or trades.empty:
+        return []
+    got = trades[trades["shares"] > 0]
+    if got.empty:
+        return []
+    return sorted(pd.to_datetime(got["trade_date"]).dt.normalize().unique())
+
+
+def _run(provider, strategy, dates, freq="M"):
+    engine = BacktestEngine(
+        provider=provider,
+        strategy=strategy,
+        universe_builder=UniverseBuilder(provider, UniverseRules(min_list_days=0)),
+        portfolio_rules=PortfolioRules(max_positions=10, max_weight_per_stock=0.60),
+        cost_model=CostModel(slippage_rate=0.0, commission_rate=0.0,
+                             commission_min=0.0, stamp_duty_rate=0.0),
+        config=BacktestConfig(
+            start_date=str(pd.Timestamp(dates[0]).date()),
+            end_date=str(pd.Timestamp(dates[-1]).date()),
+            rebalance_frequency=freq,
+            cash_buffer=0.0),
+        lot_size=100,
+        enforce_limit=True,
+        enforce_suspension=True,
+    )
+    return engine.run()
+
+
+def test_daily_on_change_holds_when_the_book_is_unchanged():
+    """两只股票每天都入选，价格分道扬镳。按需只在第一次建仓成交。
+
+    同一段行情若按日频权重再平衡，后面几天还会买卖。
+    """
+    dates = pd.bdate_range("2024-03-01", periods=8)
+    specs = [("AA", "HOT", 0.03, 1.0e7), ("BB", "HOT", 0.00, 1.0e7)]
+    bars = _growth_bars(dates, specs)
+    provider = make_provider(dates, ["AA", "BB"], bars=bars)
+    strat = HotspotDragonhead(top_k=1, top_m=2, window=2, amount_window=2,
+                              min_industry_members=2)
+    result = _run(provider, strat, dates, freq="M")
+    filled = _filled_dates(result.trades)
+    # window=2 需要 3 根 K 线：第 3 个交易日收盘出信号，第 4 个交易日开盘成交。
+    assert filled == [pd.Timestamp(dates[3])], filled
+    assert any("日频按需" in w for w in result.validation_warnings)
+
+    plain = EqualWeightStrategy(max_positions=2)
+    chased = _run(provider, plain, dates, freq="D")
+    assert len(_filled_dates(chased.trades)) > 1
+
+
+def test_daily_on_change_trades_when_the_leader_changes():
+    """龙头从 AA 换成 BB 的下一交易日才再成交，中间价格在涨也不调。"""
+    dates = pd.bdate_range("2024-04-01", periods=8)
+    rows = []
+    # 前 6 天 AA 稳步高于 BB；第 7 天（下标 6）BB 跳涨，2 日收益超过 AA。
+    aa = [10.0, 10.2, 10.4, 10.6, 10.8, 11.0, 11.2, 11.4]
+    bb = [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 20.0, 20.2]
+    for i, d in enumerate(dates):
+        for sym, px, amt in (("AA", aa[i], 500.0), ("BB", bb[i], 100.0)):
+            prev = aa[i - 1] if sym == "AA" and i else (bb[i - 1] if i else px)
+            rows.append({
+                "trade_date": pd.Timestamp(d),
+                "symbol": sym,
+                "open": px, "high": px, "low": px, "close": px,
+                "volume": 1_000_000.0, "amount": amt,
+                "adj_close": px, "pre_close": prev,
+                "limit_up": round(px * 1.10, 4),
+                "limit_down": round(px * 0.90, 4),
+                "is_suspended": False, "is_st": False,
+                "industry": "HOT",
+            })
+    bars = pd.DataFrame(rows)
+    provider = make_provider(dates, ["AA", "BB"], bars=bars)
+    strat = HotspotDragonhead(top_k=1, top_m=1, window=2, amount_window=2,
+                              min_industry_members=2)
+    # 信号日手算：下标 2..5 选 AA，下标 6 起 BB 的 2 日收益为 100%。
+    assert list(strat.generate_target(dates[5], bars, ["AA", "BB"]).weights) == ["AA"]
+    assert list(strat.generate_target(dates[6], bars, ["AA", "BB"]).weights) == ["BB"]
+    result = _run(provider, strat, dates, freq="M")
+    filled = _filled_dates(result.trades)
+    # 下标 2 收盘信号 → 下标 3 买入 AA；下标 6 收盘换成 BB → 下标 7 调仓。
+    assert filled == [pd.Timestamp(dates[3]), pd.Timestamp(dates[7])], filled
+    day7 = result.trades[(result.trades["trade_date"] == dates[7])
+                         & (result.trades["shares"] > 0)]
+    assert set(zip(day7["symbol"], day7["direction"])) == {("AA", "sell"), ("BB", "buy")}

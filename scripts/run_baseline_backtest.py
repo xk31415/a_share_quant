@@ -175,6 +175,12 @@ def main() -> None:
                   "信号日会返回空组合（缺数据，不是看空）。"
                   "需要 bars.industry 逐日快照；"
                   "scripts/fetch_industry.py 只能补当前静态分类，分组含前视。")
+        if hd.get("rebalance", "daily_on_change") != "daily_on_change":
+            raise SystemExit(
+                "hotspot_dragonhead.rebalance 只能是 daily_on_change"
+                "（每个交易日评估，目标相对当前持仓没变则不下单）")
+        if args.freq not in (None, "D"):
+            print(f"[warn] hotspot 固定日频按需调仓，忽略 --freq {args.freq}")
         if args.liquidity is not None:
             print("[warn] hotspot 龙头排序已经包含成交额，忽略 --liquidity")
         if args.capacity_aum is not None:
@@ -199,10 +205,14 @@ def main() -> None:
         commission_min=cost_cfg.get("commission_min", 5.0),
         stamp_duty_rate=cost_cfg.get("stamp_duty_rate", 0.0005),
         slippage_rate=cost_cfg.get("slippage_rate", 0.0005))
+    # 热点策略自己声明日频按需，不沿用 backtest.rebalance_frequency 的月频。
+    freq = args.freq or bt.get("rebalance_frequency", "M")
+    if getattr(strategy, "rebalance_on_change", False):
+        freq = "D"
     config = BacktestConfig(
         start_date=args.start or bt.get("start_date", "2021-01-04"),
         end_date=args.end or bt.get("end_date", "2023-12-29"),
-        rebalance_frequency=args.freq or bt.get("rebalance_frequency", "M"),
+        rebalance_frequency=freq,
         initial_capital=float(args.capital or bt.get("initial_capital", 1_000_000)),
         benchmark=args.benchmark or bt.get("benchmark"),
         cash_buffer=float(pf.get("cash_buffer", 0.01)))
@@ -312,6 +322,7 @@ def main() -> None:
         parameters["min_industry_members"] = strategy.min_industry_members
         parameters["amount_window"] = strategy.amount_window
         parameters["industry_source"] = strategy.industry_source
+        parameters["rebalance_on_change"] = True
     record = ExperimentRecord(
         experiment_id=exp_id,
         strategy_name=strategy.name,

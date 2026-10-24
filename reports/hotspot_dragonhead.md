@@ -6,7 +6,7 @@
 
 规则写在 `src/a_share_quant/strategies/hotspot_dragonhead.py`，
 参数默认值在 `config/settings.yaml` 的 `hotspot_dragonhead`。
-这些数字是先验（对齐月频调仓和单票上限），没有按收益搜索过。
+这些数字是先验（对齐单票上限），没有按收益搜索过。调仓是日频按需，不是月频。
 
 ---
 
@@ -31,6 +31,7 @@
 |---|---|---|
 | `top_k` | 5 | 热点行业数 |
 | `top_m` | 2 | 每个热点行业的龙头只数 |
+| `rebalance` | `daily_on_change` | 日频评估，目标相对当前持仓没变则不下单 |
 | `window` | 20 | 行业收益与相对强弱的回看交易日 |
 | `amount_window` | 20 | 日均成交额的回看交易日 |
 | `min_industry_members` | 3 | 行业有效样本少于此数不参与排名 |
@@ -47,8 +48,11 @@
   策略本身不再写一套板块白名单，避免和配置各说各话。
 - ST 与停牌由股票池按 status 表剔除。行情上如果带了 `is_st` / `is_suspended`，
   策略再用截至 as_of 的最后一条标记剔一次。更早的戴帽记录不参与，信号日已经摘帽的股票留在池内。
-- 研究回测的调仓频率沿用 `backtest.rebalance_frequency`（月频，`M`）。
-  实盘冻结样本的季度调仓和 40% 仓位留在 `live_signal.py`，本策略不读 `config/live.yaml`，
+- **日频按需调仓**。每个交易日收盘都重新算目标，不读 `backtest.rebalance_frequency` 的月频。
+  目标名单和权重与上次提交的一致，且当前持股名单已经是这批股票，则不下单。
+  价格把市值权重带离等权时也不调。持股名单还没跟上（例如买入没成交）时，下一交易日继续调。
+  命令行 `--freq` 改不了这条规则。
+- 实盘冻结样本的季度调仓和 40% 仓位留在 `live_signal.py`。本策略不读 `config/live.yaml`，
   也不写入 `live/`。
 
 ---
@@ -78,6 +82,9 @@ TODO：接入逐日行业历史之后，才能把这条规则放进 `reports/res
    并且三段回测按 `reports/research.md` 第 10 节的三关重跑之后。在那之前，收益数字即使跑出来也撤回。
 4. **as_of 之后的价格和行业标签不改变目标权重。**
    同一文件里有对应测试。撤回条件：该测试失败。
+5. **目标名单连续多日不变时，成交只发生在第一次建仓；名单换了，下一交易日才再成交。**
+   价格漂移本身不成交。撤回条件：`test_daily_on_change_holds_when_the_book_is_unchanged`
+   或 `test_daily_on_change_trades_when_the_leader_changes` 失败。
 
 ---
 
