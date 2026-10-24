@@ -183,6 +183,51 @@ def _append_equity(path: Path, ts: pd.Timestamp, equity: float) -> None:
     out.to_csv(path, index=False, encoding="utf-8")
 
 
+def _apply_tradeability(orders: list[dict], bars: pd.DataFrame,
+                        as_of: pd.Timestamp,
+                        held: dict[str, int]) -> list[dict]:
+    """涨跌停过滤：涨停不追买、跌停冻结卖。与 execution.py 口径一致。
+
+    判定用 t 日收盘价近似 t+1 开盘（实盘拿不到明早开盘价），与
+    live_signal.py 的 _compute_tradeability 一致。个别分歧不可避免
+    （t+1 开盘可能没封板），但这是可得信息下的最优估计。
+    """
+    today = bars.loc[bars["trade_date"] == as_of]
+    if today.empty:
+        return orders
+    exempt_col = "limit_exempt" if "limit_exempt" in today.columns else None
+
+    limit_up: set[str] = set()
+    limit_down: set[str] = set()
+    if {"close", "limit_up"}.issubset(today.columns):
+        c = pd.to_numeric(today["close"], errors="coerce")
+        lu = pd.to_numeric(today["limit_up"], errors="coerce")
+        ld = (pd.to_numeric(today["limit_down"], errors="coerce")
+              if "limit_down" in today.columns
+              else pd.Series(float("nan"), index=today.index))
+        exempt = (today[exempt_col].fillna(False).astype(bool)
+                  if exempt_col else pd.Series(False, index=today.index))
+        is_lu = (~exempt) & lu.notna() & c.notna() & (c >= lu - 1e-4)
+        is_ld = (~exempt) & ld.notna() & c.notna() & (c <= ld + 1e-4)
+        limit_up = {str(s) for s in today.loc[is_lu, "symbol"]}
+        limit_down = {str(s) for s in today.loc[is_ld, "symbol"]}
+
+    out = []
+    for od in orders:
+        sym = str(od["symbol"])
+        side = od["side"]
+        cur = int(held.get(sym, 0))
+        if side == "buy" and sym in limit_up and cur == 0:
+            out.append({**od, "side": "hold", "shares": 0,
+                        "amount": 0.0, "note": "blocked:limit_up"})
+        elif side == "sell" and sym in limit_down and cur > 0:
+            out.append({**od, "side": "hold", "shares": 0,
+                        "amount": 0.0, "note": "blocked:limit_down"})
+        else:
+            out.append(od)
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="观察池策略实盘信号桥接")
     ap.add_argument("--data-dir", default="data/processed_2025_2026")
@@ -289,6 +334,12 @@ def main() -> None:
     # ---- 出委托 ----
     orders = diff_orders(target_shares, holdings, prices,
                          lot_size=lot_size, min_trade_value=min_trade)
+
+    # ---- 涨跌停 tradeability（对齐 execution.py 口径）----
+    # 买入：收盘价 >= limit_up 且未持有 → 不追涨停（execution.py 也是买入拦 limit_up）
+    # 卖出：收盘价 <= limit_down 且已持有 → 冻结不卖（execution.py 卖出拦 limit_down）
+    # 用 t 日收盘近似 t+1 开盘，与 live_signal.py 一致；有个别分歧不可避免。
+    orders = _apply_tradeability(orders, bars, as_of, holdings)
 
     # ---- 输出 ----
     out_dir = root / args.out_dir

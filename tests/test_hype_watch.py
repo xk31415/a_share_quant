@@ -742,3 +742,105 @@ def test_circuit_breaker_flattens_through_the_engine_and_blocks_the_next_theme()
     assert summary["n_rebalances"] >= 1
     assert "final_equity" in summary and "maximum_drawdown" in summary
     assert "total_costs" in summary
+
+
+# ---------------------------------------------------------------- 实盘 tradeability
+def test_live_signal_hype_blocks_limit_up_buy_and_limit_down_sell():
+    """hype_watch 实盘桥接的涨跌停过滤：涨停不追买、跌停冻结卖（对齐 execution.py）。
+
+    这是 live_signal_hype.py 里 _apply_tradeability 的口径：
+    收盘价 >= limit_up 且未持有 → 不买；收盘价 <= limit_down 且已持有 → 不卖。
+    """
+    import importlib.util
+    from pathlib import Path
+    p = Path(__file__).resolve().parents[1] / "scripts" / "live_signal_hype.py"
+    spec = importlib.util.spec_from_file_location("live_signal_hype", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    ts = pd.Timestamp("2025-01-06")
+    bars = pd.DataFrame([
+        {"trade_date": ts, "symbol": "AAA", "close": 11.0, "limit_up": 11.0,
+         "limit_down": 9.0, "limit_exempt": False},   # 涨停
+        {"trade_date": ts, "symbol": "BBB", "close": 9.0, "limit_up": 11.0,
+         "limit_down": 9.0, "limit_exempt": False},   # 跌停
+        {"trade_date": ts, "symbol": "CCC", "close": 10.0, "limit_up": 11.0,
+         "limit_down": 9.0, "limit_exempt": False},   # 正常
+    ])
+    orders = [
+        {"symbol": "AAA", "side": "buy", "shares": 100, "price": 11.0, "amount": 1100.0, "note": "rebalance"},
+        {"symbol": "BBB", "side": "sell", "shares": 200, "price": 9.0, "amount": 1800.0, "note": "clear"},
+        {"symbol": "CCC", "side": "buy", "shares": 300, "price": 10.0, "amount": 3000.0, "note": "rebalance"},
+    ]
+    held = {"BBB": 200}   # BBB 持有，是跌停卖
+
+    out = mod._apply_tradeability(orders, bars, ts, held)
+    by_sym = {str(o["symbol"]): o for o in out}
+
+    assert by_sym["AAA"]["side"] == "hold", "涨停不追买"
+    assert by_sym["AAA"]["note"] == "blocked:limit_up"
+    assert by_sym["BBB"]["side"] == "hold", "跌停冻结卖"
+    assert by_sym["BBB"]["note"] == "blocked:limit_down"
+    assert by_sym["CCC"]["side"] == "buy", "正常股不受影响"
+    assert by_sym["CCC"]["shares"] == 300
+
+    # 已持有的涨停股（不卖）不该被拦——它可能在目标里继续持有
+    orders2 = [{"symbol": "AAA", "side": "buy", "shares": 50, "price": 11.0, "amount": 550.0, "note": "rebalance"}]
+    out2 = mod._apply_tradeability(orders2, bars, ts, {"AAA": 100})
+    assert out2[0]["side"] == "buy", "已持有的涨停股加仓不拦（execution.py 也不拦已持有）"
+
+    # 未持有的跌停股可以买（卖难买易，execution.py 只拦卖出）
+    orders3 = [{"symbol": "BBB", "side": "buy", "shares": 100, "price": 9.0, "amount": 900.0, "note": "rebalance"}]
+    out3 = mod._apply_tradeability(orders3, bars, ts, {})
+    assert out3[0]["side"] == "buy", "未持有的跌停股可买（与 execution.py 一致）"
+
+
+# ---------------------------------------------------------------- 实盘 tradeability
+def test_live_signal_hype_blocks_limit_up_buy_and_limit_down_sell():
+    """hype_watch 实盘桥接的涨跌停过滤：涨停不追买、跌停冻结卖（对齐 execution.py）。
+
+    这是 live_signal_hype.py 里 _apply_tradeability 的口径：
+    收盘价 >= limit_up 且未持有 → 不买；收盘价 <= limit_down 且已持有 → 不卖。
+    """
+    import importlib.util
+    from pathlib import Path
+    p = Path(__file__).resolve().parents[1] / "scripts" / "live_signal_hype.py"
+    spec = importlib.util.spec_from_file_location("live_signal_hype", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    ts = pd.Timestamp("2025-01-06")
+    bars = pd.DataFrame([
+        {"trade_date": ts, "symbol": "AAA", "close": 11.0, "limit_up": 11.0,
+         "limit_down": 9.0, "limit_exempt": False},   # 涨停
+        {"trade_date": ts, "symbol": "BBB", "close": 9.0, "limit_up": 11.0,
+         "limit_down": 9.0, "limit_exempt": False},   # 跌停
+        {"trade_date": ts, "symbol": "CCC", "close": 10.0, "limit_up": 11.0,
+         "limit_down": 9.0, "limit_exempt": False},   # 正常
+    ])
+    orders = [
+        {"symbol": "AAA", "side": "buy", "shares": 100, "price": 11.0, "amount": 1100.0, "note": "rebalance"},
+        {"symbol": "BBB", "side": "sell", "shares": 200, "price": 9.0, "amount": 1800.0, "note": "clear"},
+        {"symbol": "CCC", "side": "buy", "shares": 300, "price": 10.0, "amount": 3000.0, "note": "rebalance"},
+    ]
+    held = {"BBB": 200}   # BBB 持有，是跌停卖
+
+    out = mod._apply_tradeability(orders, bars, ts, held)
+    by_sym = {str(o["symbol"]): o for o in out}
+
+    assert by_sym["AAA"]["side"] == "hold", "涨停不追买"
+    assert by_sym["AAA"]["note"] == "blocked:limit_up"
+    assert by_sym["BBB"]["side"] == "hold", "跌停冻结卖"
+    assert by_sym["BBB"]["note"] == "blocked:limit_down"
+    assert by_sym["CCC"]["side"] == "buy", "正常股不受影响"
+    assert by_sym["CCC"]["shares"] == 300
+
+    # 已持有的涨停股（不卖）不该被拦——它可能在目标里继续持有
+    orders2 = [{"symbol": "AAA", "side": "buy", "shares": 50, "price": 11.0, "amount": 550.0, "note": "rebalance"}]
+    out2 = mod._apply_tradeability(orders2, bars, ts, {"AAA": 100})
+    assert out2[0]["side"] == "buy", "已持有的涨停股加仓不拦（execution.py 也不拦已持有）"
+
+    # 未持有的跌停股可以买（卖难买易，execution.py 只拦卖出）
+    orders3 = [{"symbol": "BBB", "side": "buy", "shares": 100, "price": 9.0, "amount": 900.0, "note": "rebalance"}]
+    out3 = mod._apply_tradeability(orders3, bars, ts, {})
+    assert out3[0]["side"] == "buy", "未持有的跌停股可买（与 execution.py 一致）"
