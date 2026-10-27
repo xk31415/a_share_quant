@@ -55,6 +55,13 @@
 - 拉数据：`C:\Program Files\Python314\python.exe`（装了 gm 与 pyarrow，需 `GM_TOKEN`）
 - PowerShell 用 `;` 连接命令；逗号分隔的代码列表要加引号，否则会变成数组并吃掉前导零。
 - 仓库：https://github.com/xk31415/a_share_quant（origin 走 SSH）。
+- **GitHub 被墙时怎么推**（2026-10-27 踩过，`github.com` 被污染成 28.0.0.8、22/443 全断）：
+  本机 `127.0.0.1:7897` 是 Clash 混合端口，但**只有 socks5h 协议到 GitHub 通、http 代理不通**，
+  且节点只放行 **ssh.github.com:443**（GitHub 官方备用端口，22 被节点屏蔽）。用
+  `C:\Users\67478\AppData\Local\Temp\socks5_ssh.py`（SOCKS5→stdio 隧道）配：
+  `GIT_SSH_COMMAND="ssh -o ProxyCommand=<py> <脚本> %h %p"` +
+  `git -c "url.ssh://git@ssh.github.com:443/xk31415/a_share_quant.git.insteadOf=git@github.com:xk31415/a_share_quant.git" push origin <branch>`。
+  写这类隧道脚本时 socket 只有 `sendall`、BufferedReader 只有 `read1`，混用会静默失败。
 - **只在 `D:\a_share_quant` 上改代码**，它 checkout 的是 `main`。C 盘的 worktree
   `Worktrees/a_share_quant/main-bfb8497b`（分支 `workbuddy/main-bfb8497b`）2026-10-27 起弃用，
   不要在那里提交——它会落后 main，且 `reports/review/` 里有遗留的未跟踪文件。
