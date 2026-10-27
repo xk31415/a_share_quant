@@ -347,8 +347,9 @@ def test_live_signal_merges_status_and_blocks_limit_down():
     ① 合并 status 表的 is_suspended（bars.is_suspended 恒为 False）；
     ② 将跌停持仓（close <= limit_down + 1e-4）移出 tradeable（冻结，算仓位不挂卖单），
        但**保留在 investable 中**（跌停股卖难买易，可买不可卖，对齐回测 execution.py 口径 — A1）；
-    ③ 将涨停非持仓（close >= limit_up - 1e-4）移出 investable（不新开仓追买涨停），
-       但保留在 tradeable 中（已持仓可卖）；
+    ③ 涨停股**不再**从 investable 剔除：信号层只出意图，追不追由下单时的执行日闸门判
+       （`gm_bridge.place-orders`，与 backtest/execution.py 同口径）。旧口径用 t 日收盘
+       近似 t+1 开盘，对"专买涨停股"的策略等于永远买不进（hype_watch 实测 3/3 被拦）；
     ④ 当 status 非空但缺少 as_of 当日记录（停牌数据落后）时必须显式告警（A3）。
     """
     from pathlib import Path
@@ -383,7 +384,8 @@ def test_live_signal_merges_status_and_blocks_limit_down():
     assert "000001" in tradeable and "000001" in investable
     assert "000002" not in tradeable and "000002" not in investable, "status 停牌必须不可买不可卖"
     assert "000003" in tradeable and "000003" in investable, "未持有的跌停股可买，须能分到股数"
-    assert "000004" in tradeable and "000004" not in investable, "未持有的涨停股不新开仓"
+    assert "000004" in tradeable and "000004" in investable, \
+        "未持有的涨停股照常入选（买入意图照出，闸门在下单时拦）"
 
     tradeable, investable = mod._compute_tradeability(bars, status, universe, as_of,
                                                       held=["000003", "000004"])
@@ -445,6 +447,9 @@ def test_unheld_limit_down_pick_gets_bought_end_to_end():
 
     回归：曾经把所有跌停股移出 tradeable，build_plan 只给 tradeable 定量，
     结果它占着样本名额却是 0 股，1/n 资金闲置且不顺位补人。
+
+    2026-10-27 起涨停股 C 也照常入选（买入意图照出，下单时由执行日闸门拦）：
+    样本就是排名前 3 的 A/B/C，不再因 C 涨停而顺位补 D。
     """
     mod = _load_live_signal_script()
     as_of, bars, status, uni, prices = _limit_scenario()
@@ -453,7 +458,7 @@ def test_unheld_limit_down_pick_gets_bought_end_to_end():
                       current_holdings={}, capital=1_000_000, position=1.0,
                       cash_buffer=0.0, tradeable=tradeable)
     buys = dict(zip(plan.orders["symbol"], plan.orders["shares"]))
-    assert set(buys) == {"A", "B", "D"}, f"跌停的 B 应被买入，实际订单 {buys}"
+    assert set(buys) == {"A", "B", "C"}, f"跌停的 B 应被买入，实际订单 {buys}"
     assert all(v > 0 for v in buys.values())
 
 

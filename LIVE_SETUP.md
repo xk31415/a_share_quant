@@ -9,25 +9,24 @@
 ```
 Windows 计划任务（周一~周五）
    │
-   ├─ 08:30  live_auto.py --stage data     → update_dataset.py   （Python 3.12 + gm）
+   ├─ 08:30  live_auto.py --stage data     → update_dataset.py   （gm 数据源）
    │
    ├─ 09:15  live_auto.py --stage trade
-   │            ├─ gm_bridge.py pull-holdings   （Python 3.10 + gmtrade）
-   │            ├─ live_signal.py               （Python 3.12 + pandas）
-   │            └─ gm_bridge.py place-orders    （Python 3.10 + gmtrade）
+   │            ├─ gm_bridge.py pull-holdings   （gm SDK 策略模式）
+   │            ├─ live_signal.py               （信号 / pandas）
+   │            └─ gm_bridge.py place-orders    （gm SDK 策略模式）
    │
    └─ 15:35  live_auto.py --stage settle
-                ├─ gm_bridge.py pull-fills      （Python 3.10 + gmtrade）
-                └─ reconcile.py                 （Python 3.12 + pandas）
+                ├─ gm_bridge.py pull-fills      （gm SDK 策略模式）
+                └─ reconcile.py                 （对账 / pandas）
 ```
 
-**为什么要两个 Python**：`gmtrade`（独立交易 SDK）在 PyPI 上只编译到
-`cp310`，没有 3.12 的 wheel；而数据/信号那套要 pandas + 项目代码，跑在 3.12。
-`live_auto.py` 是纯标准库，负责编排，不 import 任何一个。
+**只有一个解释器**（3.12，装了 `gm` 与 pandas）。`live_auto.py` 是纯标准库，
+负责编排，不 import 任何一个。
 
-**为什么用 gmtrade 而不是 gm**：`gm` 是策略 SDK，交易函数必须在 `run()` 的
-策略上下文里调用，脚本顶层调 `get_cash()` 会挂死。`gmtrade` 是普通脚本直接调，
-不需要策略框架。
+**为什么交易要走 gm SDK 的策略模式**：掘金终端的交易接口只对 `gm` 的 `run()`
+策略上下文开放，普通脚本直接调 `get_cash()` 会挂死。`gm_bridge.py` 每次操作
+都是"写临时策略 → 子进程 run() → 读 JSON → 删临时文件"，子进程隔离掉事件循环。
 
 ## 2. 服务器环境（已就绪）
 
@@ -35,8 +34,7 @@ Windows 计划任务（周一~周五）
 |---|---|
 | 服务器 | 阿里云 ECS `8.134.172.15`，Windows Server |
 | 部署目录 | `C:\AppData\a_share_quant` |
-| Python（数据/信号） | `...\Python312\python.exe`（gm 3.0.191 / pandas 3.1.0） |
-| Python（交易） | `...\Python310\python.exe`（gmtrade 3.0.6） |
+| Python（全部） | `...\Python312\python.exe`（gm 3.0.191 / pandas 3.1.0） |
 | 默认 `python` | **3.12**（PATH 已调序） |
 | 掘金终端 | `emgm3.exe` 运行中，已登录 |
 | 仿真账户 | `test`（普通，模拟撮合 7×24），account_id 见 `config/gm_account.yaml` |
@@ -55,14 +53,13 @@ Windows 计划任务（周一~周五）
 
 ```powershell
 cd C:\AppData\a_share_quant
-$Py310 = "C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe"
-$Py312 = "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe"
+$Py = "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe"
 
 # 1) 账户通不通（只读）
-& $Py310 scripts\gm_bridge.py status
+& $Py scripts\gm_bridge.py status
 
 # 2) 全链路演练（不写数据、不下单）
-& $Py312 scripts\live_auto.py --stage all --dry-run
+& $Py scripts\live_auto.py --stage all --dry-run
 
 # 3) 手动触发一次（实际下单）
 Start-ScheduledTask -TaskName a_share_quant_trade
@@ -76,9 +73,9 @@ type live\logs\$(Get-Date -Format yyyy-MM-dd).log
 | 想做什么 | 命令 |
 |---|---|
 | 看今天跑得怎么样 | `type live\logs\<日期>.log` |
-| 看账户 | `& $PyTrade scripts\gm_bridge.py status` |
+| 看账户 | `& $Py scripts\gm_bridge.py status` |
 | 手动触发一次 | `Start-ScheduledTask -TaskName a_share_quant_trade` |
-| 紧急撤单 | `& $PyTrade scripts\gm_bridge.py cancel-all` |
+| 紧急撤单 | `& $Py scripts\gm_bridge.py cancel-all` |
 | 非季度月也强制调仓 | 改 `config/live.yaml` 的 `ignore_quarter: true` |
 | 停掉自动化 | `deploy\register_tasks.ps1 -Remove` |
 
@@ -99,10 +96,16 @@ type live\logs\$(Get-Date -Format yyyy-MM-dd).log
 | 项 | 回测 | 仿真 | 影响 |
 |---|---|---|---|
 | 成交价 | t+1 开盘 + 滑点模型 | 仿真撮合引擎 | 不可直接比收益 |
-| 涨跌停判定 | 开盘价 vs 涨跌停价 | 收盘价（信号时可见） | 实盘更保守 |
+| 涨跌停判定 | 执行日开盘价 vs 当日涨跌停价 | 执行日现价（盘前 = 竞价参考价）vs 当日官方涨跌停价 | 口径已对齐，罕见分歧 |
 | 跌停能否买入 | 可以 | 可以（已对齐） | 一致 |
+| 涨停能否加仓 | 不可以（不看持仓） | 不可以（同） | 一致 |
+| 缺涨跌停价 | `blocked:no_limit_data` | 同（含无涨跌幅新股会被拦） | 新股可交易性分歧 |
 | 整手约束 | 100 股 | 100 股 | 一致 |
 | 成本 | 佣金/印花税/滑点模型 | 仿真按规则收 | 大致一致 |
+
+下单时的涨跌停闸门（`gm_bridge.py place-orders`）把结果落两份文件：
+`placement.csv`（**实际发送**的委托，对账用它算成交率）与
+`placement_skipped.csv`（被拦下的 + 原因）。`orders.csv` 是策略意图，不改动。
 
 **结论用途**：8 周后看的是「链路是否无人值守跑稳、成交率如何、滑点多少」，
 不是「策略赚不赚钱」。
@@ -110,7 +113,7 @@ type live\logs\$(Get-Date -Format yyyy-MM-dd).log
 ## 8. 已知边界
 
 * 掘金终端必须保持登录；登录态掉了 `pull-holdings` 会失败，日志里能看到。
-* `gmtrade` 的成交回报字段名以实际返回为准，`pull-fills` 做了防御式取值；
+* `pull-fills` 的成交回报字段名以实际返回为准，做了防御式取值；
   第一次跑 settle 后**人工核对** `fills/<日期>.csv` 与终端里的成交是否一致。
 * 数据更新依赖 gm 源；`update_dataset` 失败会让 `live_signal` 因数据过期拒绝出信号
   （这是设计，不是 bug）。

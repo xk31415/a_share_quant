@@ -1,16 +1,31 @@
 """掘金仿真交易桥接：用 gm SDK 策略模式连本地终端。
 
-为什么不是 gmtrade
-------------------
-`gmtrade 3.0.6` 与掘金终端 `3.24.2.1`（2026-10-26 自动升级）不兼容，
-登录报 `account登陆出错` + `1010: 无法获取掘金服务器地址列表`。
-`gm` SDK 的 `run()` 策略模式实测兼容，交易函数在 `init()` 里调用即可。
+为什么只能用 gm SDK
+-------------------
+掘金终端（3.24.2.1）的交易接口只对 `gm` SDK 的 `run()` 策略上下文开放；
+普通脚本直接调交易函数会挂死（实测 `get_cash()` 305 秒无返回）。
 
 架构
 ----
 `gm.api.run()` 是事件循环，交易函数只能在策略上下文里调。
 所以每次操作都是：写临时策略模块 → 子进程 `run()` 执行 → 读结果 JSON → 删临时文件。
 子进程隔离，避免 gm 的事件循环污染调用方。
+
+执行日涨跌停闸门（place-orders）
+--------------------------------
+下单前按**执行日**判定，与 `backtest/execution.py` 同口径：
+  * 现价（盘前 = 集合竞价参考价）≥ 当日涨停价 → `blocked:limit_up`，不追买
+  * 现价 ≤ 当日跌停价 → `blocked:limit_down`，不贱卖
+  * 停牌 → `blocked:suspended`；涨跌停价缺失 → `blocked:no_limit_data`；
+    行情缺失 → `blocked:no_quote`。缺数据一律不放行（AGENTS.md 硬规则 7）。
+  * 判定不看是否持有——`execution.py` 对触板的买单一律拦，加仓也一样。
+当日涨跌停价取 `get_history_instruments` 的官方 `upper_limit` / `lower_limit`，
+**不自己推算**（ST / 创业板 / 新股 / 主板 ST 新规各不相同）。
+
+闸门结果落两份文件（与委托同目录）：
+  `placement.csv`         实际发送的委托（对账用它，成交率才有意义）
+  `placement_skipped.csv` 被拦下的委托 + 原因
+`orders.csv` 是策略意图，不改动。
 
 symbol 编码
 -----------
@@ -28,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime as dt
 import json
 import os
 import subprocess
@@ -137,6 +153,7 @@ def _run_in_context(body: str, timeout: int = 120) -> dict:
     mod_file.write_text(code, encoding="utf-8")
 
     data = {}
+    out_tail = ""
     try:
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
         p = subprocess.run([sys.executable, str(mod_file)], cwd=str(_ROOT),
@@ -148,6 +165,13 @@ def _run_in_context(body: str, timeout: int = 120) -> dict:
                 print(ln, flush=True)
         if result_file.exists():
             data = json.loads(result_file.read_text(encoding="utf-8"))
+        if not data:
+            # 进程没写结果文件 = gm 会话根本没起来（终端重启/掉线）。
+            # 不能返回空 dict 让上层报 "error: None"——把子进程尾部带出来才查得动。
+            tail = (p.stdout + p.stderr).strip().splitlines()[-8:]
+            out_tail = "；".join(tail) or f"退出码 {p.returncode}，无输出"
+            data = {"ok": False,
+                    "error": f"gm 会话未返回结果（终端掉线或重启？）：{out_tail}"}
     except subprocess.TimeoutExpired:
         raise SystemExit(f"gm 策略执行超时（>{timeout}s）")
     finally:
@@ -155,6 +179,108 @@ def _run_in_context(body: str, timeout: int = 120) -> dict:
         mod_file.unlink(missing_ok=True)
 
     return data
+
+
+# ---- 执行日涨跌停闸门 ----
+# 与 backtest/execution.py 逐条对齐（那边用执行日 open 对执行日涨跌停价）。
+# 实盘在 09:15 下单，开盘价还没出来，用现价（集合竞价参考价）作代理：
+# 一字板时参考价就是板价，判得出来；没封板就放行——与回测"t+1 开盘没触板可买"一致。
+LIMIT_EPS = 1e-9
+
+
+def apply_execution_gate(orders: list[dict], quotes: dict) -> list[dict]:
+    """按执行日行情拦下触板/停牌/缺数据的委托。返回新列表，不改输入。
+
+    quotes: {6 位代码: {"price", "limit_up", "limit_down", "suspended"}}
+    拦下的行变成 ``side=hold, shares=0``，``note`` 写原因，格式与
+    `live_signal` 历史输出一致（对账按 hold 行为空处理）。
+    """
+    out: list[dict] = []
+    for od in orders:
+        side = (od.get("side") or "").lower()
+        if side not in ("buy", "sell"):
+            out.append(od)          # hold 行原样透传
+            continue
+        q = quotes.get(str(od.get("symbol", "")))
+        note = None
+        if not q:
+            note = "blocked:no_quote"
+        elif q.get("suspended"):
+            note = "blocked:suspended"
+        elif q.get("price") is None:
+            note = "blocked:no_quote"
+        else:
+            px = float(q["price"])
+            if side == "buy":
+                lu = q.get("limit_up")
+                if lu is None or float(lu) <= 0:
+                    note = "blocked:no_limit_data"
+                elif px >= float(lu) - LIMIT_EPS:
+                    note = "blocked:limit_up"
+            else:
+                ld = q.get("limit_down")
+                if ld is None or float(ld) <= 0:
+                    note = "blocked:no_limit_data"
+                elif px <= float(ld) + LIMIT_EPS:
+                    note = "blocked:limit_down"
+        if note:
+            out.append({**od, "side": "hold", "shares": 0, "amount": 0.0, "note": note})
+        else:
+            out.append(od)
+    return out
+
+
+def _fetch_execution_quotes(codes: list[str], date: str) -> dict:
+    """取执行日官方涨跌停价 + 现价。取不到整个会话就直接失败，**不放行**。
+
+    ``get_history_instruments`` 的 upper_limit/lower_limit 是交易所口径
+    （build_dataset.py 的数据管道也用它），自己推算会踩 ST/创业板/新股的坑。
+    """
+    syms = [to_gm_symbol(c) for c in codes]
+    body = (
+        f'        syms = {syms!r}\n'
+        f'        hi = get_history_instruments(symbols=syms, start_date="{date}", '
+        f'end_date="{date}", '
+        'fields="symbol,upper_limit,lower_limit,is_suspended", df=True)\n'
+        '        result["limits"] = ([] if (hi is None or not len(hi)) else\n'
+        '            [{"symbol": str(r["symbol"]), "upper_limit": None if r["upper_limit"] != r["upper_limit"] else float(r["upper_limit"]),\n'
+        '              "lower_limit": None if r["lower_limit"] != r["lower_limit"] else float(r["lower_limit"]),\n'
+        '              "is_suspended": bool(r.get("is_suspended", False))}\n'
+        '             for r in hi.to_dict("records")])\n'
+        '        cur = current(syms)\n'
+        '        result["current"] = []\n'
+        '        for x in (cur or []):\n'
+        '            d = dict(x)\n'
+        '            result["current"].append({"symbol": str(d.get("symbol", "")),\n'
+        '                "price": d.get("price"), "open": d.get("open")})\n'
+    )
+    data = _run_in_context(body, timeout=180)
+    if not data.get("ok"):
+        raise SystemExit(
+            f"取执行日行情失败，涨跌停闸门无法判定——**拒绝下单**：{data.get('error')}")
+
+    quotes: dict[str, dict] = {}
+    for rec in data.get("limits", []):
+        code = from_gm_symbol(str(rec.get("symbol", "")))
+        quotes[code] = {"price": None, "suspended": bool(rec.get("is_suspended")),
+                        "limit_up": rec.get("upper_limit"),
+                        "limit_down": rec.get("lower_limit")}
+    for rec in data.get("current", []):
+        code = from_gm_symbol(str(rec.get("symbol", "")))
+        px = rec.get("price")
+        try:
+            px = float(px) if px not in (None, "") else None
+        except (TypeError, ValueError):
+            px = None
+        if px is None:                      # 盘前 price 可能为 0/空，退回开盘参考
+            try:
+                px = float(rec.get("open") or 0) or None
+            except (TypeError, ValueError):
+                px = None
+        quotes.setdefault(code, {"suspended": False,
+                                 "limit_up": None, "limit_down": None})
+        quotes[code]["price"] = px
+    return quotes
 
 
 # ---- 查询 ----
@@ -232,6 +358,18 @@ def cmd_pull_holdings(args) -> int:
 
 
 # ---- 下单 ----
+ORDER_COLUMNS = ["symbol", "side", "shares", "price", "amount", "note"]
+
+
+def _write_orders_csv(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=ORDER_COLUMNS, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in ORDER_COLUMNS})
+
+
 def cmd_place_orders(args) -> int:
     orders_path = Path(args.orders)
     if not orders_path.exists():
@@ -259,18 +397,50 @@ def cmd_place_orders(args) -> int:
     if args.sells_first:
         ordered = sorted(rows, key=lambda r: 0 if (r.get("side") or "").lower() == "sell" else 1)
 
+    # ---- 执行日涨跌停闸门（口径见模块 docstring）----
+    codes = sorted({str(r["symbol"]).strip() for r in ordered})
+    quotes = _fetch_execution_quotes(codes, dt.date.today().isoformat())
+    gated = apply_execution_gate(ordered, quotes)
+    sent = [r for r in gated if (r.get("side") or "").lower() in ("buy", "sell")]
+    skipped = [r for r in gated if (r.get("side") or "").lower() == "hold"]
+
+    reasons: dict[str, int] = {}
+    for r in skipped:
+        k = str(r.get("note", "blocked:?"))
+        reasons[k] = reasons.get(k, 0) + 1
+    print(f"执行日闸门（{dt.date.today().isoformat()}）：放行 {len(sent)} 笔，"
+          f"拦下 {len(skipped)} 笔"
+          + ("（" + "，".join(f"{k} {v}" for k, v in sorted(reasons.items())) + "）"
+             if reasons else ""))
+    # 拦下那行的股数已被清零，意图要按位置从原始行取（apply_execution_gate 保序）
+    for orig, g in zip(ordered, gated):
+        if (g.get("side") or "").lower() != "hold":
+            continue
+        print(f"  拦下 {orig.get('symbol')} {g.get('note', '')} "
+              f"（意图 {orig.get('shares', 0)} 股 @ {orig.get('price', '')}）", flush=True)
+
     if args.dry_run:
-        for r in ordered:
+        for r in sent:
             code = str(r["symbol"]).strip()
             shares = int(float(r["shares"]))
             price = float(r["price"]) if r.get("price") not in (None, "", "nan") else 0.0
-            side = r.get("side", "")
-            print(f"  {code} {side} {shares} 股 @ {price:.2f} -> 不发送")
+            print(f"  {code} {r.get('side', '')} {shares} 股 @ {price:.2f} -> 不发送")
+        print("[dry-run] 不写 placement.csv（它只记录真实发送的委托）")
         return 0
+
+    if not sent:
+        print("闸门拦下全部委托，无单可发", flush=True)
+        return 0
+
+    # placement.csv = 真实发送的委托；对账以它为口径，成交率才不含"根本没发"的单。
+    placement = Path(args.placement) if args.placement else orders_path.parent / "placement.csv"
+    _write_orders_csv(placement, sent)
+    _write_orders_csv(orders_path.parent / "placement_skipped.csv", skipped)
+    print(f"已发送委托 -> {placement}")
 
     # 构造策略 body：逐笔下单
     order_parts = []
-    for r in ordered:
+    for r in sent:
         code = str(r["symbol"]).strip()
         shares = int(float(r["shares"]))
         price = float(r["price"]) if r.get("price") not in (None, "", "nan") else 0.0
@@ -383,6 +553,8 @@ def main() -> int:
 
     p = sub.add_parser("place-orders", help="按 orders.csv 下单")
     p.add_argument("--orders", required=True)
+    p.add_argument("--placement", default=None,
+                   help="实际发送委托的落盘路径（默认 <orders 目录>/placement.csv）")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--order-type", choices=["limit", "market"], default="limit")
     p.add_argument("--sells-first", action="store_true", default=True)
