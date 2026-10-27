@@ -169,23 +169,24 @@ def run_step(name: str, cmd: list[str], log, timeout: int = 1800,
 
 def run_step_retry(name: str, cmd: list[str], log, max_retries: int = 3,
                    wait_seconds: int = 60, timeout: int = 1800,
-                   allow_fail: bool = False, extra_env: dict | None = None) -> int:
+                   extra_env: dict | None = None) -> int:
     """带重试的 run_step。掘金终端每天自动重启 1~2 次，连接会掉。
 
-    对 gm 相关步骤（拉持仓/下单/取成交/更新数据）自动重试。
+    对 **幂等** 的 gm 步骤（更新数据/拉持仓/拉成交/演练下单）自动重试。
     gm_bridge 内部已有连接层重试，这里是**进程级**兜底（终端在脚本执行中间挂掉）。
+    非幂等步骤（真实下单）禁用本函数——部分成功再整批重发就是重复下单。
     """
     import time
     rc = run_step(name, cmd, log, timeout=timeout, allow_fail=True, extra_env=extra_env)
     for attempt in range(2, max_retries + 1):
-        if rc == 0 or (allow_fail and rc == 1):
+        if rc == 0:
             break
         print(f"  {name} 失败（rc={rc}），等 {wait_seconds}s 重试 "
               f"（第 {attempt}/{max_retries} 次）", flush=True)
         log.write(f"  [retry] {name} rc={rc}, attempt {attempt}\n")
         time.sleep(wait_seconds)
         rc = run_step(name, cmd, log, timeout=timeout, allow_fail=True, extra_env=extra_env)
-    if rc != 0 and not allow_fail:
+    if rc != 0:
         print(f"[FAIL] {name} 最终退出码 {rc}（重试 {max_retries} 次后）", flush=True)
     return rc
 
@@ -326,7 +327,11 @@ def stage_trade(cfg: dict, log, args) -> int:
         ], log, timeout=120)
         return rc
 
-    return run_step_retry("place-orders", [
+    # 真实下单**不能**用 run_step_retry：cmd_place_orders 部分委托异常时返回 2，
+    # 重试会把 orders.csv 整批重发——已成功的委托重复买入（评审 P0-2，A.3 实测
+    # run_step_retry 对 rc=2 跑满 3 次）。失败直接告警人工处理；真要补单，
+    # 必须先查未完成委托与当日成交按 (symbol, side) 去重，本轮不做。
+    return run_step("place-orders", [
         py, "scripts/gm_bridge.py", "place-orders",
         "--orders", str(orders),
         "--order-type", str(cfg["order_type"]),

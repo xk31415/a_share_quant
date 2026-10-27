@@ -87,31 +87,11 @@ def to_gm_symbol(code: str) -> str:
 
 
 def from_gm_symbol(sym: str) -> str:
+    """`SZSE.000001` -> `000001`。仅作公开换算 API 供测试锁定；
+    生产代码一律内联 `.split(".")[-1]`——生成的子进程策略模块里没有本模块的
+    命名空间，引用它必 NameError（2026-10-27 评审 P0-1）。"""
     s = str(sym).strip()
     return s.split(".", 1)[1] if "." in s else s
-
-
-# ---- protobuf 兼容取值 ----
-def _g(obj, *keys, default=None):
-    for k in keys:
-        if obj is None:
-            continue
-        if isinstance(obj, dict):
-            if k in obj and obj[k] is not None:
-                return obj[k]
-        else:
-            v = getattr(obj, k, None)
-            if v is not None:
-                return v
-    return default
-
-
-def _num(obj, *keys, default=0.0) -> float:
-    v = _g(obj, *keys, default=default)
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return float(default)
 
 
 # ---- 在 gm 策略上下文里执行操作 ----
@@ -128,7 +108,7 @@ def _run_in_context(body: str, timeout: int = 120) -> dict:
     mod_file = _TMP_DIR / f"{mod_name}.py"
 
     code = (
-        'import json, sys, traceback\n'
+        'import json, os, sys, traceback\n'
         f'sys.path.insert(0, r"{_ROOT}")\n'
         'from gm.api import *\n'
         f'ACC_ID = "{acc}"\n'
@@ -148,14 +128,16 @@ def _run_in_context(body: str, timeout: int = 120) -> dict:
         '            json.dump(result, f, ensure_ascii=False, default=str)\n'
         '        stop()\n'
         '\n'
-        f'run(filename="{mod_name}", mode=MODE_LIVE, token="{tok}")\n'
+        # token 走环境变量，不进临时文件——进程被强杀时文件会残留（评审 P1-2）
+        'run(filename="' + mod_name + '", mode=MODE_LIVE, token=os.environ.get("GM_TOKEN", ""))\n'
     )
     mod_file.write_text(code, encoding="utf-8")
 
     data = {}
     out_tail = ""
     try:
-        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
+               "GM_TOKEN": tok}
         p = subprocess.run([sys.executable, str(mod_file)], cwd=str(_ROOT),
                            timeout=timeout, capture_output=True,
                            text=True, encoding="utf-8", errors="replace",
@@ -166,9 +148,9 @@ def _run_in_context(body: str, timeout: int = 120) -> dict:
         if result_file.exists():
             data = json.loads(result_file.read_text(encoding="utf-8"))
         if not data:
-            # 进程没写结果文件 = gm 会话根本没起来（终端重启/掉线）。
+            # 进程没写结果文件 = gm 会话根本没起来（终端重启/掉线/代码在 init 前崩）。
             # 不能返回空 dict 让上层报 "error: None"——把子进程尾部带出来才查得动。
-            tail = (p.stdout + p.stderr).strip().splitlines()[-8:]
+            tail = (p.stdout + p.stderr).strip().splitlines()[-20:]
             out_tail = "；".join(tail) or f"退出码 {p.returncode}，无输出"
             data = {"ok": False,
                     "error": f"gm 会话未返回结果（终端掉线或重启？）：{out_tail}"}
@@ -261,12 +243,12 @@ def _fetch_execution_quotes(codes: list[str], date: str) -> dict:
 
     quotes: dict[str, dict] = {}
     for rec in data.get("limits", []):
-        code = from_gm_symbol(str(rec.get("symbol", "")))
+        code = str(rec.get("symbol", "")).split(".")[-1]
         quotes[code] = {"price": None, "suspended": bool(rec.get("is_suspended")),
                         "limit_up": rec.get("upper_limit"),
                         "limit_down": rec.get("lower_limit")}
     for rec in data.get("current", []):
-        code = from_gm_symbol(str(rec.get("symbol", "")))
+        code = str(rec.get("symbol", "")).split(".")[-1]
         px = rec.get("price")
         try:
             px = float(px) if px not in (None, "") else None
@@ -298,7 +280,7 @@ def cmd_status(args) -> int:
             else:
                 g = lambda k, d=None: getattr(p, k, d)
             result["positions"].append({
-                "symbol": from_gm_symbol(str(g("symbol", g("security_id", "")))),
+                "symbol": str(g("symbol", g("security_id", ""))).split(".")[-1],
                 "volume": int(float(g("volume", g("position", 0)) or 0)),
                 "cost_price": float(g("cost_price", g("avg_cost", 0)) or 0),
                 "price": float(g("price", g("last_price", 0)) or 0),
@@ -332,7 +314,7 @@ def cmd_pull_holdings(args) -> int:
                 g = p.get
             else:
                 g = lambda k, d=None: getattr(p, k, d)
-            sym = from_gm_symbol(str(g("symbol", g("security_id", ""))))
+            sym = str(g("symbol", g("security_id", ""))).split(".")[-1]
             vol = int(float(g("volume", g("position", 0)) or 0))
             if vol > 0:
                 result["holdings"].append([sym, vol])'''
@@ -444,17 +426,24 @@ def cmd_place_orders(args) -> int:
         code = str(r["symbol"]).strip()
         shares = int(float(r["shares"]))
         price = float(r["price"]) if r.get("price") not in (None, "", "nan") else 0.0
-        side_num = 1 if (r.get("side") or "").lower() == "buy" else 2  # 1=buy 2=sell
+        is_buy = (r.get("side") or "").lower() == "buy"
         gm_sym = to_gm_symbol(code)
-        type_num = 2 if use_market else 1  # 1=limit 2=market
-        effect = 1 if side_num == 1 else 2  # 1=open 2=close
+        if shares <= 0:
+            print(f"  跳过 {code}：shares={shares}（<=0 不发单）", flush=True)
+            continue
+        # 枚举常量在生成模块里由 `from gm.api import *` 导入；用名字不用数字，
+        # SDK 改枚举值不至于静默下错单（评审 P2-1，值已核对：Buy=1/Sell=2/
+        # Limit=1/Market=2/Open=1/Close=2/GFD=3）
+        side_c = "OrderSide_Buy" if is_buy else "OrderSide_Sell"
+        type_c = "OrderType_Market" if use_market else "OrderType_Limit"
+        effect_c = "PositionEffect_Open" if is_buy else "PositionEffect_Close"
         px = 0 if use_market else price
         order_parts.append(
             f'        try:\n'
             f'            ret = order_volume(symbol="{gm_sym}", volume={shares},\n'
-            f'                side={side_num}, order_type={type_num},\n'
-            f'                position_effect={effect}, price={px},\n'
-            f'                order_duration=3)\n'
+            f'                side={side_c}, order_type={type_c},\n'
+            f'                position_effect={effect_c}, price={px},\n'
+            f'                order_duration=OrderDuration_GFD)\n'
             f'            result.setdefault("orders", []).append({{"symbol": "{code}", "ret": str(ret)[:100]}})\n'
             f'        except Exception as e:\n'
             f'            result.setdefault("orders", []).append({{"symbol": "{code}", "error": f"{{type(e).__name__}}: {{e}}"}})\n'
@@ -488,7 +477,7 @@ def cmd_pull_fills(args) -> int:
                 g = r.get
             else:
                 g = lambda k, d=None: getattr(r, k, d)
-            sym = from_gm_symbol(str(g("symbol", g("security_id", ""))))
+            sym = str(g("symbol", g("security_id", ""))).split(".")[-1]
             side_raw = str(g("side", g("ord_side", "")) or "").lower()
             if "buy" in side_raw or side_raw in ("1",):
                 side = "buy"

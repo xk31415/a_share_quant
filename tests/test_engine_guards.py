@@ -661,3 +661,241 @@ def test_write_heartbeat_marks_dry_run(tmp_path, monkeypatch):
     day = mod.today()
     assert data[day]["data"]["dry_run"] is True
     assert data[day]["trade"]["dry_run"] is False and data[day]["trade"]["rc"] == 2
+
+
+# ---------------------------------------------------------------- 查询命令有数据时（评审 P0-1 回归）
+_FAKE_GM_API = '''
+"""假 gm SDK：测试专用。有持仓/有成交，逼出生成代码里的 NameError 类缺陷。"""
+MODE_LIVE = 1
+OrderSide_Buy, OrderSide_Sell = 1, 2
+OrderType_Limit, OrderType_Market = 1, 2
+PositionEffect_Open, PositionEffect_Close = 1, 2
+OrderDuration_GFD = 3
+
+def set_account_id(a): pass
+
+class Cash:
+    nav = 1000000.0
+    available = 1000000.0
+def get_cash(): return Cash()
+
+class Pos:
+    symbol = "SZSE.000001"; volume = 100; cost_price = 10.0; price = 11.0
+def get_position(): return [Pos()]
+
+class ExecBuy:
+    symbol = "SZSE.000001"; side = 1; volume = 100; price = 10.5; fee = 5.0
+class ExecSell:
+    symbol = "SHSE.600000"; side = 2; volume = 200; price = 8.0; fee = 3.0
+def get_execution_reports(): return [ExecBuy(), ExecSell()]
+
+class _FakeDF:
+    def __init__(self, rows): self._rows = rows
+    def __len__(self): return len(self._rows)
+    def to_dict(self, orient=None): return self._rows
+
+def get_history_instruments(symbols=None, start_date=None, end_date=None,
+                            fields=None, df=False):
+    return _FakeDF([{"symbol": s, "upper_limit": 99.0, "lower_limit": 1.0,
+                     "is_suspended": False} for s in (symbols or [])])
+
+def current(syms):
+    return [{"symbol": s, "price": 50.0, "open": 50.0} for s in (syms or [])]
+
+def order_volume(**kw): return "ORDER1"
+def order_cancel_all(): return 0
+def stop(): pass
+
+def run(filename=None, mode=None, token=None):
+    import __main__
+    __main__.init(None)
+'''
+
+
+@pytest.fixture()
+def fake_gm():
+    """把假 gm 包放到 live/_tmp/gm：子进程脚本所在目录是 sys.path[0]，import gm 命中它。"""
+    import shutil
+    from pathlib import Path
+    gm_dir = Path(__file__).resolve().parents[1] / "live" / "_tmp" / "gm"
+    gm_dir.mkdir(parents=True, exist_ok=True)
+    (gm_dir / "__init__.py").write_text("", encoding="utf-8")
+    (gm_dir / "api.py").write_text(_FAKE_GM_API, encoding="utf-8")
+    yield gm_dir
+    shutil.rmtree(gm_dir, ignore_errors=True)
+
+
+def test_status_and_pull_holdings_with_positions(fake_gm, monkeypatch, capsys, tmp_path):
+    """有持仓时 status / pull-holdings 必须 rc=0 且数值正确（评审 P0-1 回归锁）。
+
+    旧缺陷：生成的子进程模块里引用了 gm_bridge 自己的 from_gm_symbol——
+    空仓时循环体不执行看着全绿，有持仓必 NameError，实盘链路直接断。
+    """
+    import argparse
+    mod = _load_script("gm_bridge.py")
+    monkeypatch.setattr(mod, "_load_account", lambda: ("faketok", "fakeacc"))
+
+    rc = mod.cmd_status(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "1,000,000" in out, f"nav 应可读，实际输出 {out!r}"
+    assert "000001" in out and "SZSE." not in out, f"符号应剥掉交易所前缀：{out!r}"
+
+    h = tmp_path / "h.csv"
+    rc = mod.cmd_pull_holdings(argparse.Namespace(out=str(h),
+                                                  cash_out=str(tmp_path / "c.txt")))
+    assert rc == 0
+    text = h.read_text(encoding="utf-8")
+    assert "000001" in text and "100" in text, f"持仓行应含 000001,100：{text!r}"
+    assert "SZSE." not in text
+
+
+def test_pull_fills_directions_when_there_are_fills(fake_gm, monkeypatch, tmp_path):
+    """有成交时 pull-fills 必须 rc=0 且买卖方向判定正确（评审 P0-1 回归锁）。
+
+    同一缺陷的第三处只在有成交时才执行到；方向判错会让对账把买卖记反。
+    """
+    import argparse
+    mod = _load_script("gm_bridge.py")
+    monkeypatch.setattr(mod, "_load_account", lambda: ("faketok", "fakeacc"))
+
+    f = tmp_path / "f.csv"
+    rc = mod.cmd_pull_fills(argparse.Namespace(out=str(f)))
+    assert rc == 0
+    rows = [ln.split(",") for ln in f.read_text(encoding="utf-8").strip().splitlines()[1:]]
+    by = {r[0]: r for r in rows}
+    assert by["000001"][1] == "buy", f"side=1 应判 buy：{rows}"
+    assert by["600000"][1] == "sell", f"side=2 应判 sell：{rows}"
+    assert by["000001"][2] == "100" and by["600000"][2] == "200"
+
+
+def test_real_place_orders_is_not_retried():
+    """真实下单不得包在 run_step_retry 里（评审 P0-2 回归锁）。
+
+    cmd_place_orders 部分委托异常时返回 2，重试会把 orders.csv 整批重发，
+    已成功的委托重复买入。演练（dry-run）幂等，保留 retry 无所谓。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "scripts" / "live_auto.py").read_text(encoding="utf-8")
+    assert 'run_step_retry("place-orders"' not in src, "真实下单禁止重试（重复下单风险）"
+    assert 'run_step("place-orders"' in src
+    assert 'run_step_retry("place-orders(dry-run)"' in src, "演练幂等，可保留 retry"
+
+
+# ---------------------------------------------------------------- 查询命令有数据时（评审 P0-1 回归）
+_FAKE_GM_API = '''
+"""假 gm SDK：测试专用。有持仓/有成交，逼出生成代码里的 NameError 类缺陷。"""
+MODE_LIVE = 1
+OrderSide_Buy, OrderSide_Sell = 1, 2
+OrderType_Limit, OrderType_Market = 1, 2
+PositionEffect_Open, PositionEffect_Close = 1, 2
+OrderDuration_GFD = 3
+
+def set_account_id(a): pass
+
+class Cash:
+    nav = 1000000.0
+    available = 1000000.0
+def get_cash(): return Cash()
+
+class Pos:
+    symbol = "SZSE.000001"; volume = 100; cost_price = 10.0; price = 11.0
+def get_position(): return [Pos()]
+
+class ExecBuy:
+    symbol = "SZSE.000001"; side = 1; volume = 100; price = 10.5; fee = 5.0
+class ExecSell:
+    symbol = "SHSE.600000"; side = 2; volume = 200; price = 8.0; fee = 3.0
+def get_execution_reports(): return [ExecBuy(), ExecSell()]
+
+class _FakeDF:
+    def __init__(self, rows): self._rows = rows
+    def __len__(self): return len(self._rows)
+    def to_dict(self, orient=None): return self._rows
+
+def get_history_instruments(symbols=None, start_date=None, end_date=None,
+                            fields=None, df=False):
+    return _FakeDF([{"symbol": s, "upper_limit": 99.0, "lower_limit": 1.0,
+                     "is_suspended": False} for s in (symbols or [])])
+
+def current(syms):
+    return [{"symbol": s, "price": 50.0, "open": 50.0} for s in (syms or [])]
+
+def order_volume(**kw): return "ORDER1"
+def order_cancel_all(): return 0
+def stop(): pass
+
+def run(filename=None, mode=None, token=None):
+    import __main__
+    __main__.init(None)
+'''
+
+
+@pytest.fixture()
+def fake_gm():
+    """把假 gm 包放到 live/_tmp/gm：子进程脚本所在目录是 sys.path[0]，import gm 命中它。"""
+    import shutil
+    from pathlib import Path
+    gm_dir = Path(__file__).resolve().parents[1] / "live" / "_tmp" / "gm"
+    gm_dir.mkdir(parents=True, exist_ok=True)
+    (gm_dir / "__init__.py").write_text("", encoding="utf-8")
+    (gm_dir / "api.py").write_text(_FAKE_GM_API, encoding="utf-8")
+    yield gm_dir
+    shutil.rmtree(gm_dir, ignore_errors=True)
+
+
+def test_status_and_pull_holdings_with_positions(fake_gm, monkeypatch, capsys, tmp_path):
+    """有持仓时 status / pull-holdings 必须 rc=0 且数值正确（评审 P0-1 回归锁）。
+
+    旧缺陷：生成的子进程模块里引用了 gm_bridge 自己的 from_gm_symbol——
+    空仓时循环体不执行看着全绿，有持仓必 NameError，实盘链路直接断。
+    """
+    import argparse
+    mod = _load_script("gm_bridge.py")
+    monkeypatch.setattr(mod, "_load_account", lambda: ("faketok", "fakeacc"))
+
+    rc = mod.cmd_status(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "1,000,000" in out, f"nav 应可读，实际输出 {out!r}"
+    assert "000001" in out and "SZSE." not in out, f"符号应剥掉交易所前缀：{out!r}"
+
+    h = tmp_path / "h.csv"
+    rc = mod.cmd_pull_holdings(argparse.Namespace(out=str(h),
+                                                  cash_out=str(tmp_path / "c.txt")))
+    assert rc == 0
+    text = h.read_text(encoding="utf-8")
+    assert "000001" in text and "100" in text, f"持仓行应含 000001,100：{text!r}"
+    assert "SZSE." not in text
+
+
+def test_pull_fills_directions_when_there_are_fills(fake_gm, monkeypatch, tmp_path):
+    """有成交时 pull-fills 必须 rc=0 且买卖方向判定正确（评审 P0-1 回归锁）。
+
+    同一缺陷的第三处只在有成交时才执行到；方向判错会让对账把买卖记反。
+    """
+    import argparse
+    mod = _load_script("gm_bridge.py")
+    monkeypatch.setattr(mod, "_load_account", lambda: ("faketok", "fakeacc"))
+
+    f = tmp_path / "f.csv"
+    rc = mod.cmd_pull_fills(argparse.Namespace(out=str(f)))
+    assert rc == 0
+    rows = [ln.split(",") for ln in f.read_text(encoding="utf-8").strip().splitlines()[1:]]
+    by = {r[0]: r for r in rows}
+    assert by["000001"][1] == "buy", f"side=1 应判 buy：{rows}"
+    assert by["600000"][1] == "sell", f"side=2 应判 sell：{rows}"
+    assert by["000001"][2] == "100" and by["600000"][2] == "200"
+
+
+def test_real_place_orders_is_not_retried():
+    """真实下单不得包在 run_step_retry 里（评审 P0-2 回归锁）。
+
+    cmd_place_orders 部分委托异常时返回 2，重试会把 orders.csv 整批重发，
+    已成功的委托重复买入。演练（dry-run）幂等，保留 retry 无所谓。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "scripts" / "live_auto.py").read_text(encoding="utf-8")
+    assert 'run_step_retry("place-orders"' not in src, "真实下单禁止重试（重复下单风险）"
+    assert 'run_step("place-orders"' in src
+    assert 'run_step_retry("place-orders(dry-run)"' in src, "演练幂等，可保留 retry"
