@@ -72,6 +72,22 @@
   （3.10/gmtrade 已卸载）；计划任务 `/tr` 必须写**绝对脚本路径**——schtasks 没有工作目录
   参数，相对路径在默认 cwd=System32 下直接退出码 2（2026-10-26/27 踩过）。
   服务器是**精简副本**：没有 `tests/`、没装 pytest，验证靠 import 冒烟 + dry-run。
+- **服务器 SSH 认证**（2026-10-28 起）：管理员组走
+  `C:\ProgramData\ssh\administrators_authorized_keys`（Windows 特殊路径，ACL 必须是
+  Administrators+SYSTEM 完全控制，否则 sshd 忽略整个文件）。**标准运维 key：
+  `~/.nightwatch/ops_ed25519`**（指纹 `SHA256:3WShXTvNpbx6INscfeh3wsJC2FyaROcplWqNWkzyaiU`，
+  别名 nightwatch-ops），用法：
+  ```
+  ssh -i C:/Users/67478/.nightwatch/ops_ed25519 -o BatchMode=yes Administrator@8.134.172.15 "<cmd>"
+  ```
+  远端默认 shell 是 **cmd.exe**，所以命令用 cmd 语法（`cd /d`、`set X=1&&`、`&&`）。
+  **只授权 1 把**（nightwatch-ops）。`~/.ssh/id_ed25519`（GitHub 通用那把）2026-10-28
+  曾追加作兜底，当天已撤销——一把 GitHub key 反过来能登生产服务器，泄露面没必要放大。
+  `PasswordAuthentication` 仍是默认 yes，密码还能兜底；真关掉前先确认每台机器的公钥都进了文件。
+  **路径坑**：Git Bash 会把命令里的 `C:\x\y` 转成 `C:/x/y`。Python 吃正斜杠所以没事，
+  但 `findstr` / `icacls` 这类把 `/` 当开关的会炸（报「无法打开 C:xxx」）——要么用
+  `%ProgramData%\...` 变量，要么这类文件操作用 paramiko/SFTP 做。
+  paramiko 连法：`connect(..., key_filename=~/.nightwatch/ops_ed25519, look_for_keys=False)`。
 - **代理软件会干扰到服务器的 SSH**：2026-10-27 晚 `Connection reset by peer`（ping 通、22 开、
   握手完成后在认证阶段被切），退掉代理立即恢复。同类现象先怀疑代理，别急着查 sshd。
 - NightWatch 看门狗：源码 `D:\StudyDemo\csharp\NightWatch`，服务器 `C:\AppData\NightWatch`
