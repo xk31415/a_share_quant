@@ -446,18 +446,27 @@ def test_watchdog_flags_missing_and_failed_runs_and_dedupes():
     assert not any(a["kind"] == "summary" for a in alerts8), "汇总一天只发一次"
 
 
-def test_write_heartbeat_marks_dry_run(tmp_path, monkeypatch):
-    """心跳必须带 dry_run 标记并只留 14 天，watchdog 靠它区分"跑过"和"演练过"。"""
+def test_write_heartbeat_isolates_dry_run(tmp_path, monkeypatch):
+    """演练心跳写到 live/_dryrun，不能碰生产心跳（2026-10-28 实测的漏）。
+
+    外部看门狗只看文件 mtime，分不出演练与真跑。前一晚一次演练把心跳续到 22:37，
+    本该 09:35 触发的「今天整天没跑」要拖到 16:37 ——已过监控时段，兜底失效。
+    """
     import json
     mod = _load_script("live_auto.py")
     monkeypatch.setattr(mod, "ROOT", tmp_path)
     cfg = {"out_dir": "live"}
     mod.write_heartbeat(cfg, [("data", 0)], dry_run=True)
     mod.write_heartbeat(cfg, [("trade", 2)], dry_run=False)
-    data = json.loads((tmp_path / "live" / "heartbeat.json").read_text(encoding="utf-8"))
     day = mod.today()
-    assert data[day]["data"]["dry_run"] is True
-    assert data[day]["trade"]["dry_run"] is False and data[day]["trade"]["rc"] == 2
+
+    prod = json.loads((tmp_path / "live" / "heartbeat.json").read_text(encoding="utf-8"))
+    assert "data" not in prod[day], "演练不能写生产心跳"
+    assert prod[day]["trade"]["dry_run"] is False and prod[day]["trade"]["rc"] == 2
+
+    drill = json.loads((tmp_path / "live" / "_dryrun" / "heartbeat.json")
+                       .read_text(encoding="utf-8"))
+    assert drill[day]["data"]["dry_run"] is True, "演练记录自己留着，便于排查"
 
 
 # ---------------------------------------------------------------- 查询命令有数据时（评审 P0-1 回归）

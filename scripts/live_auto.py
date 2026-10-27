@@ -450,11 +450,16 @@ def write_heartbeat(cfg: dict, results: list[tuple[str, int]], dry_run: bool) ->
 
     进程内推送有个致命盲区：进程没起来就什么都不会发（2026-10-26/27 三天
     计划任务脚本路径错、Python 退出码 2、一条告警都没有）。心跳是给流水线
-    **外面**的看门狗看的。dry_run 单独标记——演练不算"跑过了"，
-    否则手动 dry-run 会把坏掉的计划任务掩盖掉。
+    **外面**的看门狗看的。
+
+    ``dry_run`` 的心跳写到 ``live/_dryrun/heartbeat.json``，不碰生产心跳：
+    外部看门狗（NightWatch 之类）只看文件 mtime，分不出演练与真跑——
+    一次手动演练就会把「今天根本没跑」这件事掩盖掉（2026-10-28 实测：
+    前一晚演练把心跳续到 22:37，本该 09:35 报的故障要拖到 16:37，已出监控时段）。
     """
     import json
-    p = ROOT / cfg["out_dir"] / "heartbeat.json"
+    out_dir = "live/_dryrun" if dry_run else cfg["out_dir"]
+    p = ROOT / out_dir / "heartbeat.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     data: dict = {}
     if p.exists():
