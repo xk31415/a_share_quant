@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
 import os
 import subprocess
@@ -227,6 +228,41 @@ def orders_for_reconcile(orders_path: Path) -> Path:
     if p.exists() and p.stat().st_mtime >= orders_path.stat().st_mtime:
         return p
     return orders_path
+
+
+# 与 gm_bridge.DATA_GAP_NOTES 必须一致。live_auto 按设计不 import 那个模块
+# （纯标准库，子进程隔离），所以这里是副本；test_engine_guards 有一条断言锁住两边相同。
+DATA_GAP_NOTES = ("blocked:no_quote", "blocked:no_limit_data")
+
+
+def skipped_summary(cfg: dict) -> str:
+    """统计最近一次下单被闸门拦下的委托，把「缺数据」类单独点出来。
+
+    为什么推送里要带这个：退出码只表达"有没有问题"，不表达"少了哪几笔"。
+    部分数据缺口时单照常发（rc=2），钉钉若只说"失败"或只说"成功"，就丢失了
+    "有几只票根本没拿到判定依据"这一层——那正是需要人去看行情源的地方
+    （2026-10-27 评审 P2-4）。
+    """
+    orders = find_recent_orders(cfg)
+    if orders is None:
+        return ""
+    p = orders.parent / "placement_skipped.csv"
+    if not p.exists():
+        return ""
+    try:
+        with p.open(encoding="utf-8-sig", newline="") as f:
+            rows = [r for r in csv.DictReader(f) if (r.get("symbol") or "").strip()]
+    except (OSError, csv.Error):
+        return ""
+    if not rows:
+        return ""
+    gap = [r for r in rows if str(r.get("note", "")) in DATA_GAP_NOTES]
+    parts = []
+    if len(rows) - len(gap):
+        parts.append(f"触板/停牌 {len(rows) - len(gap)}")
+    if gap:
+        parts.append(f"**数据缺失 {len(gap)}** ← 需人工查行情源")
+    return f"\n**闸门拦下** {len(rows)} 笔（{'；'.join(parts)}）"
 
 
 # ---------- 各 stage ----------
@@ -520,6 +556,12 @@ def main() -> int:
                  f"**结果**: {'成功' if ok else '失败 rc=' + str(worst)}"]
         for s, rc in results:
             lines.append(f"- {s}: {'✓' if rc == 0 else '✗ rc=' + str(rc)}")
+        if args.stage in ("trade", "all"):
+            # 退出码之外把"拦下了哪几笔、其中几笔是数据缺失"带出来，
+            # 否则 rc=2 只看到"失败"，还得翻日志才知道是没取到行情还是封板。
+            summary = skipped_summary(cfg)
+            if summary:
+                lines.append(summary)
         lines.append(f"\n日志 `{log_path.name}`")
         if not ok:
             lines.append("\n**请尽快查看日志**")

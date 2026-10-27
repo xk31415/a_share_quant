@@ -23,7 +23,7 @@
 | 下单 | `gm` SDK 策略模式（`scripts/gm_bridge.py`）；执行日涨跌停闸门与回测 `execution.py` 同口径 |
 | 账户 | 掘金仿真 100 万；token 在服务器 `config/gm_account.yaml`（不入库） |
 | 通知 | 钉钉机器人（`config/notify.yaml`，不入库），阶段成败都推 |
-| 测试 | `python -m pytest` → **348 passed**，全绿才算改完 |
+| 测试 | `python -m pytest` → **354 passed**，全绿才算改完 |
 | 数字口径 | 唯一来源 `results/<EXP>/metrics.json`；引用任何数字前自己跑一遍核对 |
 
 **红线速记**（详见 `AGENTS.md`）：不用未来数据；不暴力调参；缺数据显式报错不放行；
@@ -32,6 +32,10 @@
 **日常入口**：看当天运行 → `live/logs/<日期>.log`；看账户 → `scripts/gm_bridge.py status`；
 停自动化 → `deploy\register_tasks.ps1 -Remove`。接手后先核对最近一个交易日的
 日志、钉钉推送与 `fills/<日期>.csv`（与掘金终端成交一致才算链路正常）。
+
+**看到 `rc=2` 先分清两种**：① 一笔没发（全是 `blocked:no_quote` / `no_limit_data`）→ 去查行情源；
+② 部分被拦（推送里有「闸门拦下 N 笔（触板/停牌 x；数据缺失 y）」）→ 放行的单**已经发了**，
+照常等到 15:35 对账，另去看那 y 只票为什么没取到行情。触板/停牌只算业务结果、不算失败。
 
 ---
 
@@ -57,7 +61,7 @@
 
 ### 2.1 前置检查（每次开始前）
 
-- [ ] `python -m pytest` → **348 passed**
+- [ ] `python -m pytest` → **354 passed**
 - [ ] `python scripts/data_manifest.py verify`：2020-2024 与 2015-2019 两份 `[ok]`
       （2025-2026 每日更新后不一致属正常）
 - [ ] 基线回测 `annualized_return = 0.0610828468971103`（命令见 `QUICKSTART.md` §1）

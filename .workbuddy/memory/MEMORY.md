@@ -9,10 +9,14 @@
   旧的 fix_log、交叉审查轮次（R01~R08）、按日期的记录只在 git 历史里。
 - 数字只有一个来源：`results/<EXP>/metrics.json`，当前是 `EXP-20261022-*`。
 - 交接文档里的每个数字都要实际数/跑一遍，凭印象的数会错。
+- 接手 AI / 新会话先看 `HANDOVER.md` §0「快速上手」（一屏速览）；审查类任务另给
+  开工指令 + checklist 的独立文档，修完即删、不入库。
 
 ## 工作流程
 
-- 改代码后跑 `python -m pytest`（当前 342 passed），失败不许报完成；新测试先红后绿。
+- 改代码后跑 `python -m pytest`（当前 354 passed），失败不许报完成；新测试先红后绿。
+- 真实下单**非幂等**：禁止 `run_step_retry` 包裹（部分成功重试 = 重复买入）；只有幂等步骤
+  （补数据/拉持仓/拉成交/演练下单）可重试。
 - 改口径后 grep 全文找旧数字；收尾动作是从文件第一行读到最后一行（表头、摘要、清单都要看）。
 - 给默认值加参数化时，默认分支输出必须逐位不变，用旧结果回归一次。
 - 缺数据显式 raise 或 warn，不默认放行。
@@ -42,6 +46,8 @@
 - **修"写盘前检查"先枚举所有写盘路径**；输入路径不存在时不能按"空"处理。
 - **自己修的东西自己验不准**：按写码时的心智模型去测，绕过路径在模型之外，要做攻击式复现。
 - **看到异常小的 n 先停下查分组逻辑**；引用别人算好的差值，列/行/口径逐一对上。
+- **生成代码（字符串拼出来的子进程模块）是独立命名空间**，父进程函数名一律不可见：
+  要么内联要么显式 import；空数据路径测不出这种错（空集合不进循环体），必须用"有数据"探针。
 
 ## 环境
 
@@ -49,6 +55,12 @@
 - 拉数据：`C:\Program Files\Python314\python.exe`（装了 gm 与 pyarrow，需 `GM_TOKEN`）
 - PowerShell 用 `;` 连接命令；逗号分隔的代码列表要加引号，否则会变成数组并吃掉前导零。
 - 仓库：https://github.com/xk31415/a_share_quant（origin 走 SSH）。
+- **只在 `D:\a_share_quant` 上改代码**，它 checkout 的是 `main`。C 盘的 worktree
+  `Worktrees/a_share_quant/main-bfb8497b`（分支 `workbuddy/main-bfb8497b`）2026-10-27 起弃用，
+  不要在那里提交——它会落后 main，且 `reports/review/` 里有遗留的未跟踪文件。
 - 行情数据、`results/`、`experiments/`、个人交易记录（`live/*/`、`live/holdings.csv*`、`fills/`）不入库；
   `live/sample.json` 与 `data/MANIFEST.json` 入库。探针目录用 `_dstest/`（已忽略），用完删除。
 - `update_dataset.py` / `build_dataset.py` 会改 `data/`，只在主人明确要求时跑。
+- 仿真服务器：`8.134.172.15`，项目在 `C:\AppData\a_share_quant`，Python 3.12 单解释器
+  （3.10/gmtrade 已卸载）；计划任务 `/tr` 必须写**绝对脚本路径**——schtasks 没有工作目录
+  参数，相对路径在默认 cwd=System32 下直接退出码 2（2026-10-26/27 踩过）。

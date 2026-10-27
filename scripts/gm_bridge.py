@@ -406,29 +406,50 @@ def cmd_place_orders(args) -> int:
         print(f"  拦下 {orig.get('symbol')} {g.get('note', '')} "
               f"（意图 {orig.get('shares', 0)} 股 @ {orig.get('price', '')}）", flush=True)
 
+    # 数据缺口：不是"今天买不进"，是"根本没拿到判定依据"。数量与放行笔数无关——
+    # 只有一部分票取不到行情时同样是静默失败（2026-10-27 评审 P2-4）。
+    gap = [r for r in skipped if str(r.get("note", "")) in DATA_GAP_NOTES]
+    gap_reasons: dict[str, int] = {}
+    for r in gap:
+        k = str(r.get("note", "blocked:?"))
+        gap_reasons[k] = gap_reasons.get(k, 0) + 1
+    gap_desc = "，".join(f"{k} {v}" for k, v in sorted(gap_reasons.items()))
+
     if args.dry_run:
         for r in sent:
             code = str(r["symbol"]).strip()
             shares = int(float(r["shares"]))
             price = float(r["price"]) if r.get("price") not in (None, "", "nan") else 0.0
             print(f"  {code} {r.get('side', '')} {shares} 股 @ {price:.2f} -> 不发送")
+        if gap:
+            print(f"[warn] {len(gap)} 笔因行情/涨跌停价缺失被拦下——"
+                  f"真实下单时这批会触发退出码 2", flush=True)
         print("[dry-run] 不写 placement.csv（它只记录真实发送的委托）")
         return 0
 
     if not sent:
-        gap = [r for r in skipped if str(r.get("note", "")) in DATA_GAP_NOTES]
         if gap:
-            reasons = {}
-            for r in gap:
-                k = str(r.get("note", "blocked:?"))
-                reasons[k] = reasons.get(k, 0) + 1
             print(f"\n闸门拦下全部委托，其中 {len(gap)} 笔是**行情/涨跌停价缺失**"
-                  f"（" + "，".join(f"{k} {v}" for k, v in sorted(reasons.items())) + "）。"
+                  f"（{gap_desc}）。"
                   f"\n这不是'今天买不进'，是数据没取到——退出码 2 交人工。", flush=True)
             return 2
         # 全是触板/停牌：业务上今天就该买不进，属于正常结果
         print("闸门拦下全部委托（全部触板/停牌，属正常业务），无单可发", flush=True)
         return 0
+
+    # shares<=0 的行不发单，也不能进 placement.csv——它是对账口径，记进去等于
+    # "该成交而没成交"，白白拉低成交率（2026-10-27 探针实测：0 股那笔照常写盘）。
+    sendable: list[dict] = []
+    for r in sent:
+        if int(float(r["shares"])) <= 0:
+            print(f"  跳过 {r.get('symbol')}：shares={r.get('shares')}（<=0 不发单）",
+                  flush=True)
+            continue
+        sendable.append(r)
+    if not sendable:
+        print("放行的委托股数全为 0，无单可发", flush=True)
+        return 0
+    sent = sendable
 
     # placement.csv = 真实发送的委托；对账以它为口径，成交率才不含"根本没发"的单。
     placement = Path(args.placement) if args.placement else orders_path.parent / "placement.csv"
@@ -478,8 +499,17 @@ def cmd_place_orders(args) -> int:
         else:
             print(f"  {od['symbol']} -> {od['ret']}")
 
+    # 两类问题都要人工：委托被拒（部分成功）与数据缺口（票根本没判）。任一存在
+    # 都不能返回 0——stage_trade 会把 0 当成功推"✅"，缺口就彻底被淹没。
+    problems = []
     if errors:
-        print(f"\n{errors} 笔异常，需要人工看日志", flush=True)
+        problems.append(f"{errors} 笔委托异常")
+    if gap:
+        problems.append(f"{len(gap)} 笔因行情/涨跌停价缺失未发（{gap_desc}）")
+    if problems:
+        print(f"\n[需人工] {'；'.join(problems)}"
+              + (f"。已发出 {len(sent)} 笔，照常进入对账" if sent else "")
+              + "。", flush=True)
         return 2
     return 0
 

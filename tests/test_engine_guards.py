@@ -664,86 +664,161 @@ def test_trade_day_ok_treats_beyond_calendar_as_possible():
     assert mod._trade_day_ok("2026-10-27", None) is True
 
 
-# ---------------------------------------------------------------- 闸门全拦的退出码（评审 P1-A）
-def test_gate_blocks_all_on_missing_data_exits_nonzero(tmp_path, monkeypatch, capsys):
-    """涨跌停价没取到时"全部拦下"不能当成功。
+# ---------------------------------------------------------------- 部分数据缺口不能推 ✅（评审 P2-4）
+def _two_orders(tmp_path):
+    o = tmp_path / "orders.csv"
+    o.write_text("symbol,side,shares,price,amount,note\n"
+                 "600000,buy,100,10.00,1000,x\n"
+                 "000001,buy,200,12.00,2400,y\n", encoding="utf-8")
+    return o
 
-    旧行为 return 0：stage_trade 以为下单成功、钉钉推 ✅，实际一笔没发。
-    数据缺口必须交人工（退出码 2）。
+
+def _partial_gap_quotes(codes, date):
+    """600000 正常放行；000001 只有价格、没有涨跌停价 → blocked:no_limit_data。"""
+    return {"600000": {"price": 10.0, "limit_up": 11.0, "limit_down": 9.0,
+                       "suspended": False},
+            "000001": {"price": 12.0, "limit_up": 0.0, "limit_down": 0.0,
+                       "suspended": False}}
+
+
+def test_gate_partial_data_gap_exits_nonzero_but_still_sends(tmp_path, monkeypatch, capsys):
+    """一笔放行、一笔数据缺失时也必须退出码 2（评审 P2-4）。
+
+    8ba876e 只修了「全部拦下」，部分缺口时 sent 非空 → return 0 → stage_trade
+    当成功、钉钉推 ✅，那只根本没拿到涨跌停价的票就此消失，没人会去看行情源。
+    但已放行的单必须照常发送并写 placement.csv——不能因为一笔缺数据就全盘不发。
     """
     import argparse
     mod = _load_script("gm_bridge.py")
     monkeypatch.setattr(mod, "_load_account", lambda: ("tok", "acc"))
-    monkeypatch.setattr(mod, "_fetch_execution_quotes", lambda codes, date: {})
-    orders = tmp_path / "orders.csv"
-    orders.write_text("symbol,side,shares,price,amount,note\n"
-                      "600000,buy,100,10.00,1000,x\n", encoding="utf-8")
+    monkeypatch.setattr(mod, "_fetch_execution_quotes", _partial_gap_quotes)
+    sent_bodies = []
+    monkeypatch.setattr(mod, "_run_in_context",
+                        lambda body, timeout=120: (sent_bodies.append(body),
+                                                   {"ok": True, "orders": []})[1])
+
+    orders = _two_orders(tmp_path)
     rc = mod.cmd_place_orders(argparse.Namespace(
         orders=str(orders), placement=None, dry_run=False,
         order_type="limit", sells_first=True, max_orders=200))
     out = capsys.readouterr().out
-    assert rc == 2, f"数据缺失导致全拦必须退出码 2，实际 {rc}；输出 {out!r}"
-    assert "数据没取到" in out
-    assert not (tmp_path / "placement.csv").exists(), "一笔没发就不能写 placement.csv"
+
+    assert rc == 2, f"部分数据缺口必须交人工，实际 rc={rc}；输出 {out!r}"
+    assert "no_limit_data 1" in out, f"要指出缺口类型与笔数：{out!r}"
+    assert "已发出 1 笔" in out, f"要说明放行的单已发出、照常对账：{out!r}"
+    placement = tmp_path / "placement.csv"
+    assert placement.exists(), "放行的单照常写 placement.csv（对账口径）"
+    assert "600000" in placement.read_text(encoding="utf-8")
+    assert "000001" not in placement.read_text(encoding="utf-8"), \
+        "被拦下的票不能进 placement.csv，否则对账会算成未成交"
+    skipped = (tmp_path / "placement_skipped.csv").read_text(encoding="utf-8")
+    assert "000001" in skipped and "blocked:no_limit_data" in skipped
+    assert sent_bodies and "SHSE.600000" in sent_bodies[0]
 
 
-def test_gate_blocks_all_on_limit_up_exits_zero(tmp_path, monkeypatch, capsys):
-    """全部涨停买不进是正常业务结果，退出码仍是 0（否则每个一字板日都告警）。"""
+def test_gate_dry_run_reports_gap_but_does_not_fail(tmp_path, monkeypatch, capsys):
+    """演练遇到数据缺口要能看见，但不退出非零（演练不发单，失败也没意义）。"""
     import argparse
     mod = _load_script("gm_bridge.py")
     monkeypatch.setattr(mod, "_load_account", lambda: ("tok", "acc"))
-    quotes = {"600000": {"price": 11.0, "limit_up": 11.0,
-                         "limit_down": 9.0, "suspended": False}}
-    monkeypatch.setattr(mod, "_fetch_execution_quotes", lambda codes, date: quotes)
+    monkeypatch.setattr(mod, "_fetch_execution_quotes", _partial_gap_quotes)
+    orders = _two_orders(tmp_path)
+    rc = mod.cmd_place_orders(argparse.Namespace(
+        orders=str(orders), placement=None, dry_run=True,
+        order_type="limit", sells_first=True, max_orders=200))
+    out = capsys.readouterr().out
+    assert rc == 0, "演练不阻断"
+    assert "1 笔因行情/涨跌停价缺失被拦下" in out, f"演练也要看得见缺口：{out!r}"
+    assert not (tmp_path / "placement.csv").exists()
+
+
+def test_skipped_summary_surfaces_gap_in_dingtalk(tmp_path, monkeypatch):
+    """钉钉文案要能看出「拦下几笔、其中几笔是数据缺失」（评审 P2-4）。
+
+    退出码只说"有问题"，不说"少了哪几笔"；数据缺口和封板买不进是两回事，
+    前者要人去查行情源，必须在推送里单独点出来。
+    """
+    mod = _load_script("live_auto.py")
+    day = tmp_path / "live" / "2026-10-27"
+    day.mkdir(parents=True)
+    (day / "orders.csv").write_text("symbol,side\n", encoding="utf-8")
+    (day / "placement_skipped.csv").write_text(
+        "symbol,side,shares,price,amount,note\n"
+        "600519,buy,0,10.00,0,blocked:limit_up\n"
+        "000001,buy,0,12.00,0,blocked:no_limit_data\n", encoding="utf-8")
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+
+    text = mod.skipped_summary({"out_dir": "live"})
+    assert "闸门拦下" in text and "2 笔" in text, text
+    assert "数据缺失 1" in text, f"缺口必须单独点出：{text}"
+    assert "触板/停牌 1" in text
+
+    # 全是触板时不提"数据缺失"（一字板日不该喊人查行情源）
+    (day / "placement_skipped.csv").write_text(
+        "symbol,side,shares,price,amount,note\n"
+        "600519,buy,0,10.00,0,blocked:limit_up\n", encoding="utf-8")
+    text = mod.skipped_summary({"out_dir": "live"})
+    assert "数据缺失" not in text and "触板/停牌 1" in text, text
+
+    # 没有 skipped 文件（只算不下 / dry-run）就不加这行
+    (day / "placement_skipped.csv").unlink()
+    assert mod.skipped_summary({"out_dir": "live"}) == ""
+
+
+def test_data_gap_notes_stay_in_sync_across_scripts():
+    """live_auto 的判别口径必须和 gm_bridge 一致（它按设计不 import 那个模块）。"""
+    bridge = _load_script("gm_bridge.py")
+    auto = _load_script("live_auto.py")
+    assert tuple(bridge.DATA_GAP_NOTES) == tuple(auto.DATA_GAP_NOTES), \
+        f"gm_bridge={bridge.DATA_GAP_NOTES} live_auto={auto.DATA_GAP_NOTES}"
+
+
+# ---------------------------------------------------------------- 零股不进对账口径（2026-10-27 探针）
+def test_zero_share_orders_do_not_enter_placement(tmp_path, monkeypatch, capsys):
+    """0 股委托不发单，也不能进 placement.csv——它是对账口径。
+
+    原顺序是「先写盘、再判 shares<=0」，0 股那笔照样落进 placement.csv，
+    reconcile 会记成"该成交而没成交"，白白拉低成交率。实盘里
+    build_plan 在资金不足时会出 0 股行，不是理论情形。
+    """
+    import argparse
+    mod = _load_script("gm_bridge.py")
+    monkeypatch.setattr(mod, "_load_account", lambda: ("tok", "acc"))
+    monkeypatch.setattr(mod, "_fetch_execution_quotes", lambda codes, date: {
+        "600000": {"price": 10.0, "limit_up": 11.0, "limit_down": 9.0, "suspended": False},
+        "000001": {"price": 12.0, "limit_up": 13.2, "limit_down": 10.8, "suspended": False},
+    })
+    monkeypatch.setattr(mod, "_run_in_context",
+                        lambda body, timeout=120: {"ok": True, "orders": []})
     orders = tmp_path / "orders.csv"
     orders.write_text("symbol,side,shares,price,amount,note\n"
-                      "600000,buy,100,11.00,1100,x\n", encoding="utf-8")
+                      "600000,buy,0,10.00,0,zero\n"
+                      "000001,buy,100,12.00,1200,ok\n", encoding="utf-8")
     rc = mod.cmd_place_orders(argparse.Namespace(
         orders=str(orders), placement=None, dry_run=False,
         order_type="limit", sells_first=True, max_orders=200))
-    out = capsys.readouterr().out
-    assert rc == 0, f"触板属正常业务，应 0；实际 {rc}；输出 {out!r}"
-    assert "正常业务" in out
+    assert rc == 0
+    text = (tmp_path / "placement.csv").read_text(encoding="utf-8")
+    assert "000001" in text
+    assert "600000" not in text, f"0 股委托不能进对账口径：{text!r}"
+    assert "shares=0" in capsys.readouterr().out
 
 
-# ---------------------------------------------------------------- 看门狗认交易日历（评审 P1-C）
-def test_watchdog_skips_exchange_holiday():
-    """日历范围内的休市日不巡检。2026-10-02 是国庆假期（周五），旧代码报假警。"""
-    import datetime as dt
-    mod = _load_script("watchdog.py")
-    cal = ({"2026-09-30", "2026-10-08", "2026-10-09"}, "2026-10-09")
-    alerts, _, _ = mod.check(dt.datetime(2026, 10, 2, 10, 0), {}, {}, set(), cal)
-    assert alerts == [], f"国庆假期不该告警，实际 {alerts}"
-
-
-def test_watchdog_still_alerts_when_calendar_is_stale():
-    """日历没覆盖今天时必须照常巡检。
-
-    否则数据一停更（正是最该报警的时候），看门狗反而对所有工作日闭嘴。
-    """
-    import datetime as dt
-    mod = _load_script("watchdog.py")
-    cal = ({"2026-09-30", "2026-10-08"}, "2026-10-08")
-    alerts, _, _ = mod.check(dt.datetime(2026, 10, 27, 10, 0), {}, {}, set(), cal)
-    assert [a["kind"] for a in alerts] == ["missing", "missing"], \
-        f"日历只到 10-08，10-27 必须照常告警，实际 {alerts}"
-
-
-def test_watchdog_without_calendar_keeps_old_behavior():
-    """读不到日历时退回只按周末判（宁可误报不可漏报）。"""
-    import datetime as dt
-    mod = _load_script("watchdog.py")
-    alerts, _, _ = mod.check(dt.datetime(2026, 10, 27, 10, 0), {}, {}, set(), None)
-    assert len(alerts) == 2
-    alerts, _, _ = mod.check(dt.datetime(2026, 10, 31, 10, 0), {}, {}, set(), None)
-    assert alerts == []
-
-
-def test_trade_day_ok_treats_beyond_calendar_as_possible():
-    """超出日历范围 ≠ 休市，而是"日历还没更新"，必须放行。"""
-    mod = _load_script("watchdog.py")
-    cal = ({"2026-10-08"}, "2026-10-08")
-    assert mod._trade_day_ok("2026-10-08", cal) is True
-    assert mod._trade_day_ok("2026-10-05", cal) is False     # 日历内但没有该日 = 休市
-    assert mod._trade_day_ok("2026-10-27", cal) is True      # 超出日历范围
-    assert mod._trade_day_ok("2026-10-27", None) is True
+def test_all_zero_share_orders_writes_no_placement(tmp_path, monkeypatch, capsys):
+    """全都 0 股时连 placement.csv 都不该写（否则对账拿到一份空的"已发送"）。"""
+    import argparse
+    mod = _load_script("gm_bridge.py")
+    monkeypatch.setattr(mod, "_load_account", lambda: ("tok", "acc"))
+    monkeypatch.setattr(mod, "_fetch_execution_quotes", lambda codes, date: {
+        "600000": {"price": 10.0, "limit_up": 11.0, "limit_down": 9.0, "suspended": False}})
+    monkeypatch.setattr(mod, "_run_in_context",
+                        lambda body, timeout=120: {"ok": True, "orders": []})
+    orders = tmp_path / "orders.csv"
+    orders.write_text("symbol,side,shares,price,amount,note\n"
+                      "600000,buy,0,10.00,0,zero\n", encoding="utf-8")
+    rc = mod.cmd_place_orders(argparse.Namespace(
+        orders=str(orders), placement=None, dry_run=False,
+        order_type="limit", sells_first=True, max_orders=200))
+    assert rc == 0
+    assert "股数全为 0" in capsys.readouterr().out
+    assert not (tmp_path / "placement.csv").exists()
