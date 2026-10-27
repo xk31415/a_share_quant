@@ -169,6 +169,11 @@ def _run_in_context(body: str, timeout: int = 120) -> dict:
 # 一字板时参考价就是板价，判得出来；没封板就放行——与回测"t+1 开盘没触板可买"一致。
 LIMIT_EPS = 1e-9
 
+# 数据缺失类拦截：不是"今天买不进"，是"根本没拿到判定依据"。
+# 全被这类拦下时必须让上层知道（退出码 2），否则 stage_trade 拿 0 当成功、
+# 钉钉推"✅ 成功"，而实际一笔没发（2026-10-27 评审 P1-A）。
+DATA_GAP_NOTES = ("blocked:no_quote", "blocked:no_limit_data")
+
 
 def apply_execution_gate(orders: list[dict], quotes: dict) -> list[dict]:
     """按执行日行情拦下触板/停牌/缺数据的委托。返回新列表，不改输入。
@@ -411,7 +416,18 @@ def cmd_place_orders(args) -> int:
         return 0
 
     if not sent:
-        print("闸门拦下全部委托，无单可发", flush=True)
+        gap = [r for r in skipped if str(r.get("note", "")) in DATA_GAP_NOTES]
+        if gap:
+            reasons = {}
+            for r in gap:
+                k = str(r.get("note", "blocked:?"))
+                reasons[k] = reasons.get(k, 0) + 1
+            print(f"\n闸门拦下全部委托，其中 {len(gap)} 笔是**行情/涨跌停价缺失**"
+                  f"（" + "，".join(f"{k} {v}" for k, v in sorted(reasons.items())) + "）。"
+                  f"\n这不是'今天买不进'，是数据没取到——退出码 2 交人工。", flush=True)
+            return 2
+        # 全是触板/停牌：业务上今天就该买不进，属于正常结果
+        print("闸门拦下全部委托（全部触板/停牌，属正常业务），无单可发", flush=True)
         return 0
 
     # placement.csv = 真实发送的委托；对账以它为口径，成交率才不含"根本没发"的单。

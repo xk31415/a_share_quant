@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
 import importlib.util
 import json
@@ -34,6 +35,47 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# 交易日历：(交易日集合, 最后一个交易日)。只按 weekday 判会把国庆/春节当工作日，
+# 长假每天报十几条假警，人就开始忽略告警——真故障被淹没。
+# 但反过来也不能把"不在日历里"直接当非交易日：日历只更新到有数据的那天，
+# 之后的日期根本不在集合里。见 _trade_day_ok。
+Calendar = tuple[set[str], str]
+
+
+def load_trade_days(cfg: dict) -> Calendar | None:
+    """读 `data_dir/calendar.csv`。读不到返回 None（退回只看周末）并显式告警。"""
+    p = ROOT / str(cfg.get("data_dir", "data/processed_2025_2026")) / "calendar.csv"
+    if not p.exists():
+        print(f"[warn] 找不到交易日历 {p}——看门狗退回只按周末判定，"
+              f"长假会误报。先跑 08:30 的补数据任务。", flush=True)
+        return None
+    try:
+        with p.open(encoding="utf-8") as f:
+            days = {str(r["trade_date"])[:10] for r in csv.DictReader(f)
+                    if r.get("trade_date")}
+    except (OSError, KeyError, ValueError) as e:
+        print(f"[warn] 交易日历读不了（{type(e).__name__}: {e}），退回只按周末判定", flush=True)
+        return None
+    if not days:
+        print(f"[warn] 交易日历为空：{p}，退回只按周末判定", flush=True)
+        return None
+    return days, max(days)
+
+
+def _trade_day_ok(day: str, cal: Calendar | None) -> bool:
+    """该日是否可能开市。不确定时一律返回 True（宁可误报，不可漏报）。
+
+    日历只覆盖到最后一个有数据的交易日。日期超出这个范围 = "日历还没更新"，
+    不是"那天休市"——否则数据一停更，看门狗反而对所有工作日闭嘴。
+    """
+    if cal is None:
+        return True
+    days, last = cal
+    if day in days:
+        return True
+    return day > last          # 超出日历范围 → 无法判定 → 放行
+
 
 
 def _load_live_auto():
@@ -62,15 +104,16 @@ def _at(day: dt.date, hhmm: str) -> dt.datetime:
 
 
 def check(now: dt.datetime, heartbeats: dict, alerted: dict,
-          summary_sent: set) -> tuple[list[dict], dict, set]:
+          summary_sent: set, cal: Calendar | None = None) -> tuple[list[dict], dict, set]:
     """巡检判定。纯函数：输入现状，输出告警与新去重状态，方便单测回放。
 
     告警项 {"stage", "kind", "text"}；kind ∈ missing / failed。
+    ``cal`` 为交易日历，缺省按"工作日都可能开市"判定（保持旧行为）。
     """
     alerts: list[dict] = []
-    if now.weekday() >= 5:                      # 周末没有计划任务
-        return alerts, alerted, summary_sent
     day = now.date().isoformat()
+    if now.weekday() >= 5 or not _trade_day_ok(day, cal):
+        return alerts, alerted, summary_sent        # 周末/休市，没有计划任务
     dayrec = heartbeats.get(day, {}) or {}
 
     for stage, (hhmm, grace) in SCHEDULE.items():
@@ -125,6 +168,17 @@ def main() -> int:
     now = (dt.datetime.strptime(args.now, "%Y-%m-%d %H:%M") if args.now
            else dt.datetime.now())
 
+    # 交易日历：长假不巡检。读不到就退回"只按周末判"，并显式告警。
+    cal = None
+    try:
+        cal = load_trade_days(_load_live_auto().config())
+    except Exception as e:      # noqa: BLE001 看门狗不能因为读配置失败就哑掉
+        print(f"[warn] 取交易日历失败（{type(e).__name__}: {e}），退回只按周末判定",
+              flush=True)
+    if cal and now.date().isoformat() > cal[1]:
+        print(f"[warn] 交易日历只到 {cal[1]}，今天 {now.date()} 未覆盖——按工作日判定，"
+              f"长假可能误报。先跑 08:30 补数据任务。", flush=True)
+
     hb_path = ROOT / HEARTBEAT_FILE
     heartbeats = {}
     if hb_path.exists():
@@ -143,7 +197,7 @@ def main() -> int:
     alerted = dict(state.get("alerted", {}))
     summary_sent = set(state.get("summary_sent", []))
 
-    alerts, alerted, summary_sent = check(now, heartbeats, alerted, summary_sent)
+    alerts, alerted, summary_sent = check(now, heartbeats, alerted, summary_sent, cal)
 
     if not alerts:
         print(f"{now:%Y-%m-%d %H:%M} 巡检正常", flush=True)

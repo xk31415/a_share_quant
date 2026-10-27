@@ -291,52 +291,6 @@ def test_config_drops_legacy_python_trade_with_warning(tmp_path, monkeypatch, ca
 
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "live.yaml").write_text(
-        "python_data:  C://py312//python.exe/n"
-        "python_trade: C://py310//python.exe/n"
-        "position: 0.5\n",
-        encoding="utf-8")
-    monkeypatch.setattr(mod, "ROOT", tmp_path)
-
-    cfg = mod.config()
-    assert "python_trade" not in cfg
-    assert cfg["python_data"] == r"C:/py312/python.exe"
-    assert "python_trade" in capsys.readouterr().out, "必须告警，不能静默丢弃"
-
-
-# ---------------------------------------------------------------- 单一解释器（gmtrade 已移除）
-def test_gm_bridge_does_not_import_gmtrade():
-    """交易只走 gm SDK 策略模式。`gmtrade` 在 3.24.2.1 终端上已不可用，
-    代码里再出现它只有一个结果：静默失败或挂死，所以直接从入口层禁止。"""
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "scripts" / "gm_bridge.py").read_text(encoding="utf-8")
-    assert "import gmtrade" not in src
-    assert "from gmtrade" not in src
-
-
-def test_live_yaml_has_single_interpreter_without_python_trade():
-    """分离的"交易解释器"是 gmtrade 时代的产物，已随 gmtrade 一起移除。
-
-    两个 key 指向同一路径是纯负担：谁把 python_trade 指回 3.10，gm 就 import 不到，
-    而报错埋在子进程 stderr 里，排查成本极高。
-    """
-    from pathlib import Path
-    text = (Path(__file__).resolve().parents[1] / "config" / "live.yaml").read_text(encoding="utf-8")
-    assert "python_trade" not in text
-    assert "python_data" in text
-
-
-def test_config_drops_legacy_python_trade_with_warning(tmp_path, monkeypatch, capsys):
-    """旧配置文件里的 python_trade 被丢弃并告警，不能静默继续。"""
-    import importlib.util
-    from pathlib import Path
-
-    p = Path(__file__).resolve().parents[1] / "scripts" / "live_auto.py"
-    spec = importlib.util.spec_from_file_location("live_auto_cfg", p)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "live.yaml").write_text(
         "python_data:  " + r"C:\py312\python.exe" + "\n"
         "python_trade: " + r"C:\py310\python.exe" + "\n"
         "position: 0.5\n",
@@ -441,163 +395,6 @@ def test_orders_for_reconcile_prefers_fresh_placement(tmp_path):
     assert mod.orders_for_reconcile(orders) == orders
 
 
-# ---------------------------------------------------------------- 执行日涨跌停闸门
-def _load_script(name: str):
-    import importlib.util
-    from pathlib import Path
-    p = Path(__file__).resolve().parents[1] / "scripts" / name
-    spec = importlib.util.spec_from_file_location(name.replace(".py", "_t"), p)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def test_execution_gate_matches_backtest_semantics():
-    """下单层闸门与 backtest/execution.py 逐条同口径（2026-10-27 修）。
-
-    旧口径在信号层用 t 日收盘对 t+1 开盘做近似，hype_watch 的候选恰是涨停股，
-    实测 3/3 被 blocked:limit_up，策略永远买不进。判定挪到下单时：
-    用执行日现价（盘前 = 集合竞价参考价）对执行日官方涨跌停价。
-
-    口径（execution.py 买卖都拦触板，**不看是否持有**）：
-      买 价 >= 涨停价            -> blocked:limit_up
-      卖 价 <= 跌停价            -> blocked:limit_down
-      停牌                      -> blocked:suspended
-      缺行情                    -> blocked:no_quote
-      涨跌停价缺失/非正          -> blocked:no_limit_data
-      未持有的跌停股可以买       （卖难买易，execution.py 只拦卖）
-    """
-    mod = _load_script("gm_bridge.py")
-    quotes = {
-        "AAA": {"price": 11.0, "limit_up": 11.0, "limit_down": 9.0, "suspended": False},  # 涨停
-        "BBB": {"price": 9.0, "limit_up": 11.0, "limit_down": 9.0, "suspended": False},   # 跌停
-        "CCC": {"price": 10.0, "limit_up": 11.0, "limit_down": 9.0, "suspended": False},  # 正常
-        "DDD": {"price": 10.0, "limit_up": 11.0, "limit_down": 9.0, "suspended": True},   # 停牌
-        "EEE": {"price": None, "limit_up": 11.0, "limit_down": 9.0, "suspended": False},  # 无行情
-        "FFF": {"price": 10.0, "limit_up": 0.0, "limit_down": 0.0, "suspended": False},   # 无涨跌停价
-    }
-
-    def od(sym, side, shares=100):
-        return {"symbol": sym, "side": side, "shares": shares, "price": 10.0,
-                "amount": 1000.0, "note": "rebalance"}
-
-    orders = [od("AAA", "buy"), od("AAA", "buy", 50), od("BBB", "sell", 200),
-              od("BBB", "buy"), od("CCC", "buy"), od("CCC", "sell"),
-              od("DDD", "sell", 300), od("EEE", "buy"), od("FFF", "buy"),
-              od("GGG", "buy"),                                   # 完全没有行情
-              {"symbol": "HHH", "side": "hold", "shares": 0,
-               "price": 10.0, "amount": 0.0, "note": "blocked:old"}]   # hold 行透传
-    out = mod.apply_execution_gate(orders, quotes)
-    by = {}
-    for r in out:
-        by[(r["symbol"], r.get("note", ""))] = r
-
-    lu = [r for r in out if r["symbol"] == "AAA"]
-    assert all(r["side"] == "hold" and r["note"] == "blocked:limit_up" for r in lu), \
-        "涨停不追买——且不看是否持有（execution.py 也不看）"
-    sell_bbb = [r for r in out if r["symbol"] == "BBB" and r["shares"] in (0, 200)][0]
-    assert sell_bbb["side"] == "hold" and sell_bbb["note"] == "blocked:limit_down"
-    buy_bbb = [r for r in out if r["symbol"] == "BBB" and r["shares"] == 100][0]
-    assert buy_bbb["side"] == "buy", "未持有的跌停股可以买（卖难买易）"
-    assert by[("CCC", "rebalance")]["side"] == "buy" or any(
-        r["symbol"] == "CCC" and r["side"] == "sell" for r in out), "正常股不受影响"
-    ddd = [r for r in out if r["symbol"] == "DDD"][0]
-    assert ddd["note"] == "blocked:suspended"
-    assert by[("EEE", "blocked:no_quote")]["side"] == "hold"
-    assert by[("FFF", "blocked:no_limit_data")]["side"] == "hold"
-    assert by[("GGG", "blocked:no_quote")]["side"] == "hold"
-    assert by[("HHH", "blocked:old")]["side"] == "hold", "hold 行原样透传，不重复加工"
-    # 被拦下的行必须把股数/金额清零，否则对账会当成"该成交而没成交"
-    for r in out:
-        if str(r.get("note", "")).startswith("blocked:"):
-            assert r["shares"] == 0 and float(r["amount"]) == 0.0
-
-
-def test_orders_for_reconcile_prefers_fresh_placement(tmp_path):
-    """对账必须用「实际发送」的 placement.csv，否则闸门拦下的单会被算成未成交，
-    8 周要测的成交率直接被污染。"""
-    mod = _load_script("live_auto.py")
-    orders = tmp_path / "2026-10-27" / "orders.csv"
-    orders.parent.mkdir(parents=True)
-    orders.write_text("symbol,side\nAAA,buy\n", encoding="utf-8")
-    assert mod.orders_for_reconcile(orders) == orders, "没有 placement.csv 时退回 orders.csv"
-
-    placement = orders.parent / "placement.csv"
-    placement.write_text("symbol,side\nAAA,buy\n", encoding="utf-8")
-    import os
-    os.utime(placement, (orders.stat().st_mtime + 5, orders.stat().st_mtime + 5))
-    assert mod.orders_for_reconcile(orders) == placement, "新的 placement.csv 优先"
-
-    # placement 比 orders 旧 = 属于上一轮，不能用
-    os.utime(placement, (orders.stat().st_mtime - 500, orders.stat().st_mtime - 500))
-    assert mod.orders_for_reconcile(orders) == orders
-
-
-# ---------------------------------------------------------------- 独立看门狗
-def test_watchdog_flags_missing_and_failed_runs_and_dedupes():
-    """看门狗存在的理由：进程没起来时（2026-10-26/27 计划任务路径错、
-    Python 退出码 2），进程内推送是沉默的——必须从外面按时刻表核对心跳。
-
-    判定规则：到点+宽限仍无心跳 -> missing；有心跳但 rc!=0 -> failed；
-    dry_run 心跳不算数；同类告警只报一次；周末不判；16:00 后发当日汇总。
-    """
-    import datetime as dt
-    mod = _load_script("watchdog.py")
-    wed = dt.datetime(2026, 10, 28, 9, 5)      # 周三，data 宽限已过(09:00)
-
-    # 1) 没心跳 -> data missing；trade/settle 未到点不判
-    alerts, alerted, sent = mod.check(wed, {}, {}, set())
-    assert [a["stage"] for a in alerts] == ["data"] and alerts[0]["kind"] == "missing"
-
-    # 2) 同类不重复报
-    alerts2, alerted2, _ = mod.check(wed, {}, alerted, sent)
-    assert alerts2 == [], "同一 (日, stage, kind) 只报一次"
-
-    # 3) 演练心跳不算跑过
-    hb = {"2026-10-28": {"data": {"rc": 0, "at": "x", "dry_run": True}}}
-    alerts3, _, _ = mod.check(wed, hb, {}, set())
-    assert alerts3[0]["kind"] == "missing", "dry-run 心跳不能把坏任务掩盖掉"
-
-    # 4) 跑了但失败 -> failed（进程内推送的兜底第二只眼）
-    hb = {"2026-10-28": {"data": {"rc": 2, "at": "x", "dry_run": False}}}
-    alerts4, _, _ = mod.check(wed, hb, {}, set())
-    assert alerts4[0]["kind"] == "failed" and "rc=2" in alerts4[0]["text"]
-
-    # 5) rc=0 正常 -> 不报
-    hb = {"2026-10-28": {"data": {"rc": 0, "at": "x", "dry_run": False}}}
-    alerts5, _, _ = mod.check(wed, hb, {}, set())
-    assert alerts5 == []
-
-    # 6) 周末不判
-    sat = dt.datetime(2026, 10, 31, 10, 0)
-    alerts6, _, _ = mod.check(sat, {}, {}, set())
-    assert alerts6 == []
-
-    # 7) 16:00 后发当日汇总（看门狗自身的存活证明），且只发一次
-    eve = dt.datetime(2026, 10, 28, 16, 5)
-    hb = {"2026-10-28": {s: {"rc": 0, "at": "09:00", "dry_run": False}
-                         for s in mod.SCHEDULE}}
-    alerts7, _, sent7 = mod.check(eve, hb, {}, set())
-    kinds = [a["kind"] for a in alerts7]
-    assert kinds == ["summary"], f"当日全正常时只应有汇总，实际 {kinds}"
-    alerts8, _, sent8 = mod.check(eve, hb, {}, sent7)
-    assert not any(a["kind"] == "summary" for a in alerts8), "汇总一天只发一次"
-
-
-def test_write_heartbeat_marks_dry_run(tmp_path, monkeypatch):
-    """心跳必须带 dry_run 标记并只留 14 天，watchdog 靠它区分"跑过"和"演练过"。"""
-    import json
-    mod = _load_script("live_auto.py")
-    monkeypatch.setattr(mod, "ROOT", tmp_path)
-    cfg = {"out_dir": "live"}
-    mod.write_heartbeat(cfg, [("data", 0)], dry_run=True)
-    mod.write_heartbeat(cfg, [("trade", 2)], dry_run=False)
-    data = json.loads((tmp_path / "live" / "heartbeat.json").read_text(encoding="utf-8"))
-    day = mod.today()
-    assert data[day]["data"]["dry_run"] is True
-    assert data[day]["trade"]["dry_run"] is False and data[day]["trade"]["rc"] == 2
-
-
 # ---------------------------------------------------------------- 独立看门狗
 def test_watchdog_flags_missing_and_failed_runs_and_dedupes():
     """看门狗存在的理由：进程没起来时（2026-10-26/27 计划任务路径错、
@@ -782,120 +579,171 @@ def test_real_place_orders_is_not_retried():
     assert 'run_step_retry("place-orders(dry-run)"' in src, "演练幂等，可保留 retry"
 
 
-# ---------------------------------------------------------------- 查询命令有数据时（评审 P0-1 回归）
-_FAKE_GM_API = '''
-"""假 gm SDK：测试专用。有持仓/有成交，逼出生成代码里的 NameError 类缺陷。"""
-MODE_LIVE = 1
-OrderSide_Buy, OrderSide_Sell = 1, 2
-OrderType_Limit, OrderType_Market = 1, 2
-PositionEffect_Open, PositionEffect_Close = 1, 2
-OrderDuration_GFD = 3
+# ---------------------------------------------------------------- 闸门全拦的退出码（评审 P1-A）
+def test_gate_blocks_all_on_missing_data_exits_nonzero(tmp_path, monkeypatch, capsys):
+    """涨跌停价没取到时"全部拦下"不能当成功。
 
-def set_account_id(a): pass
-
-class Cash:
-    nav = 1000000.0
-    available = 1000000.0
-def get_cash(): return Cash()
-
-class Pos:
-    symbol = "SZSE.000001"; volume = 100; cost_price = 10.0; price = 11.0
-def get_position(): return [Pos()]
-
-class ExecBuy:
-    symbol = "SZSE.000001"; side = 1; volume = 100; price = 10.5; fee = 5.0
-class ExecSell:
-    symbol = "SHSE.600000"; side = 2; volume = 200; price = 8.0; fee = 3.0
-def get_execution_reports(): return [ExecBuy(), ExecSell()]
-
-class _FakeDF:
-    def __init__(self, rows): self._rows = rows
-    def __len__(self): return len(self._rows)
-    def to_dict(self, orient=None): return self._rows
-
-def get_history_instruments(symbols=None, start_date=None, end_date=None,
-                            fields=None, df=False):
-    return _FakeDF([{"symbol": s, "upper_limit": 99.0, "lower_limit": 1.0,
-                     "is_suspended": False} for s in (symbols or [])])
-
-def current(syms):
-    return [{"symbol": s, "price": 50.0, "open": 50.0} for s in (syms or [])]
-
-def order_volume(**kw): return "ORDER1"
-def order_cancel_all(): return 0
-def stop(): pass
-
-def run(filename=None, mode=None, token=None):
-    import __main__
-    __main__.init(None)
-'''
-
-
-@pytest.fixture()
-def fake_gm():
-    """把假 gm 包放到 live/_tmp/gm：子进程脚本所在目录是 sys.path[0]，import gm 命中它。"""
-    import shutil
-    from pathlib import Path
-    gm_dir = Path(__file__).resolve().parents[1] / "live" / "_tmp" / "gm"
-    gm_dir.mkdir(parents=True, exist_ok=True)
-    (gm_dir / "__init__.py").write_text("", encoding="utf-8")
-    (gm_dir / "api.py").write_text(_FAKE_GM_API, encoding="utf-8")
-    yield gm_dir
-    shutil.rmtree(gm_dir, ignore_errors=True)
-
-
-def test_status_and_pull_holdings_with_positions(fake_gm, monkeypatch, capsys, tmp_path):
-    """有持仓时 status / pull-holdings 必须 rc=0 且数值正确（评审 P0-1 回归锁）。
-
-    旧缺陷：生成的子进程模块里引用了 gm_bridge 自己的 from_gm_symbol——
-    空仓时循环体不执行看着全绿，有持仓必 NameError，实盘链路直接断。
+    旧行为 return 0：stage_trade 以为下单成功、钉钉推 ✅，实际一笔没发。
+    数据缺口必须交人工（退出码 2）。
     """
     import argparse
     mod = _load_script("gm_bridge.py")
-    monkeypatch.setattr(mod, "_load_account", lambda: ("faketok", "fakeacc"))
-
-    rc = mod.cmd_status(argparse.Namespace())
+    monkeypatch.setattr(mod, "_load_account", lambda: ("tok", "acc"))
+    monkeypatch.setattr(mod, "_fetch_execution_quotes", lambda codes, date: {})
+    orders = tmp_path / "orders.csv"
+    orders.write_text("symbol,side,shares,price,amount,note\n"
+                      "600000,buy,100,10.00,1000,x\n", encoding="utf-8")
+    rc = mod.cmd_place_orders(argparse.Namespace(
+        orders=str(orders), placement=None, dry_run=False,
+        order_type="limit", sells_first=True, max_orders=200))
     out = capsys.readouterr().out
-    assert rc == 0
-    assert "1,000,000" in out, f"nav 应可读，实际输出 {out!r}"
-    assert "000001" in out and "SZSE." not in out, f"符号应剥掉交易所前缀：{out!r}"
-
-    h = tmp_path / "h.csv"
-    rc = mod.cmd_pull_holdings(argparse.Namespace(out=str(h),
-                                                  cash_out=str(tmp_path / "c.txt")))
-    assert rc == 0
-    text = h.read_text(encoding="utf-8")
-    assert "000001" in text and "100" in text, f"持仓行应含 000001,100：{text!r}"
-    assert "SZSE." not in text
+    assert rc == 2, f"数据缺失导致全拦必须退出码 2，实际 {rc}；输出 {out!r}"
+    assert "数据没取到" in out
+    assert not (tmp_path / "placement.csv").exists(), "一笔没发就不能写 placement.csv"
 
 
-def test_pull_fills_directions_when_there_are_fills(fake_gm, monkeypatch, tmp_path):
-    """有成交时 pull-fills 必须 rc=0 且买卖方向判定正确（评审 P0-1 回归锁）。
+def test_gate_blocks_all_on_limit_up_exits_zero(tmp_path, monkeypatch, capsys):
+    """全部涨停买不进是正常业务结果，退出码仍是 0（否则每个一字板日都告警）。"""
+    import argparse
+    mod = _load_script("gm_bridge.py")
+    monkeypatch.setattr(mod, "_load_account", lambda: ("tok", "acc"))
+    quotes = {"600000": {"price": 11.0, "limit_up": 11.0,
+                         "limit_down": 9.0, "suspended": False}}
+    monkeypatch.setattr(mod, "_fetch_execution_quotes", lambda codes, date: quotes)
+    orders = tmp_path / "orders.csv"
+    orders.write_text("symbol,side,shares,price,amount,note\n"
+                      "600000,buy,100,11.00,1100,x\n", encoding="utf-8")
+    rc = mod.cmd_place_orders(argparse.Namespace(
+        orders=str(orders), placement=None, dry_run=False,
+        order_type="limit", sells_first=True, max_orders=200))
+    out = capsys.readouterr().out
+    assert rc == 0, f"触板属正常业务，应 0；实际 {rc}；输出 {out!r}"
+    assert "正常业务" in out
 
-    同一缺陷的第三处只在有成交时才执行到；方向判错会让对账把买卖记反。
+
+# ---------------------------------------------------------------- 看门狗认交易日历（评审 P1-C）
+def test_watchdog_skips_exchange_holiday():
+    """日历范围内的休市日不巡检。2026-10-02 是国庆假期（周五），旧代码报假警。"""
+    import datetime as dt
+    mod = _load_script("watchdog.py")
+    cal = ({"2026-09-30", "2026-10-08", "2026-10-09"}, "2026-10-09")
+    alerts, _, _ = mod.check(dt.datetime(2026, 10, 2, 10, 0), {}, {}, set(), cal)
+    assert alerts == [], f"国庆假期不该告警，实际 {alerts}"
+
+
+def test_watchdog_still_alerts_when_calendar_is_stale():
+    """日历没覆盖今天时必须照常巡检。
+
+    否则数据一停更（正是最该报警的时候），看门狗反而对所有工作日闭嘴。
+    """
+    import datetime as dt
+    mod = _load_script("watchdog.py")
+    cal = ({"2026-09-30", "2026-10-08"}, "2026-10-08")
+    alerts, _, _ = mod.check(dt.datetime(2026, 10, 27, 10, 0), {}, {}, set(), cal)
+    assert [a["kind"] for a in alerts] == ["missing", "missing"], \
+        f"日历只到 10-08，10-27 必须照常告警，实际 {alerts}"
+
+
+def test_watchdog_without_calendar_keeps_old_behavior():
+    """读不到日历时退回只按周末判（宁可误报不可漏报）。"""
+    import datetime as dt
+    mod = _load_script("watchdog.py")
+    alerts, _, _ = mod.check(dt.datetime(2026, 10, 27, 10, 0), {}, {}, set(), None)
+    assert len(alerts) == 2
+    alerts, _, _ = mod.check(dt.datetime(2026, 10, 31, 10, 0), {}, {}, set(), None)
+    assert alerts == []
+
+
+def test_trade_day_ok_treats_beyond_calendar_as_possible():
+    """超出日历范围 ≠ 休市，而是"日历还没更新"，必须放行。"""
+    mod = _load_script("watchdog.py")
+    cal = ({"2026-10-08"}, "2026-10-08")
+    assert mod._trade_day_ok("2026-10-08", cal) is True
+    assert mod._trade_day_ok("2026-10-05", cal) is False     # 日历内但没有该日 = 休市
+    assert mod._trade_day_ok("2026-10-27", cal) is True      # 超出日历范围
+    assert mod._trade_day_ok("2026-10-27", None) is True
+
+
+# ---------------------------------------------------------------- 闸门全拦的退出码（评审 P1-A）
+def test_gate_blocks_all_on_missing_data_exits_nonzero(tmp_path, monkeypatch, capsys):
+    """涨跌停价没取到时"全部拦下"不能当成功。
+
+    旧行为 return 0：stage_trade 以为下单成功、钉钉推 ✅，实际一笔没发。
+    数据缺口必须交人工（退出码 2）。
     """
     import argparse
     mod = _load_script("gm_bridge.py")
-    monkeypatch.setattr(mod, "_load_account", lambda: ("faketok", "fakeacc"))
+    monkeypatch.setattr(mod, "_load_account", lambda: ("tok", "acc"))
+    monkeypatch.setattr(mod, "_fetch_execution_quotes", lambda codes, date: {})
+    orders = tmp_path / "orders.csv"
+    orders.write_text("symbol,side,shares,price,amount,note\n"
+                      "600000,buy,100,10.00,1000,x\n", encoding="utf-8")
+    rc = mod.cmd_place_orders(argparse.Namespace(
+        orders=str(orders), placement=None, dry_run=False,
+        order_type="limit", sells_first=True, max_orders=200))
+    out = capsys.readouterr().out
+    assert rc == 2, f"数据缺失导致全拦必须退出码 2，实际 {rc}；输出 {out!r}"
+    assert "数据没取到" in out
+    assert not (tmp_path / "placement.csv").exists(), "一笔没发就不能写 placement.csv"
 
-    f = tmp_path / "f.csv"
-    rc = mod.cmd_pull_fills(argparse.Namespace(out=str(f)))
-    assert rc == 0
-    rows = [ln.split(",") for ln in f.read_text(encoding="utf-8").strip().splitlines()[1:]]
-    by = {r[0]: r for r in rows}
-    assert by["000001"][1] == "buy", f"side=1 应判 buy：{rows}"
-    assert by["600000"][1] == "sell", f"side=2 应判 sell：{rows}"
-    assert by["000001"][2] == "100" and by["600000"][2] == "200"
+
+def test_gate_blocks_all_on_limit_up_exits_zero(tmp_path, monkeypatch, capsys):
+    """全部涨停买不进是正常业务结果，退出码仍是 0（否则每个一字板日都告警）。"""
+    import argparse
+    mod = _load_script("gm_bridge.py")
+    monkeypatch.setattr(mod, "_load_account", lambda: ("tok", "acc"))
+    quotes = {"600000": {"price": 11.0, "limit_up": 11.0,
+                         "limit_down": 9.0, "suspended": False}}
+    monkeypatch.setattr(mod, "_fetch_execution_quotes", lambda codes, date: quotes)
+    orders = tmp_path / "orders.csv"
+    orders.write_text("symbol,side,shares,price,amount,note\n"
+                      "600000,buy,100,11.00,1100,x\n", encoding="utf-8")
+    rc = mod.cmd_place_orders(argparse.Namespace(
+        orders=str(orders), placement=None, dry_run=False,
+        order_type="limit", sells_first=True, max_orders=200))
+    out = capsys.readouterr().out
+    assert rc == 0, f"触板属正常业务，应 0；实际 {rc}；输出 {out!r}"
+    assert "正常业务" in out
 
 
-def test_real_place_orders_is_not_retried():
-    """真实下单不得包在 run_step_retry 里（评审 P0-2 回归锁）。
+# ---------------------------------------------------------------- 看门狗认交易日历（评审 P1-C）
+def test_watchdog_skips_exchange_holiday():
+    """日历范围内的休市日不巡检。2026-10-02 是国庆假期（周五），旧代码报假警。"""
+    import datetime as dt
+    mod = _load_script("watchdog.py")
+    cal = ({"2026-09-30", "2026-10-08", "2026-10-09"}, "2026-10-09")
+    alerts, _, _ = mod.check(dt.datetime(2026, 10, 2, 10, 0), {}, {}, set(), cal)
+    assert alerts == [], f"国庆假期不该告警，实际 {alerts}"
 
-    cmd_place_orders 部分委托异常时返回 2，重试会把 orders.csv 整批重发，
-    已成功的委托重复买入。演练（dry-run）幂等，保留 retry 无所谓。
+
+def test_watchdog_still_alerts_when_calendar_is_stale():
+    """日历没覆盖今天时必须照常巡检。
+
+    否则数据一停更（正是最该报警的时候），看门狗反而对所有工作日闭嘴。
     """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "scripts" / "live_auto.py").read_text(encoding="utf-8")
-    assert 'run_step_retry("place-orders"' not in src, "真实下单禁止重试（重复下单风险）"
-    assert 'run_step("place-orders"' in src
-    assert 'run_step_retry("place-orders(dry-run)"' in src, "演练幂等，可保留 retry"
+    import datetime as dt
+    mod = _load_script("watchdog.py")
+    cal = ({"2026-09-30", "2026-10-08"}, "2026-10-08")
+    alerts, _, _ = mod.check(dt.datetime(2026, 10, 27, 10, 0), {}, {}, set(), cal)
+    assert [a["kind"] for a in alerts] == ["missing", "missing"], \
+        f"日历只到 10-08，10-27 必须照常告警，实际 {alerts}"
+
+
+def test_watchdog_without_calendar_keeps_old_behavior():
+    """读不到日历时退回只按周末判（宁可误报不可漏报）。"""
+    import datetime as dt
+    mod = _load_script("watchdog.py")
+    alerts, _, _ = mod.check(dt.datetime(2026, 10, 27, 10, 0), {}, {}, set(), None)
+    assert len(alerts) == 2
+    alerts, _, _ = mod.check(dt.datetime(2026, 10, 31, 10, 0), {}, {}, set(), None)
+    assert alerts == []
+
+
+def test_trade_day_ok_treats_beyond_calendar_as_possible():
+    """超出日历范围 ≠ 休市，而是"日历还没更新"，必须放行。"""
+    mod = _load_script("watchdog.py")
+    cal = ({"2026-10-08"}, "2026-10-08")
+    assert mod._trade_day_ok("2026-10-08", cal) is True
+    assert mod._trade_day_ok("2026-10-05", cal) is False     # 日历内但没有该日 = 休市
+    assert mod._trade_day_ok("2026-10-27", cal) is True      # 超出日历范围
+    assert mod._trade_day_ok("2026-10-27", None) is True
