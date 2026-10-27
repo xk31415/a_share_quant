@@ -14,7 +14,7 @@
 
 ## 工作流程
 
-- 改代码后跑 `python -m pytest`（当前 388 passed），失败不许报完成；新测试先红后绿。
+- 改代码后跑 `python -m pytest`（当前 389 passed），失败不许报完成；新测试先红后绿。
 - 真实下单**非幂等**：禁止 `run_step_retry` 包裹（部分成功重试 = 重复买入）；只有幂等步骤
   （补数据/拉持仓/拉成交/演练下单）可重试。
 - 改口径后 grep 全文找旧数字；收尾动作是从文件第一行读到最后一行（表头、摘要、清单都要看）。
@@ -71,3 +71,9 @@
 - 仿真服务器：`8.134.172.15`，项目在 `C:\AppData\a_share_quant`，Python 3.12 单解释器
   （3.10/gmtrade 已卸载）；计划任务 `/tr` 必须写**绝对脚本路径**——schtasks 没有工作目录
   参数，相对路径在默认 cwd=System32 下直接退出码 2（2026-10-26/27 踩过）。
+  服务器是**精简副本**：没有 `tests/`、没装 pytest，验证靠 import 冒烟 + dry-run。
+- **代理软件会干扰到服务器的 SSH**：2026-10-27 晚 `Connection reset by peer`（ping 通、22 开、
+  握手完成后在认证阶段被切），退掉代理立即恢复。同类现象先怀疑代理，别急着查 sshd。
+- NightWatch 看门狗：源码 `D:\StudyDemo\csharp\NightWatch`，服务器 `C:\AppData\NightWatch`
+  （Windows 服务 `NightWatch`，HttpHeartbeat:5200，企业微信+钉钉双通道）。
+  2026-10-27 时 `FileHeartbeats` 是空的——实盘没被监控，这是"出问题没告警"的根因。

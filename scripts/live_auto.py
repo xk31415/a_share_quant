@@ -196,15 +196,19 @@ def today() -> str:
     return dt.date.today().isoformat()
 
 
-def find_recent_orders(cfg: dict, max_age_hours: float = 24.0) -> Path | None:
+def find_recent_orders(cfg: dict, max_age_hours: float = 24.0,
+                       out_dir: str | None = None) -> Path | None:
     """找最近写入的 orders.csv。
 
     `live_signal.py` 按**数据日**（as_of）落盘到 `live/<as_of>/orders.csv`，
     而自动化按**执行日**运行，两者常常不是同一天（周五数据、周一执行）。
     所以这里按修改时间找最近 24 小时内的那份，而不是硬拼日期。
+
+    ``out_dir`` 覆盖 cfg 里的目录：演练时信号写到 `live/_dryrun`，
+    取委托也得去那儿找，否则会翻到生产目录里的上一轮委托。
     """
     import time
-    root = ROOT / cfg["out_dir"]
+    root = ROOT / (out_dir or cfg["out_dir"])
     if not root.exists():
         return None
     candidates = sorted(root.glob("*/orders.csv"),
@@ -318,12 +322,16 @@ def stage_trade(cfg: dict, log, args) -> int:
 
     # 2) 算信号。--as-of 传【今天】，让季度判断用执行日的月份（R08 F-43）；
     #    数据不够新时 live_signal 自己会回滚到最近交易日。
+    #    演练写到 live/_dryrun/ 而不是 live/<date>/：否则演练产出的 orders.csv
+    #    会留在生产目录里，被下一轮的 find_recent_orders 当成真委托（PR #12 让
+    #    信号脚本的 --dry-run 不写盘，但演练又要过闸门、需要这份文件，只能隔离）。
+    sig_out = "live/_dryrun" if args.dry_run else cfg["out_dir"]
     strat = str(cfg.get("strategy", "equal_weight")).lower()
     if strat == "hype_watch":
         sig_cmd = [py, "scripts/live_signal_hype.py",
                    "--data-dir", cfg["data_dir"],
                    "--holdings", cfg["holdings"],
-                   "--out-dir", cfg["out_dir"],
+                   "--out-dir", sig_out,
                    "--as-of", date,
                    "--position", str(cfg["position"])]
         themes = cfg.get("themes")
@@ -333,7 +341,7 @@ def stage_trade(cfg: dict, log, args) -> int:
         sig_cmd = [py, "scripts/live_signal.py",
                    "--data-dir", cfg["data_dir"],
                    "--holdings", cfg["holdings"],
-                   "--out-dir", cfg["out_dir"],
+                   "--out-dir", sig_out,
                    "--sample", cfg["sample"],
                    "--as-of", date,
                    "--position", str(cfg["position"])]
@@ -346,7 +354,7 @@ def stage_trade(cfg: dict, log, args) -> int:
     if rc != 0:
         return rc
 
-    orders = find_recent_orders(cfg)
+    orders = find_recent_orders(cfg, out_dir=sig_out)
     if orders is None:
         print(f"\n最近 24 小时没有生成 orders.csv（非季度月只检查，或 --dry-run），不需下单。")
         return 0

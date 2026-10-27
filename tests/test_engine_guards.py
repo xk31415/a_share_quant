@@ -822,3 +822,30 @@ def test_all_zero_share_orders_writes_no_placement(tmp_path, monkeypatch, capsys
     assert rc == 0
     assert "股数全为 0" in capsys.readouterr().out
     assert not (tmp_path / "placement.csv").exists()
+
+
+# ---------------------------------------------------------------- 演练不能污染生产目录
+def test_dry_run_writes_signals_to_isolated_dir(tmp_path, monkeypatch):
+    """演练的委托必须落在 live/_dryrun，不能留在生产目录。
+
+    PR #12 让 live_signal_hype 的 --dry-run 不写盘，但 live_auto 从没把 --dry-run
+    传给信号脚本——演练照样写 live/<date>/orders.csv，下一轮 find_recent_orders
+    会把它当成真委托发出去。修法：演练写到隔离目录，仍能过闸门，生产目录零污染。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "scripts" / "live_auto.py").read_text(
+        encoding="utf-8")
+    assert 'sig_out = "live/_dryrun" if args.dry_run else cfg["out_dir"]' in src, \
+        "演练必须写到隔离目录"
+    assert "find_recent_orders(cfg, out_dir=sig_out)" in src, \
+        "取委托也要去隔离目录，否则会翻到生产目录的上一轮"
+
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    prod = tmp_path / "live" / "2026-10-27"
+    prod.mkdir(parents=True)
+    (prod / "orders.csv").write_text("symbol,side\n000001,buy\n", encoding="utf-8")
+
+    assert mod.find_recent_orders({"out_dir": "live"}) == prod / "orders.csv"
+    assert mod.find_recent_orders({"out_dir": "live"}, out_dir="live/_dryrun") is None, \
+        "隔离目录为空时必须返回 None，不能退回去读生产目录"

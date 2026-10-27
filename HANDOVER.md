@@ -23,7 +23,7 @@
 | 下单 | `gm` SDK 策略模式（`scripts/gm_bridge.py`）；执行日涨跌停闸门与回测 `execution.py` 同口径 |
 | 账户 | 掘金仿真 100 万；token 在服务器 `config/gm_account.yaml`（不入库） |
 | 通知 | 钉钉机器人（`config/notify.yaml`，不入库），阶段成败都推 |
-| 测试 | `python -m pytest` → **388 passed**，全绿才算改完 |
+| 测试 | `python -m pytest` → **389 passed**，全绿才算改完 |
 | 数字口径 | 唯一来源 `results/<EXP>/metrics.json`；引用任何数字前自己跑一遍核对 |
 
 **红线速记**（详见 `AGENTS.md`）：不用未来数据；不暴力调参；缺数据显式报错不放行；
@@ -65,7 +65,7 @@
 
 ### 2.1 前置检查（每次开始前）
 
-- [ ] `python -m pytest` → **388 passed**
+- [ ] `python -m pytest` → **389 passed**
 - [ ] `python scripts/data_manifest.py verify`：2020-2024 与 2015-2019 两份 `[ok]`
       （2025-2026 每日更新后不一致属正常）
 - [ ] 基线回测 `annualized_return = 0.0610828468971103`（命令见 `QUICKSTART.md` §1）
