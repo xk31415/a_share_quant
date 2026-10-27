@@ -48,13 +48,15 @@ class BacktestConfig:
     end_date: str
     rebalance_frequency: RebalanceFrequency = "M"
     initial_capital: float = 1_000_000.0
-    execution_price: str = "open"   # t+1 成交参考价列名
+    execution_price: str = "open"   # t+1 成交参考价列名（open 或 close；默认 open）
     benchmark: Optional[str] = None
     cash_buffer: float = 0.01       # 建仓时预留的现金比例（覆盖费用/滑点）
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.cash_buffer < 1.0:
             raise ValueError("cash_buffer must be in [0, 1)")
+        if self.execution_price not in ("open", "close"):
+            raise ValueError("execution_price must be 'open' or 'close'")
 
 
 @dataclass
@@ -92,10 +94,17 @@ def _target_signature(weights: Mapping[str, float]) -> tuple:
 
 
 def _on_demand_skip(weights: Mapping[str, float], state: PortfolioState,
-                    last_signature: Optional[tuple]) -> bool:
-    """目标与上次提交的一致，且当前持股名单已经是这批股票时，跳过下单。
+                    last_signature: Optional[tuple],
+                    last_shares: Optional[Mapping[str, int]] = None) -> bool:
+    """目标与上次提交的一致，且当前持股已经把上次的目标股数建满，才跳过下单。
 
-    持股名单还没跟上（买入失败、还没建仓）时不跳过，下一交易日继续调。
+    只比持股名单（旧版）会把**部分成交**当成"已建仓"：成交量上限截断、
+    现金不足按比例缩放都会留下缺口，此后名单一直是这批股票，缺口就永远不补
+    （2026-10-27 评审 P1-1 实测：A 目标 500 股、只成交 50 股时仍返回 True）。
+    因此再比一次股数：任一标的不满上次提交的目标股数就不跳过，次日继续调。
+
+    比的是**股数**不是市值权重——价格漂移不改股数，所以"漂移不调仓"的语义不变。
+    持股名单还没跟上（例如买入完全没成交）时也不跳过。
     """
     signature = _target_signature(weights)
     if last_signature is None or signature != last_signature:
@@ -103,7 +112,14 @@ def _on_demand_skip(weights: Mapping[str, float], state: PortfolioState,
     held = tuple(sorted(
         sym for sym, pos in state.positions.items() if pos.shares > 0))
     names = tuple(sym for sym, _ in signature)
-    return held == names
+    if held != names:
+        return False
+    for sym, want in dict(last_shares or {}).items():
+        pos = state.positions.get(sym)
+        have = int(pos.shares) if pos is not None else 0
+        if have < int(want):
+            return False        # 没建满：次日补，不跳过
+    return True
 
 
 class BacktestEngine:
@@ -296,13 +312,16 @@ class BacktestEngine:
             self.cost_model, lot_size=self.lot_size,
             enforce_limit=self.enforce_limit,
             enforce_suspension=self.enforce_suspension,
-            max_participation_rate=self.max_participation_rate)
+            max_participation_rate=self.max_participation_rate,
+            price_col=cfg.execution_price or "open")
 
         last_prices: dict[str, float] = {}
         last_k: dict[str, float] = {}
         pending_weights: Optional[dict[str, float]] = None
         # 日频按需：上次真正提交给执行层的目标签名。None 表示还没提交过。
         last_target_signature: Optional[tuple] = None
+        # 日频按需：上次提交时算出的目标股数。用来判断"建满了没有"，见 _on_demand_skip。
+        last_target_shares: Optional[dict[str, int]] = None
         # 未成交的卖单（股数），次日继续挂；这是 F-02 的修复：
         # 卖单被跌停/停牌拦下后不能就这么丢了，否则持仓会一直超配到下一个信号日。
         pending_sells: dict[str, int] = {}
@@ -383,9 +402,14 @@ class BacktestEngine:
                     target = {k: v for k, v in target.items()
                               if k not in forced_today}
                 if pending_weights is not None:
+                    intended: dict[str, int] = {}
                     orders = generate_orders(target, state, sizing_equity,
                                              ref_prices, self.lot_size,
-                                             cash_buffer=cfg.cash_buffer)
+                                             cash_buffer=cfg.cash_buffer,
+                                             target_shares=intended)
+                    # 记下这次的目标股数（含部分成交未建满的部分），次日据此补仓。
+                    if on_change:
+                        last_target_shares = dict(intended)
                 # 补挂上一日没卖掉的（目标里已没有的标的）。generate_orders 已对新目标外的
                 # 持仓全量清仓的，不能再补一张，否则第二张必然 0 股、虚增拦截计数。
                 already_selling = {o.symbol for o in orders if o.direction == "sell"}
@@ -458,6 +482,16 @@ class BacktestEngine:
                 hist = bars.loc[bars["trade_date"] <= d]
                 universe = self.universe_builder.get_universe(d)
                 warnings.extend(getattr(self.universe_builder, "warnings", []) or [])
+                # 可选钩子：账户级状态（例如回撤断路）只能在引擎里看到权益。
+                # 默认策略没有 observe_equity，不调用，输出与以前一致。
+                # 传入的是截至当日收盘、已经算完的权益，供下一交易日执行使用。
+                observe = getattr(self.strategy, "observe_equity", None)
+                if callable(observe):
+                    hist_eq = pd.Series(
+                        {pd.Timestamp(ts): float(val) for ts, val in equity_records},
+                        dtype="float64", name="equity")
+                    hist_eq.index.name = "trade_date"
+                    observe(d, hist_eq)
                 target = self.strategy.generate_target(d, hist, universe)
                 # 策略自己的缺数据告警（例如热点策略没有行业）要进报告，
                 # 不能只留在策略对象上——否则空仓看起来像主动看空。
@@ -474,8 +508,8 @@ class BacktestEngine:
                         f"未下单。明细见 universe_violations.csv。")
                 weights = build_target_weights(weights, self.portfolio_rules)
                 if on_change and _on_demand_skip(
-                        weights, state, last_target_signature):
-                    # 目标没变，当前持仓名单也已经是这批股票：不动仓。
+                        weights, state, last_target_signature, last_target_shares):
+                    # 目标没变、且上次的目标股数已经建满：不动仓。
                     pending_weights = None
                 else:
                     pending_weights = weights
@@ -483,6 +517,7 @@ class BacktestEngine:
                         last_target_signature = _target_signature(weights)
             prev_equity = equity
 
+        warnings.extend(list(getattr(self.strategy, "warnings", None) or []))
         warnings.extend(self.universe_builder.finalize_warnings())
 
         equity_curve = pd.Series(dict(equity_records), name="equity")

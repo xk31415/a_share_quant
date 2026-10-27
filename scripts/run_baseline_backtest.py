@@ -15,6 +15,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
+import pandas as pd
 import yaml
 
 from a_share_quant.backtest.costs import CostModel
@@ -40,7 +41,18 @@ from a_share_quant.research.experiments import (
 from a_share_quant.strategies.equal_weight import EqualWeightStrategy
 from a_share_quant.strategies.hotspot_dragonhead import (
     HotspotDragonhead,
+    looks_like_static_snapshot,
     static_industry_map,
+)
+from a_share_quant.strategies.hype_watch import (
+    HypeWatchParams,
+    HypeWatchStrategy,
+    PAPER_DISCLAIMER,
+    build_observations,
+    load_theme_map_csv,
+    load_watchlist_csv,
+    paper_summary,
+    runtime_overrides,
 )
 from a_share_quant.strategies.low_vol import LowVolatility
 from a_share_quant.strategies.momentum import TopNMomentum
@@ -55,6 +67,62 @@ DISCLAIMER = (
 )
 
 
+def _build_hype_watch(root: Path, args, settings: dict, provider, rules):
+    """装配观察池仿真。失败直接退出，不把缺基准/缺题材改成空仓继续跑。"""
+    try:
+        params = HypeWatchParams.from_mapping(settings.get("hype_watch"))
+        overrides = runtime_overrides(
+            params,
+            freq=args.freq,
+            execution_price=args.execution_price,
+            max_positions=args.max_positions,
+            industry_neutral=bool(args.industry_neutral))
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    def _resolve(raw):
+        if not raw:
+            return None
+        path = Path(raw)
+        return path if path.is_absolute() else root / path
+
+    watchlist = None
+    theme_map = None
+    if args.watchlist:
+        try:
+            watchlist = load_watchlist_csv(_resolve(args.watchlist))
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"晨报 CSV 读不了：{exc}") from exc
+    if args.themes:
+        try:
+            theme_map = load_theme_map_csv(_resolve(args.themes))
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"题材成员表读不了：{exc}") from exc
+
+    bench_code = str(args.benchmark or params.benchmark)
+    try:
+        benchmark = provider.get_benchmark(bench_code)
+    except Exception as exc:
+        raise SystemExit(f"读基准 {bench_code} 失败：{exc}") from exc
+    excluded = list(rules.excluded_symbols or [])
+    if "000300" not in {str(s) for s in excluded}:
+        excluded.append("000300")
+    try:
+        strategy = HypeWatchStrategy(
+            params=params,
+            watchlist=watchlist,
+            theme_map=theme_map,
+            benchmark=benchmark,
+            excluded_symbols=excluded)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    if overrides["rebalance_frequency"] != "D":
+        strategy.warnings.append(
+            "hype_watch: 本次调仓频率不是 D，冷静期按信号日计数，不等于交易日个数。")
+    print(PAPER_DISCLAIMER)
+    return strategy, params, overrides, bench_code
+
+
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     ap = argparse.ArgumentParser(description=__doc__,
@@ -67,7 +135,16 @@ def main() -> None:
     ap.add_argument("--freq", default=None, choices=["D", "W", "M"])
     ap.add_argument("--out", default="results")
     ap.add_argument("--strategy", default="equal_weight",
-                    choices=["equal_weight", "momentum", "low_vol", "hotspot"])
+                    choices=["equal_weight", "momentum", "low_vol",
+                             "hype_watch", "hotspot"])
+    ap.add_argument("--watchlist", default=None,
+                    help="晨报/观察池 CSV（trade_date,symbol,theme[，rank]）。"
+                         "只属于 --strategy hype_watch，paper / 观察仿真")
+    ap.add_argument("--themes", default=None,
+                    help="题材成员 CSV（symbol,theme,start_date[,end_date]）。"
+                         "只属于 --strategy hype_watch")
+    ap.add_argument("--execution-price", default=None, choices=["open", "close"],
+                    help="hype_watch：下一交易日撮合列。默认用 hype_watch.execution_price")
     ap.add_argument("--capital", type=float, default=None,
                     help="初始资金（默认取 settings.yaml，1,000,000）")
     ap.add_argument("--industry-neutral", action="store_true",
@@ -133,9 +210,19 @@ def main() -> None:
         print(f"[info] 行业中性选股：{len(ind_map)} 只标的，"
               f"{len(set(ind_map.values()))} 个行业")
 
+    if args.strategy != "hype_watch" and (args.watchlist or args.themes or args.execution_price):
+        raise SystemExit("--watchlist / --themes / --execution-price 只属于 --strategy hype_watch")
+    # hotspot 专用：bars.industry 看着像"静态分类回填"时置 True，进报告留痕。
+    hotspot_static_suspect = False
+    if args.strategy == "hype_watch" and args.industry_neutral:
+        raise SystemExit("hype_watch 不使用 --industry-neutral")
+
     max_pos = args.max_positions or pf.get("max_positions", 20)
     if args.industry_neutral and args.max_positions is None:
         max_pos = max(max_pos, 300)      # 行业中性持仓数由行业数决定，别被 50 截断
+    max_weight = pf.get("max_weight_per_stock", 0.10)
+    freq = args.freq or bt.get("rebalance_frequency", "M")
+    exec_price = bt.get("execution_price", "open") or "open"
 
     if args.strategy == "low_vol":
         strategy = LowVolatility(top_n=max_pos,
@@ -157,6 +244,14 @@ def main() -> None:
                                 capacity_aum=args.capacity_aum,
                                 industry_map=ind_map,
                                 k_per_industry=args.k_per_industry)
+    elif args.strategy == "hype_watch":
+        strategy, hype_params, hype_over, hype_bench = _build_hype_watch(
+            root, args, settings, provider, rules)
+        freq = hype_over["rebalance_frequency"]
+        exec_price = hype_over["execution_price"]
+        max_pos = hype_over["max_positions"]
+        max_weight = hype_over["max_weight_per_stock"]
+        cost_model = hype_params.cost_model()
     elif args.strategy == "hotspot":
         # 研究规则，不接入 live_auto。行业优先在策略内部读 bars.industry；
         # 这里只把 instruments 的静态分类当作退路。
@@ -175,6 +270,11 @@ def main() -> None:
                   "信号日会返回空组合（缺数据，不是看空）。"
                   "需要 bars.industry 逐日快照；"
                   "scripts/fetch_industry.py 只能补当前静态分类，分组含前视。")
+        if bars_have_industry and looks_like_static_snapshot(bars_all):
+            hotspot_static_suspect = True
+            print("[warn] hotspot: bars.industry 每只股票只有一个标签——可能是把当前"
+                  "静态分类回填成了假逐日快照（分组含前视）。真快照在多年窗口里总该"
+                  "出现行业变更；确认来源之前，这次回测只算验证机制，收益不进研究结论。")
         if hd.get("rebalance", "daily_on_change") != "daily_on_change":
             raise SystemExit(
                 "hotspot_dragonhead.rebalance 只能是 daily_on_change"
@@ -200,13 +300,15 @@ def main() -> None:
                                        seed=int(args.seed),
                                        liquidity_pct=args.liquidity,
                                        capacity_aum=args.capacity_aum)
-    cost_model = CostModel(
-        commission_rate=cost_cfg.get("commission_rate", 0.00025),
-        commission_min=cost_cfg.get("commission_min", 5.0),
-        stamp_duty_rate=cost_cfg.get("stamp_duty_rate", 0.0005),
-        slippage_rate=cost_cfg.get("slippage_rate", 0.0005))
-    # 热点策略自己声明日频按需，不沿用 backtest.rebalance_frequency 的月频。
-    freq = args.freq or bt.get("rebalance_frequency", "M")
+    if args.strategy != "hype_watch":
+        hype_params = None
+        hype_bench = None
+        cost_model = CostModel(
+            commission_rate=cost_cfg.get("commission_rate", 0.00025),
+            commission_min=cost_cfg.get("commission_min", 5.0),
+            stamp_duty_rate=cost_cfg.get("stamp_duty_rate", 0.0005),
+            slippage_rate=cost_cfg.get("slippage_rate", 0.0005))
+    # 声明「日频按需」的策略不沿用 backtest.rebalance_frequency 的月频。
     if getattr(strategy, "rebalance_on_change", False):
         freq = "D"
     config = BacktestConfig(
@@ -214,7 +316,8 @@ def main() -> None:
         end_date=args.end or bt.get("end_date", "2023-12-29"),
         rebalance_frequency=freq,
         initial_capital=float(args.capital or bt.get("initial_capital", 1_000_000)),
-        benchmark=args.benchmark or bt.get("benchmark"),
+        benchmark=hype_bench or args.benchmark or bt.get("benchmark"),
+        execution_price=exec_price,
         cash_buffer=float(pf.get("cash_buffer", 0.01)))
 
     engine = BacktestEngine(
@@ -223,7 +326,7 @@ def main() -> None:
         universe_builder=UniverseBuilder(provider, rules),
         portfolio_rules=PortfolioRules(
             max_positions=max_pos,
-            max_weight_per_stock=pf.get("max_weight_per_stock", 0.10)),
+            max_weight_per_stock=max_weight),
         cost_model=cost_model,
         config=config,
         lot_size=mr.get("lot_size", 100),
@@ -288,6 +391,29 @@ def main() -> None:
     if strategy.name == "hotspot_dragonhead":
         # 与上面的归因来源分开：归因可以用静态行业，选股信号的来源要单独留痕。
         report["hotspot_industry_source"] = strategy.industry_source
+        report["hotspot_industry_static_suspect"] = bool(hotspot_static_suspect)
+    summary_paper = None
+    if isinstance(strategy, HypeWatchStrategy):
+        sig = pd.DataFrame(strategy.signal_log)
+        sig.to_csv(out_dir / "signal_log.csv", index=False)
+        cal = provider.get_calendar().slice(config.start_date, config.end_date)
+        trade_dates = pd.to_datetime(bars_all["trade_date"])
+        window_bars = bars_all.loc[
+            (trade_dates >= pd.Timestamp(config.start_date))
+            & (trade_dates <= pd.Timestamp(config.end_date))]
+        try:
+            obs = build_observations(
+                sig, window_bars, strategy.params.observe_horizons, cal)
+        except ValueError as exc:
+            raise SystemExit(f"观察窗口算不了：{exc}") from exc
+        obs.to_csv(out_dir / "observations.csv", index=False)
+        summary_paper = paper_summary(result, sig, strategy.params)
+        with open(out_dir / "paper_summary.json", "w", encoding="utf-8") as f:
+            json.dump(summary_paper, f, ensure_ascii=False, indent=2, default=str)
+        report["paper_only"] = True
+        report["disclaimer"] = PAPER_DISCLAIMER
+        report["research_claim"] = summary_paper["research_claim"]
+        report["hype_watch"] = summary_paper
     with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2, default=str)
     with open(out_dir / "cost_contribution.json", "w", encoding="utf-8") as f:
@@ -298,31 +424,6 @@ def main() -> None:
     except Exception as exc:  # 图形环境异常不阻断回测
         print(f"[warn] plot failed: {exc}")
 
-    parameters = {
-        "max_positions": getattr(strategy, "max_positions",
-                                 getattr(strategy, "top_n", None)),
-        "strategy": getattr(strategy, "name", type(strategy).__name__),
-        "window": getattr(strategy, "window", None),
-        "skip": getattr(strategy, "skip", None),
-        "reverse": getattr(strategy, "reverse", None),
-        "seed": getattr(strategy, "seed", None),
-        "liquidity_pct": getattr(strategy, "liquidity_pct", None),
-        "capacity_aum": getattr(strategy, "capacity_aum", None),
-        "initial_capital": config.initial_capital,
-        "industry_neutral": bool(args.industry_neutral),
-        "k_per_industry": args.k_per_industry if args.industry_neutral else None,
-        "max_weight_per_stock": pf.get("max_weight_per_stock", 0.10),
-        "execution_price": config.execution_price,
-        "lot_size": mr.get("lot_size", 100),
-    }
-    # 只在热点策略上追加，避免其它策略的实验参数键集合变掉。
-    if strategy.name == "hotspot_dragonhead":
-        parameters["top_k"] = strategy.top_k
-        parameters["top_m"] = strategy.top_m
-        parameters["min_industry_members"] = strategy.min_industry_members
-        parameters["amount_window"] = strategy.amount_window
-        parameters["industry_source"] = strategy.industry_source
-        parameters["rebalance_on_change"] = True
     record = ExperimentRecord(
         experiment_id=exp_id,
         strategy_name=strategy.name,
@@ -333,20 +434,54 @@ def main() -> None:
         rebalance_frequency=config.rebalance_frequency,
         transaction_cost=asdict(cost_model),
         slippage=cost_model.slippage_rate,
-        parameters=parameters,
+        parameters={"max_positions": getattr(strategy, "max_positions",
+                                              getattr(strategy, "top_n", None)),
+                    "strategy": getattr(strategy, "name", type(strategy).__name__),
+                    "window": getattr(strategy, "window", None),
+                    "skip": getattr(strategy, "skip", None),
+                    "reverse": getattr(strategy, "reverse", None),
+                    "seed": getattr(strategy, "seed", None),
+                    "liquidity_pct": getattr(strategy, "liquidity_pct", None),
+                    "capacity_aum": getattr(strategy, "capacity_aum", None),
+                    "initial_capital": config.initial_capital,
+                    "industry_neutral": bool(args.industry_neutral),
+                    "k_per_industry": args.k_per_industry if args.industry_neutral else None,
+                    "max_weight_per_stock": max_weight,
+                    "execution_price": config.execution_price,
+                    "lot_size": mr.get("lot_size", 100),
+                    "paper_only": True if hype_params is not None else None,
+                    "pool_size": None if hype_params is None else hype_params.pool_size,
+                    "max_themes": None if hype_params is None else hype_params.max_themes,
+                    "min_limitup_count": None if hype_params is None else hype_params.min_limitup_count,
+                    "min_theme_excess": None if hype_params is None else hype_params.min_theme_excess,
+                    "position_mode": None if hype_params is None else hype_params.position_mode,
+                    "gross_exposure": None if hype_params is None else hype_params.gross_exposure,
+                    "hotspot_top_k": (strategy.top_k
+                                      if strategy.name == "hotspot_dragonhead" else None),
+                    "hotspot_top_m": (strategy.top_m
+                                      if strategy.name == "hotspot_dragonhead" else None),
+                    "hotspot_amount_window": (strategy.amount_window
+                                              if strategy.name == "hotspot_dragonhead" else None),
+                    "hotspot_min_industry_members": (
+                        strategy.min_industry_members
+                        if strategy.name == "hotspot_dragonhead" else None),
+                    "hotspot_industry_source": (strategy.industry_source
+                                                if strategy.name == "hotspot_dragonhead" else None),
+                    "rebalance_on_change": bool(
+                        getattr(strategy, "rebalance_on_change", False))},
         benchmark=config.benchmark,
         result_path=str(out_dir),
         git_commit=git_commit(root),
         validation_warnings=list(all_warnings),
         industry_source=industry_source or "none",
-        notes=("synthetic random-walk data — framework smoke test only, "
-               "NOT real market data" if "synthetic" in str(data_dir).lower() else ""))
+        notes=(
+            PAPER_DISCLAIMER if hype_params is not None else
+            ("synthetic random-walk data — framework smoke test only, "
+             "NOT real market data" if "synthetic" in str(data_dir).lower() else "")))
     save_experiment(record, root / "experiments")
 
     # ---- 汇报 ----
     print(f"\n[experiment] {exp_id}")
-    if strategy.name == "hotspot_dragonhead":
-        print(f"[info] hotspot industry source: {strategy.industry_source}")
     for k, v in summary.items():
         if isinstance(v, float):
             print(f"  {k:32s} {v:,.6f}")
@@ -363,6 +498,15 @@ def main() -> None:
         for col in expo.columns:
             print(f"  {col:32s} {expo[col].mean():,.6f}")
     print(f"\n[result files] {out_dir}")
+    if summary_paper is not None:
+        print("\n[paper / 观察仿真]")
+        print(f"  {'final_equity':32s} {summary_paper['final_equity']:,.6f}")
+        print(f"  {'maximum_drawdown':32s} {summary_paper['maximum_drawdown']:,.6f}")
+        print(f"  {'n_rebalances':32s} {summary_paper['n_rebalances']}")
+        print(f"  {'total_costs':32s} {summary_paper['total_costs']:,.6f}")
+        print(f"  {'one_way_friction':32s} {summary_paper['one_way_friction']:.6f}")
+        print("  以上数字只描述这次纸面路径，不是研究结论。")
+        print(PAPER_DISCLAIMER)
     print(DISCLAIMER)
 
 

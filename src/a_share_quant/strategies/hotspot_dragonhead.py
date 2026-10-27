@@ -14,7 +14,8 @@
    按「更热的行业优先、行业内名次优先」截断，不用代码字典序。
    单票 10% 上限不在这里做，交给 ``PortfolioRules``：不足 10 只时超出部分留成现金。
 4. **调仓**：日频按需（``rebalance_on_change``）。每个交易日收盘重算目标；
-   目标名单和权重与上次提交的一致，且当前持股名单已经是这批股票，则不下单。
+   目标名单和权重与上次提交的一致，且持股数已达到上次提交的目标股数，则不下单；
+   部分成交（成交量上限截断、现金缩放）留下的缺口次日继续补。
    不读 ``settings.yaml`` 里其它策略用的月频 ``rebalance_frequency``。
    价格漂移把市值权重带离等权时也不调仓。
 
@@ -93,6 +94,29 @@ def static_industry_map(instruments: pd.DataFrame) -> Optional[dict[str, str]]:
             continue
         out[str(sym)] = label
     return out or None
+
+
+def looks_like_static_snapshot(bars: pd.DataFrame) -> bool:
+    """判断 ``bars.industry`` 是否像「当前静态分类回填到每一行」的假逐日快照。
+
+    背景：仓库里唯一能把行业写进数据的工具 `scripts/fetch_industry.py` 写的是
+    **当前**分类。如果有人把它 join 到每一根 K 线上当 ``bars.industry``，策略会
+    当成逐日快照用（``industry_source="bars"``），分组含前视却没有任何告警。
+
+    判据：真实的逐日快照在多年窗口里总会出现行业变更；如果**每只股票都只有
+    一个标签**，既可能是窗口太短的真快照，也可能是静态回填。分不清时按
+    「可能静态」处理——告警方向保守，宁可多报一次，不静默放行。
+    """
+    if bars is None or bars.empty or "industry" not in bars.columns:
+        return False
+    sub = bars.loc[:, ["symbol", "industry"]].copy()
+    sub["industry"] = sub["industry"].map(_clean_industry_label)
+    sub = sub.dropna(subset=["industry"])
+    if sub.empty:
+        return False
+    sub["symbol"] = sub["symbol"].astype(str)
+    per_symbol = sub.groupby("symbol")["industry"].nunique()
+    return bool(len(per_symbol)) and bool((per_symbol <= 1).all())
 
 
 class HotspotDragonhead(Strategy):

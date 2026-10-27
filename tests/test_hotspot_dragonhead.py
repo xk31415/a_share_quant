@@ -512,3 +512,90 @@ def test_daily_on_change_trades_when_the_leader_changes():
     day7 = result.trades[(result.trades["trade_date"] == dates[7])
                          & (result.trades["shares"] > 0)]
     assert set(zip(day7["symbol"], day7["direction"])) == {("AA", "sell"), ("BB", "buy")}
+
+
+# ---------------------------------------------------------------- 评审 P1-1 / P1-2 回归锁
+def _pos(shares: int):
+    """只给 _on_demand_skip 读的哑持仓对象（它只看 shares）。"""
+    return type("P", (), {"shares": shares, "available_shares": shares})()
+
+
+def test_on_demand_skip_requires_full_target_shares():
+    """部分成交不能当成"已建仓"：股数没到上次的目标就继续调。
+
+    2026-10-27 评审 P1-1 实测：旧版只比持股名单，A 目标 500 股、只成交 50 股
+    （成交量上限截断）时仍返回 True，名单此后一直不变 → 缺口永远不补。
+    """
+    from a_share_quant.backtest.engine import _on_demand_skip
+    from a_share_quant.backtest.positions import PortfolioState
+
+    weights = {"A": 0.5, "B": 0.5}
+    sig = (("A", 0.5), ("B", 0.5))
+    state = PortfolioState(1_000_000.0)
+    state.positions["A"] = _pos(50)          # 目标 500，只成交 50
+    state.positions["B"] = _pos(500)
+
+    assert _on_demand_skip(weights, state, sig, {"A": 500, "B": 500}) is False, \
+        "没建满必须继续调，否则缺口永不补"
+    state.positions["A"] = _pos(500)
+    assert _on_demand_skip(weights, state, sig, {"A": 500, "B": 500}) is True, \
+        "建满了才允许跳过"
+    # 不传 last_shares 时退化为旧行为（只比名单），向后兼容
+    state.positions["A"] = _pos(50)
+    assert _on_demand_skip(weights, state, sig) is True
+
+
+def test_daily_on_change_tops_up_after_partial_fill():
+    """成交量上限把首日买单截断后，后续交易日要接着补到目标股数。
+
+    参与率 10%、AA 每天只有 1000 股成交量 → 每天最多买 100 股；目标 500 股
+    必须跨多个交易日补满。修复前只在第 1 天成交 100 股，此后永久低配。
+    """
+    dates = pd.bdate_range("2024-05-06", periods=8)
+    specs = [("AA", "HOT", 0.0, 1.0e7), ("BB", "HOT", 0.0, 1.0e7)]
+    bars = _growth_bars(dates, specs)
+    bars.loc[bars["symbol"] == "AA", "volume"] = 1000.0    # 10% 参与率 → 100 股/天
+    provider = make_provider(dates, ["AA", "BB"], bars=bars)
+    strat = HotspotDragonhead(top_k=1, top_m=2, window=2, amount_window=2,
+                              min_industry_members=2)
+    engine = BacktestEngine(
+        provider=provider,
+        strategy=strat,
+        universe_builder=UniverseBuilder(provider, UniverseRules(min_list_days=0)),
+        portfolio_rules=PortfolioRules(max_positions=10, max_weight_per_stock=0.60),
+        cost_model=CostModel(slippage_rate=0.0, commission_rate=0.0,
+                             commission_min=0.0, stamp_duty_rate=0.0),
+        config=BacktestConfig(
+            start_date=str(pd.Timestamp(dates[0]).date()),
+            end_date=str(pd.Timestamp(dates[-1]).date()),
+            rebalance_frequency="M", initial_capital=10_000.0, cash_buffer=0.0),
+        lot_size=100, enforce_limit=True, enforce_suspension=True,
+        max_participation_rate=0.1,
+    )
+    result = engine.run()
+    aa = result.trades[(result.trades["symbol"] == "AA")
+                       & (result.trades["direction"] == "buy")
+                       & (result.trades["shares"] > 0)]
+    assert len(aa) >= 2, f"首日被截断后必须继续补，实际只在 {len(aa)} 天成交"
+    assert int(aa["shares"].sum()) >= 500, f"AA 应补到目标 500 股，实际 {int(aa['shares'].sum())}"
+
+
+def test_looks_like_static_snapshot_flags_backfilled_industry():
+    """每只股票只有一个行业标签 = 可能是静态分类回填的假快照（评审 P1-2）。
+
+    仓库里唯一写行业的工具 fetch_industry.py 写的是**当前**分类；把它 join 到
+    每根 K 线上会被当成逐日快照用，分组含前视却没有告警。
+    """
+    from a_share_quant.strategies.hotspot_dragonhead import looks_like_static_snapshot
+
+    dates = pd.bdate_range("2024-01-02", periods=4)
+    rows = [{"trade_date": d, "symbol": s, "industry": "BANK"}
+            for d in dates for s in ("AA", "BB")]
+    df = pd.DataFrame(rows)
+    assert looks_like_static_snapshot(df) is True, "全表单一标签应判为可疑"
+
+    df.loc[(df["symbol"] == "AA") & (df["trade_date"] == dates[-1]), "industry"] = "TECH"
+    assert looks_like_static_snapshot(df) is False, "出现过行业变更就不该判为静态"
+
+    assert looks_like_static_snapshot(pd.DataFrame({"symbol": ["AA"]})) is False, \
+        "没有 industry 列时不判"

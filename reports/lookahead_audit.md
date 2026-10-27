@@ -38,6 +38,7 @@
 | 行业归因不用未来分类 | `industry_exposure` 支持逐日快照（`merge_asof` 向后取值），退回静态分类时显式告警 | `test_metrics.py::test_industry_exposure_historical_snapshot_no_lookahead` |
 | 数据层幸存者偏差 | `validate_dataset` 内置 `check_survivorship_bias`：全表无退市股、或行情中途消失却未标退市时告警 | `test_data.py::test_survivorship_sentinel_*` |
 | ST 只取当日截面 | gm 源 `_attach_st_snapshots` 用 `get_symbols(trade_date)` 截面 + 向后填充，不用 `sec_name` | `test_dataset_build.py::test_gm_is_st_comes_from_dated_snapshot_not_sec_name` |
+| 观察池信号不读 T0 之后 | `generate_target` 把行情截到 as_of；题材成员要 `start_date <= as_of` 且未结束；晨报只取当日行；断路权益丢掉 as_of 之后的点。T+1/T+3/T+5 只在回测结束后计算 | `tests/test_hype_watch.py`（`test_future_prices_and_future_theme_do_not_change_todays_weights`、`test_theme_map_respects_start_and_end_dates`、`test_circuit_breaker_trips_at_minus_8_percent_and_ignores_future_equity`） |
 
 **不是未来函数、不要误改**：同一截面内跨个股标准化；用 t 日收盘价算信号（t+1 成交）；
 基准与回撤曲线只在报告层使用。
@@ -54,6 +55,7 @@
 | 4 | `turnover/costs` 索引是成交日 | 低 | 与信号日序列对齐时会错位一格 |
 | 5 | 停牌持仓按最后已知价估值；退市日按最后已知价强平 | 中 | 平滑停牌期风险；退市整理期真实价格通常更低，终值偏乐观 |
 | 6 | 已发布退市风险警示的股票在退市日前仍可投资 | 低 | 需要当时已公告的警示数据，未引入 |
+| 7 | 观察窗口与静态题材 | 低 | `build_observations` 用 T+1/T+3/T+5 收盘，只在回测结束后写文件，不进目标权重。`bars.industry` 当题材会告警；静态分类有前视（README 限制第 5、30 条）。缺 `start_date` 的题材表直接报错 |
 
 ---
 

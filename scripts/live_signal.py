@@ -125,11 +125,15 @@ def _compute_tradeability(bars: pd.DataFrame,
     ``build_plan`` 对 ``tradeable`` 的用法有两处：已持仓不在其中 → 冻结；样本入选者不在其中
     → 目标 0 股。所以它必须同时满足"持仓能卖"和"新票能买"，按是否持有分开判：
       * ``tradeable = has_bar − suspended − (limit_down ∩ held)``：只有**已持有**的跌停股冻结
-        （次日大概率卖不出，按原股数占仓位）；未持有的跌停股可买（卖难买易，回测
-        `execution.py` 也只在卖出时拦 `limit_down`），必须能分到股数，否则占着样本名额却 0 股。
-      * ``investable = universe ∩ (has_bar − suspended − (limit_up − held))``：未持有的涨停股
-        不新开仓追涨停；**已持有**的涨停股留在样本里，不能因为当日涨停被踢出样本、清仓。
-      * 这是用 t 日收盘对 t+1 开盘的近似；回测引擎按 t+1 开盘是否触板判定，两者会有个别分歧。
+        （次日大概率卖不出，按原股数占仓位——否则规划会把"卖不掉的持仓"当成已回笼现金，
+        买单超出可用资金）。未持有的跌停股可买（卖难买易），必须能分到股数，
+        否则占着样本名额却 0 股。
+      * ``investable = universe ∩ (has_bar − suspended)``：涨停股**照常入选**。
+        历史版本把未持有的涨停股剔出样本（"不追涨停"），那是用 t 日收盘对 t+1 开盘的
+        近似；对"专买涨停股"的观察池策略等于永远买不进（实测 3/3 被
+        blocked:limit_up）。追不追由**下单时**的执行日闸门判
+        （`gm_bridge.place-orders`，口径与 `backtest/execution.py` 一致），
+        信号层只出意图。
       * ``status`` 新鲜度守卫：停牌的权威来源是 `status.parquet`（`bars.is_suspended` 恒为
         False）。``status`` 缺失/为空，或不含 `as_of` 当日记录，都显式打印 `[warn]`，不静默放行。
     """
@@ -157,22 +161,22 @@ def _compute_tradeability(bars: pd.DataFrame,
             suspended |= {str(s) for s, v in zip(st_today["symbol"], st_today["is_suspended"])
                           if pd.notna(v) and bool(v)}
 
+    # 已持有的跌停股冻结：t 日收盘跌停 → t+1 大概率卖不出。用收盘价判只对
+    # "要不要继续持有"这个规划问题有效，且方向保守（多持一天）；最终卖不卖得掉
+    # 由执行日闸门说了算。
     limit_down_syms: set[str] = set()
-    limit_up_syms: set[str] = set()
-    if not today.empty and {"close", "limit_up", "limit_down"}.issubset(today.columns):
+    if not today.empty and {"close", "limit_down"}.issubset(today.columns):
         exempt = (today["limit_exempt"].fillna(False).astype(bool)
                   if "limit_exempt" in today.columns
                   else pd.Series(False, index=today.index))
         c = pd.to_numeric(today["close"], errors="coerce")
-        lu = pd.to_numeric(today["limit_up"], errors="coerce")
         ld = pd.to_numeric(today["limit_down"], errors="coerce")
         is_ld = (~exempt) & ld.notna() & c.notna() & (c <= ld + 1e-4)
-        is_lu = (~exempt) & lu.notna() & c.notna() & (c >= lu - 1e-4)
         limit_down_syms = {str(s) for s in today.loc[is_ld, "symbol"]}
-        limit_up_syms = {str(s) for s in today.loc[is_lu, "symbol"]}
 
     tradeable = has_bar - suspended - (limit_down_syms & held_set)
-    selectable = has_bar - suspended - (limit_up_syms - held_set)
+    # investable 不扣冻结：已持有的跌停股如果还在样本里，不能因此被踢出样本清仓
+    selectable = has_bar - suspended
     investable = [str(s) for s in universe if str(s) in selectable]
     return tradeable, investable
 

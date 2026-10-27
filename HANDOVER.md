@@ -1,7 +1,37 @@
 # 交付文档（HANDOVER）
 
-> 接手本项目第一个读的文件。更新日期：2026-10-23。
+> 接手本项目第一个读的文件。更新日期：2026-10-27。
 > 阅读顺序：本文 → `AGENTS.md`（AI 接手时）→ `README.md` → `QUICKSTART.md` → `reports/research.md`。
+
+---
+
+## 0. 快速上手（新会话 / 接手 AI 先看这节）
+
+**一句话**：A 股量化研究 + 仿真执行链路。交付的是「可进入 paper trading 的系统」，
+不是一个能赚钱的策略（结论见 §1）。
+
+**动手前必读顺序**：`AGENTS.md`（硬规则与真实踩过的坑，最重要）→ 本文 §1 / §6 / §7
+→ `README.md` 第 12 节 32 条已知限制 → `QUICKSTART.md`（常用命令）。
+审查/修复类任务另有开工指令文档时，以它的 checklist 为准。
+
+**系统现状**（仿真自动化已部署，按交易日自动运行）：
+
+| 组件 | 状态 |
+|---|---|
+| 定时任务 | Windows 计划任务三段：08:30 补数据 → 09:15 信号+下单 → 15:35 取成交对账 |
+| 策略 | `hype_watch` 观察池（3 只 / 半仓 / 日频）；`config/live.yaml` 的 `strategy` 可切 `equal_weight` |
+| 下单 | `gm` SDK 策略模式（`scripts/gm_bridge.py`）；执行日涨跌停闸门与回测 `execution.py` 同口径 |
+| 账户 | 掘金仿真 100 万；token 在服务器 `config/gm_account.yaml`（不入库） |
+| 通知 | 钉钉机器人（`config/notify.yaml`，不入库），阶段成败都推 |
+| 测试 | `python -m pytest` → **374 passed**，全绿才算改完 |
+| 数字口径 | 唯一来源 `results/<EXP>/metrics.json`；引用任何数字前自己跑一遍核对 |
+
+**红线速记**（详见 `AGENTS.md`）：不用未来数据；不暴力调参；缺数据显式报错不放行；
+行情数据不入库；改口径后 grep 全文找旧数字；commit 消息中文、不 `git push --force`。
+
+**日常入口**：看当天运行 → `live/logs/<日期>.log`；看账户 → `scripts/gm_bridge.py status`；
+停自动化 → `deploy\register_tasks.ps1 -Remove`。接手后先核对最近一个交易日的
+日志、钉钉推送与 `fills/<日期>.csv`（与掘金终端成交一致才算链路正常）。
 
 ---
 
@@ -27,7 +57,7 @@
 
 ### 2.1 前置检查（每次开始前）
 
-- [ ] `python -m pytest` → **322 passed**
+- [ ] `python -m pytest` → **374 passed**
 - [ ] `python scripts/data_manifest.py verify`：2020-2024 与 2015-2019 两份 `[ok]`
       （2025-2026 每日更新后不一致属正常）
 - [ ] 基线回测 `annualized_return = 0.0610828468971103`（命令见 `QUICKSTART.md` §1）
@@ -114,7 +144,7 @@ gm `sec_name` 判 ST 的未来函数（已撤回）、基准额外日期计数�
 
 | 文件 | 作用 |
 |---|---|
-| `README.md` | 工程说明 + **29 条已知限制**（编号被代码注释引用） |
+| `README.md` | 工程说明 + **32 条已知限制**（编号被代码注释引用） |
 | `QUICKSTART.md` | 操作手册：回测、数据、实盘每日流程、对账、退出码、排错 |
 | `AGENTS.md` | AI 行为约束 |
 | `reports/research.md` | 研究结论、实盘门槛与判定、实盘方案的依据 |

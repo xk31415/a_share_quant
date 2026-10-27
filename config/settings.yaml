@@ -6,7 +6,7 @@
 backtest:
   start_date: "2018-01-01"     # 回测开始日（会被实际数据覆盖范围裁剪）
   end_date: "2023-12-31"       # 回测结束日
-  benchmark: "000300"          # 基准：沪深300（缺失时不对比）
+  benchmark: "000852"          # 基准：沪深300（缺失时不对比）
                                # 评估等权策略时只跟指数比不够——同口径下
                                # "全宇宙等权"月频是 9.84%/年（2020-2024），任何等权
                                # 策略打不过它就等于没做选择。日频口径 8.72% 含再平衡
@@ -39,6 +39,40 @@ market_rules:
 
 # 数据目录由命令行 --data-dir 指定（默认 data/interim/synthetic）。
 # 接入真实数据：--data-dir data/processed
+
+# ---------------------------------------------------------------------
+# 炒作苗头 + 观察池（paper / 观察仿真）
+# 只给 --strategy hype_watch 用。不接入 live_signal / live_auto。
+# 参数是先验，不按收益搜索。没有已验证收益，不要写进研究判定。
+# 说明见 reports/hype_watch.md。
+# ---------------------------------------------------------------------
+hype_watch:
+  paper_only: true
+  input_mode: auto          # auto：有 --watchlist 走晨报，否则纯规则；也可写 rules / csv
+  pool_size: 3              # 观察池只数（1..5）
+  max_themes: 3             # 主线题材条数（1..3）
+  min_limitup_count: 3      # 题材内收盘涨停家数门槛（主板+创业板、非 ST、非停牌）
+  min_theme_excess: 0.01    # 题材等权日收益 − 基准日收益；null 表示不设这道门槛
+  min_theme_members: 3      # 能算出后复权日收益的成分至少这么多，否则不触发
+  observe_horizons: [1, 3, 5]  # 事后观察窗口（交易日），不参与目标权重
+  position_mode: equal      # equal=入选标的平分 gross_exposure；fixed=每只 fixed_weight
+  gross_exposure: 1.0
+  fixed_weight: 0.20
+  execution_price: open     # 信号日收盘决定，下一交易日按这一列撮合（open 或 close）
+  rebalance_frequency: D    # 冷静期按信号日计数；不是 D 时 N 日不等于 N 个交易日
+  benchmark: "000852"
+  limitup_abs_tol: 0.0001   # close + tol >= limit_up 视为涨停（原始价，单位元）
+  csv_require_trigger: true # false = 只回放晨报名单，涨停家数与超额门槛不生效
+  circuit_breaker:
+    enabled: true
+    lookback: 20            # 滚动交易日峰值，不是从回测起点起的历史高点
+    max_drawdown: -0.08     # 峰值回撤达到或深于 -8% 则空仓；-8% 写成 -0.08
+    cooldown_days: 5        # 含触发当日的信号日个数
+  costs:
+    commission_rate: 0.00025
+    commission_min: 5.0     # 小单上最低佣金会高于 0.10% 的比例部分
+    slippage_rate: 0.00075  # 与佣金合计，单边比例摩擦 0.10%
+    stamp_duty_rate: 0.0005 # 仅卖出，不计入上面的 0.10%
 
 # 热点 + 龙头（研究规则，不接入实盘）。数字是先验，不是按收益搜索的结果。
 # 5 个行业 × 2 只 = 10 只，等权正好落在上面的单票上限 10% 上。

@@ -49,8 +49,10 @@
 - ST 与停牌由股票池按 status 表剔除。行情上如果带了 `is_st` / `is_suspended`，
   策略再用截至 as_of 的最后一条标记剔一次。更早的戴帽记录不参与，信号日已经摘帽的股票留在池内。
 - **日频按需调仓**。每个交易日收盘都重新算目标，不读 `backtest.rebalance_frequency` 的月频。
-  目标名单和权重与上次提交的一致，且当前持股名单已经是这批股票，则不下单。
-  价格把市值权重带离等权时也不调。持股名单还没跟上（例如买入没成交）时，下一交易日继续调。
+  目标名单和权重与上次提交的一致，且持股数已达到上次提交的目标股数，则不下单。
+  价格把市值权重带离等权时也不调。
+  部分成交（成交量上限截断、现金不足按比例缩放）留下的缺口，下一交易日继续补；
+  判断用的是**股数**不是市值权重，所以补仓不会把价格漂移也一起重新调平。
   命令行 `--freq` 改不了这条规则。
 - 实盘冻结样本的季度调仓和 40% 仓位留在 `live_signal.py`。本策略不读 `config/live.yaml`，
   也不写入 `live/`。
@@ -82,16 +84,20 @@ TODO：接入逐日行业历史之后，才能把这条规则放进 `reports/res
    并且三段回测按 `reports/research.md` 第 10 节的三关重跑之后。在那之前，收益数字即使跑出来也撤回。
 4. **as_of 之后的价格和行业标签不改变目标权重。**
    同一文件里有对应测试。撤回条件：该测试失败。
-5. **目标名单连续多日不变时，成交只发生在第一次建仓；名单换了，下一交易日才再成交。**
-   价格漂移本身不成交。撤回条件：`test_daily_on_change_holds_when_the_book_is_unchanged`
-   或 `test_daily_on_change_trades_when_the_leader_changes` 失败。
+5. **目标名单连续多日不变时，价格漂移不成交；但第一次建仓没建满时，后续交易日继续补。**
+   「建满」= 持股数达到上次提交的目标股数（成交量上限截断、现金不足缩放都算没建满）。
+   撤回条件：`test_daily_on_change_holds_when_the_book_is_unchanged`、
+   `test_daily_on_change_trades_when_the_leader_changes` 或
+   `test_daily_on_change_tops_up_after_partial_fill` 失败。
+6. **全表每只股票只有一个行业标签时，回测会告警「可能是静态分类回填的假快照」。**
+   撤回条件：`bars.industry` 能证明是逐日快照（多年窗口里出现过行业变更）。
 
 ---
 
 ## 5. 怎么跑
 
 ```bash
-python scripts/run_baseline_backtest.py --data-dir data/processed \
+python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
     --strategy hotspot --start 2020-01-01 --end 2024-12-31 --benchmark 000852
 ```
 
