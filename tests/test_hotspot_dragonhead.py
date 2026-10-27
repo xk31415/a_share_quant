@@ -599,3 +599,22 @@ def test_looks_like_static_snapshot_flags_backfilled_industry():
 
     assert looks_like_static_snapshot(pd.DataFrame({"symbol": ["AA"]})) is False, \
         "没有 industry 列时不判"
+
+
+def test_industry_source_label_does_not_call_a_static_backfill_point_in_time():
+    """全表单一行业标签不能写成「无未来函数风险」。"""
+    import sys
+    scripts = str(Path(__file__).resolve().parents[1] / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    from run_baseline_backtest import industry_source_label
+
+    suspect = industry_source_label(True, False, True)
+    assert suspect is not None
+    assert "无未来函数风险" not in suspect
+    assert "前视" in suspect
+    clean = industry_source_label(True, False, False)
+    assert clean is not None and "无未来函数风险" in clean
+    static = industry_source_label(False, True, False)
+    assert static is not None and "前视" in static
+    assert industry_source_label(False, False, False) is None

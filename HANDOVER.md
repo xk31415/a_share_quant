@@ -23,7 +23,7 @@
 | 下单 | `gm` SDK 策略模式（`scripts/gm_bridge.py`）；执行日涨跌停闸门与回测 `execution.py` 同口径 |
 | 账户 | 掘金仿真 100 万；token 在服务器 `config/gm_account.yaml`（不入库） |
 | 通知 | 钉钉机器人（`config/notify.yaml`，不入库），阶段成败都推 |
-| 测试 | `python -m pytest` → **380 passed**，全绿才算改完 |
+| 测试 | `python -m pytest` → **388 passed**，全绿才算改完 |
 | 数字口径 | 唯一来源 `results/<EXP>/metrics.json`；引用任何数字前自己跑一遍核对 |
 
 **红线速记**（详见 `AGENTS.md`）：不用未来数据；不暴力调参；缺数据显式报错不放行；
@@ -52,8 +52,12 @@
 | paper trading | ❌ 未开始。滑点、成交率、成本、持仓偏离目前全是配置值，只有真实记录能回答 |
 | 真钱 | ❌ 不建议。paper trading 8 周达标后，最多 20% 资金试跑 3 个月、不改参数 |
 
-实盘方案：冻结样本 100 只等权、季度调仓（1/4/7/10 月）、按可承受回撤定仓位（保守 0.40），
-不选股、不择时。预期是"跟上市场、回撤可控"，不是跑赢。
+研究文档里的纸面方案：冻结样本 100 只等权、季度调仓（1/4/7/10 月）、仓位 0.40，
+不选股、不择时。预期是"跟上市场、回撤可控"，不是跑赢。把 `config/live.yaml` 的
+`strategy` 设成 `equal_weight` 才走这条链路（`live_signal.py`）。
+
+当前仿真自动化指到 `hype_watch`（观察池、日频、仓位见 `live.yaml` 的 `position`）。
+这是未验证规则的仿真，不是上面的等权方案，也不是买卖建议。
 
 ---
 
@@ -61,7 +65,7 @@
 
 ### 2.1 前置检查（每次开始前）
 
-- [ ] `python -m pytest` → **380 passed**
+- [ ] `python -m pytest` → **388 passed**
 - [ ] `python scripts/data_manifest.py verify`：2020-2024 与 2015-2019 两份 `[ok]`
       （2025-2026 每日更新后不一致属正常）
 - [ ] 基线回测 `annualized_return = 0.0610828468971103`（命令见 `QUICKSTART.md` §1）
@@ -71,9 +75,10 @@
 
 ### 2.2 8 周 paper trading
 
-不投真钱，按次日开盘价撮合，成交股数 = 委托股数（但成交股数不超过次日成交量的 10%），
-走完整流程：每日 `update_dataset` + `live_signal`、季度日下单、`reconcile` 入账、每周券商持仓核对
-（`QUICKSTART.md` §5）。
+不投真钱，按次日开盘价撮合，成交股数 = 委托股数（但成交股数不超过次日成交量的 10%）。
+等权方案走：每日 `update_dataset` + `live_signal`、季度日下单、`reconcile` 入账、每周券商持仓核对
+（`QUICKSTART.md` §5）。当前 `live.yaml` 若是 `hype_watch`，每日由 `live_auto` 调
+`live_signal_hype.py`；下面的判据仍只看执行，收益不能当成规则有效。
 
 **判据在执行层，不在收益层**（8 周收益没有统计意义）。五条工程指标任一超标就停下来修工程，不加资金：
 

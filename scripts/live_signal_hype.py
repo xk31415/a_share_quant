@@ -2,21 +2,26 @@
 
 为什么不改 hype_watch.py
 ------------------------
-`hype_watch.py` 的 `paper_only` 是硬锁（必须为 True），声明"不接入 live_signal
-/ live_auto"。**这个锁不该被拆**——它是 PR 的安全声明。本脚本是独立的桥接层：
-只调 `generate_target()` 拿权重，然后走 `diff_orders()` 出委托单，不碰策略内部。
+`hype_watch.py` 的 `paper_only` 是硬锁（必须为 True）。**这个锁不该被拆**。
+本脚本是独立的桥接层：只调 `generate_target()` 拿权重，然后走 `diff_orders()`
+出委托单。这不是买卖建议，也不表示规则已通过研究判定。
 
 题材来源
 --------
 hype_watch 的纯规则路径需要题材成员。本脚本按优先级取：
 1. `--themes`（CSV，symbol,theme,start_date[,end_date]）—— 正确做法
-2. `instruments.industry` —— 静态分类代理，**有前视**（README 限制第 5/30 条），
-   实盘用没问题（只看当天），回测不要用
+2. `instruments.industry` —— 静态分类代理。只允许 as_of 等于数据最后一个
+   交易日（当天仿真）。更早的日期直接拒绝：用现在的行业回放历史是前视。
+
+股票池与 live_signal.py 同一套 universe.yaml：板块白名单、上市天数、
+ST/停牌/退市。指数代码 000300 始终排除。000852 是基准也是石化机械，
+不因为当基准就被剔出股票池。
 
 断路器
 ------
 hype_watch 的 `observe_equity` 由引擎调用。实盘没有引擎，这里维护
-`live/equity_history.csv`，每次出信号前喂给策略。
+`live/equity_history.csv`（账户估值：现金 + 持仓市值），每次出信号前喂给策略。
+`--dry-run` 不写这个文件，也不写 orders.csv。
 
 用法
 ----
@@ -25,6 +30,8 @@ hype_watch 的 `observe_equity` 由引擎调用。实盘没有引擎，这里维
         --as-of 2026-10-24 --out-dir live
 
 输出与 live_signal.py 一致：live/<as_of>/orders.csv
+没传 --position 时读 config/live.yaml 的 position，不默认满仓。
+数据距今超过 15 天拒绝出单（与 live_signal.py 相同）。
 """
 from __future__ import annotations
 
@@ -49,10 +56,13 @@ from a_share_quant.strategies.hype_watch import (  # noqa: E402
     HypeWatchStrategy,
     PAPER_DISCLAIMER,
     load_theme_map_csv,
-    runtime_overrides,
 )
+from a_share_quant.universe.builder import UniverseBuilder, UniverseRules  # noqa: E402
 
 EQ_HISTORY = "equity_history.csv"
+# 与 scripts/live_signal.py 的 MAX_STALE_DAYS 相同；测试锁住这两个常数。
+MAX_STALE_DAYS = 15
+MIN_UNIVERSE = 200
 
 
 def _load_holdings(path: str | None) -> dict[str, int]:
@@ -173,6 +183,75 @@ def _load_equity_history(path: Path) -> pd.Series:
     return s.sort_index()
 
 
+def live_excluded_symbols(excluded) -> list[str]:
+    """与回测入口同一口径：universe.yaml 的剔除名单，并始终去掉 000300。
+
+    基准代码 000852 同时是石化机械。指数价格在 benchmark.csv，
+    不能因为当了基准就把这只股票剔出股票池。
+    """
+    out = [str(s) for s in (excluded or [])]
+    if "000300" not in set(out):
+        out.append("000300")
+    return out
+
+
+def assert_data_fresh(as_of, today=None, max_stale: int = MAX_STALE_DAYS) -> None:
+    """数据过期就拒绝出单。与 live_signal.py 同一阈值。"""
+    today_ts = (pd.Timestamp.today().normalize() if today is None
+                else pd.Timestamp(today).normalize())
+    stale_days = (today_ts - pd.Timestamp(as_of).normalize()).days
+    if stale_days > max_stale:
+        raise SystemExit(
+            f"数据最后交易日 {pd.Timestamp(as_of).date()}，距今 {stale_days} 天 "
+            f"（阈值 {max_stale}）。先用 update_dataset 更新数据，"
+            f"不要用过期行情出单。")
+
+
+def resolve_position(cli, configured) -> float:
+    """命令行优先；否则用 live.yaml。两边都没有就拒绝，不默认满仓。"""
+    if cli is not None:
+        value = float(cli)
+    elif configured is not None:
+        value = float(configured)
+    else:
+        raise SystemExit(
+            "请显式传 --position，或在 config/live.yaml 写 position。"
+            "不会默认满仓。")
+    if not 0.0 < value <= 1.0:
+        raise SystemExit(f"position 必须在 (0, 1]，收到 {value}")
+    return value
+
+
+def account_capital(cash, capital_arg, held_value: float, fallback: float) -> float:
+    """总资产。给了现金就用现金 + 持仓市值；否则用传入的总资产，不再把市值加一遍。"""
+    if cash is not None:
+        return float(cash) + float(held_value)
+    if capital_arg is not None:
+        return float(capital_arg)
+    return float(fallback)
+
+
+def require_prices(symbols, prices: dict, what: str) -> None:
+    """缺价拒绝出单。静默跳过会把持仓估值算少，或把选中的票从委托里丢掉。"""
+    missing = []
+    for sym in symbols:
+        px = prices.get(sym)
+        if px is None or not (float(px) > 0.0):
+            missing.append(str(sym))
+    if missing:
+        raise SystemExit(
+            f"{what} {missing[:8]} 没有正的收盘价，拒绝出单。"
+            f"请确认行情覆盖到这些代码。")
+
+
+def refuse_static_theme_replay(as_of, last_date) -> None:
+    """静态行业只能用于数据里的最后一个交易日。更早的 as_of 是前视。"""
+    if pd.Timestamp(as_of).normalize() < pd.Timestamp(last_date).normalize():
+        raise SystemExit(
+            "as_of 早于数据最后一个交易日，不能用 instruments.industry 当题材。"
+            "静态分类回放历史是前视。请传 --themes themes.csv（含 start_date）。")
+
+
 def _append_equity(path: Path, ts: pd.Timestamp, equity: float) -> None:
     rows = _load_equity_history(path)
     # 追加或覆盖当日
@@ -183,20 +262,39 @@ def _append_equity(path: Path, ts: pd.Timestamp, equity: float) -> None:
     out.to_csv(path, index=False, encoding="utf-8")
 
 
+def write_live_bundle(*, dry_run: bool, date_dir: Path, orders_df: pd.DataFrame,
+                      log_df: pd.DataFrame, summary: dict, eq_path: Path,
+                      equity_ts, equity: float) -> bool:
+    """写委托、信号日志和断路器用的权益。dry-run 什么都不写。"""
+    if dry_run:
+        return False
+    date_dir.mkdir(parents=True, exist_ok=True)
+    orders_df.to_csv(date_dir / "orders.csv", index=False, encoding="utf-8")
+    log_df.to_csv(date_dir / "signal_log.csv", index=False, encoding="utf-8")
+    (date_dir / "summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
+    _append_equity(eq_path, pd.Timestamp(equity_ts), float(equity))
+    return True
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="观察池策略实盘信号桥接")
     ap.add_argument("--data-dir", default="data/processed_2025_2026")
     ap.add_argument("--config", default="config/settings.yaml")
+    ap.add_argument("--universe-config", default="config/universe.yaml")
+    ap.add_argument("--live-config", default="config/live.yaml",
+                    help="没传 --position 时读这里的 position")
     ap.add_argument("--themes", default=None,
                     help="题材成员 CSV（symbol,theme,start_date[,end_date]）。"
-                         "不给则用 instruments.industry 当代理")
+                         "不给则仅在数据最后一个交易日用 instruments.industry 当代理")
     ap.add_argument("--holdings", default=None, help="当前持仓 CSV（symbol,shares）")
     ap.add_argument("--cash", type=float, default=None, help="账户可用现金")
     ap.add_argument("--capital", type=float, default=None, help="账户总资产")
     ap.add_argument("--as-of", default=None, help="信号日（默认数据最后一个交易日）")
     ap.add_argument("--out-dir", default="live")
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--position", type=float, default=1.0)
+    ap.add_argument("--dry-run", action="store_true", help="只打印，不写文件")
+    ap.add_argument("--position", type=float, default=None,
+                    help="目标仓位 (0, 1]。缺省读 live.yaml，不默认 1")
     ap.add_argument("--ignore-quarter", action="store_true",
                     help="hype_watch 是日频，此参数无效（兼容 live_auto 调用）")
     args = ap.parse_args()
@@ -212,6 +310,7 @@ def main() -> None:
     provider = LocalFileProvider(data_dir)
     cal = provider.get_calendar()
     as_of = _resolve_as_of(cal, args.as_of)
+    assert_data_fresh(as_of)
     bars = _load_bars(data_dir)
     inst = _load_instruments(data_dir)
 
@@ -219,14 +318,33 @@ def main() -> None:
     import yaml
     settings = yaml.safe_load(
         (root / args.config).read_text(encoding="utf-8")) or {}
+    live_cfg = {}
+    live_path = root / args.live_config
+    if live_path.exists():
+        live_cfg = yaml.safe_load(live_path.read_text(encoding="utf-8")) or {}
     hw_cfg = settings.get("hype_watch") or {}
     params = HypeWatchParams.from_mapping(hw_cfg)
-    overrides = runtime_overrides(params)   # hype_watch 的 pool_size 等
-    lot_size = 100
+    position = resolve_position(args.position, live_cfg.get("position"))
+    market = settings.get("market_rules") or {}
+    lot_size = int(market.get("lot_size", 100))
     min_trade = DEFAULT_MIN_TRADE_VALUE
+    fallback_capital = float((settings.get("backtest") or {}).get(
+        "initial_capital", 1_000_000))
+
+    # ---- 股票池（与回测同一套规则，含科创板/北交所排除）----
+    uni_path = root / args.universe_config
+    rules = (UniverseRules.from_yaml(uni_path) if uni_path.exists()
+             else UniverseRules())
+    builder = UniverseBuilder(provider, rules)
+    universe = builder.get_universe(as_of)
+    for msg in list(builder.warnings) + list(builder.finalize_warnings()):
+        print(f"[warn] {msg}", flush=True)
+    if len(universe) < MIN_UNIVERSE:
+        raise SystemExit(
+            f"股票池只有 {len(universe)} 只，明显异常，拒绝出信号")
+    print(f"股票池 {len(universe)} 只", flush=True)
 
     # ---- 题材 ----
-    theme_map = None
     if args.themes:
         tp = Path(args.themes)
         if not tp.is_absolute():
@@ -234,27 +352,26 @@ def main() -> None:
         theme_map = load_theme_map_csv(tp)
         print(f"[info] 题材表：{tp}（{theme_map['theme'].nunique()} 个题材）")
     else:
+        refuse_static_theme_replay(as_of, cal.dates[-1])
         theme_map = _build_theme_map_from_instruments(inst)
 
     # ---- 基准 ----
-    bench_code = str(params.benchmark or "000300")
+    bench_code = str(params.benchmark or "000852")
     benchmark = _load_benchmark(data_dir, bench_code)
 
-    # ---- 排除指数 ----
-    excluded = ["000852"]
+    # ---- 排除指数代码，保留与指数撞码的个股（000852 = 石化机械）----
+    excluded = live_excluded_symbols(rules.excluded_symbols)
 
     # ---- 策略 ----
     strategy = HypeWatchStrategy(
         params=params, theme_map=theme_map,
         benchmark=benchmark, excluded_symbols=excluded)
 
-    # ---- 断路器：喂历史权益 ----
-    eq_path = root / args.out_dir / EQ_HISTORY
+    # ---- 断路器：喂历史权益（只读，dry-run 也不写）----
+    out_dir = root / args.out_dir
+    eq_path = out_dir / EQ_HISTORY
     equity_hist = _load_equity_history(eq_path)
     strategy.observe_equity(as_of, equity_hist)
-
-    # ---- 宇宙 ----
-    universe = inst["symbol"].astype(str).tolist()
 
     # ---- 出信号 ----
     target = strategy.generate_target(as_of, bars, universe)
@@ -264,24 +381,23 @@ def main() -> None:
     holdings = _load_holdings(args.holdings) if args.holdings else {}
     need_prices = set(weights) | set(holdings)
     prices = _latest_prices(bars, need_prices, as_of)
+    require_prices(holdings, prices, "持仓")
+    require_prices(weights, prices, "观察池")
 
-    # ---- 资金 ----
-    held_value = sum(
-        sh * prices.get(s, 0) for s, sh in holdings.items() if s in prices)
-    if args.cash is not None:
-        capital = float(args.cash) + held_value
-    elif args.capital is not None:
-        capital = float(args.capital)
-    else:
-        capital = 1_000_000.0 + held_value
+    # ---- 资金：现金 + 持仓市值。没给现金时用总资产，不再把市值加一遍 ----
+    held_value = sum(sh * prices[s] for s, sh in holdings.items())
+    capital = account_capital(
+        args.cash, args.capital, held_value, fallback_capital)
+    if args.cash is None and holdings:
+        print(f"[warn] 未传 --cash，用总资产 {capital:,.0f} 出单；"
+              f"持仓市值已经含在总资产里，不会再加一遍。"
+              f"更可靠的是 --cash。", flush=True)
 
     # ---- 权重 → 目标股数 ----
     target_shares: dict[str, int] = {}
     for sym, w in weights.items():
-        px = prices.get(sym)
-        if px is None or px <= 0:
-            continue
-        amount = float(w) * capital * float(args.position)
+        px = prices[sym]
+        amount = float(w) * capital * position
         shares = int(amount / px / lot_size) * lot_size
         if shares > 0:
             target_shares[sym] = shares
@@ -295,28 +411,17 @@ def main() -> None:
     # gm_bridge.place-orders 的执行日闸门，口径与 backtest/execution.py 一致。
     # orders.csv 是策略意图；实际发送的见 placement.csv。
 
-    # ---- 输出 ----
-    out_dir = root / args.out_dir
-    date_dir = out_dir / as_of.strftime("%Y-%m-%d")
-    date_dir.mkdir(parents=True, exist_ok=True)
-
-    # orders.csv（与 live_signal.py 同格式）
     orders_df = pd.DataFrame(orders,
                              columns=["symbol", "side", "shares", "price",
                                       "amount", "note"]) if orders else pd.DataFrame(
         columns=["symbol", "side", "shares", "price", "amount", "note"])
-    orders_df.to_csv(date_dir / "orders.csv", index=False, encoding="utf-8")
-
-    # 信号日志（观察用）
     log_df = pd.DataFrame(strategy.signal_log)
-    log_df.to_csv(date_dir / "signal_log.csv", index=False, encoding="utf-8")
-
-    # 摘要
     summary = {
         "as_of": as_of.isoformat(),
         "strategy": "hype_watch",
         "mode": strategy._mode,
         "pool_size": params.pool_size,
+        "position": position,
         "weights": {k: round(v, 4) for k, v in weights.items()},
         "target_shares": target_shares,
         "capital": round(capital, 2),
@@ -326,20 +431,10 @@ def main() -> None:
         "warnings": strategy.warnings,
         "disclaimer": PAPER_DISCLAIMER,
     }
-    (date_dir / "summary.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
-
-    # 更新权益历史（给断路器用）
-    # 用 最新市值 + 现金 估算权益
-    portfolio_value = sum(
-        int(target_shares.get(s, 0)) * prices.get(s, 0) for s in target_shares)
-    cash_left = capital - portfolio_value
-    est_equity = portfolio_value + max(cash_left, 0)
-    _append_equity(eq_path, as_of, est_equity)
 
     # ---- 打印 ----
     print(f"\n策略 hype_watch  信号日 {as_of.date()}  模式 {strategy._mode}  "
-          f"资金 {capital:,.0f}")
+          f"资金 {capital:,.0f}  仓位 {position:.0%}")
     if strategy._circuit_flat:
         print(f"  **断路器触发**（{strategy._circuit_reason}），目标空仓")
     if weights:
@@ -353,11 +448,20 @@ def main() -> None:
     for w in strategy.warnings:
         print(f"  [warn] {w}")
 
-    if args.dry_run:
+    # 断路器记的是出信号时的账户估值（现金 + 持仓市值），不是目标仓位的市值。
+    wrote = write_live_bundle(
+        dry_run=bool(args.dry_run),
+        date_dir=out_dir / as_of.strftime("%Y-%m-%d"),
+        orders_df=orders_df,
+        log_df=log_df,
+        summary=summary,
+        eq_path=eq_path,
+        equity_ts=as_of,
+        equity=capital)
+    if not wrote:
         print("\n--dry-run：未写文件。")
         return
-
-    print(f"\n已写入 {date_dir}")
+    print(f"\n已写入 {out_dir / as_of.strftime('%Y-%m-%d')}")
     print(f"委托 {len(orders)} 笔（orders.csv）")
 
 

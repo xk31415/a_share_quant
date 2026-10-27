@@ -58,6 +58,26 @@ from a_share_quant.strategies.low_vol import LowVolatility
 from a_share_quant.strategies.momentum import TopNMomentum
 from a_share_quant.universe.builder import UniverseBuilder, UniverseRules
 
+def industry_source_label(bars_have_industry: bool,
+                          instruments_have_industry: bool,
+                          static_suspect: bool) -> str | None:
+    """行业归因来源的报告用语。
+
+    ``bars.industry`` 每只股票只有一个标签时，不能写成「无未来函数风险」：
+    那和「当前分类回填到每一行」分不清，分组含前视。
+    """
+    if bars_have_industry:
+        if static_suspect:
+            return (
+                "bars.industry 每只股票只有一个标签，可能是当前静态分类回填"
+                "（分组含前视，不能当逐日快照）")
+        return "bars 逐日快照（无未来函数风险）"
+    if instruments_have_industry:
+        return ("instruments 静态分类 —— 若行业发生过变更，"
+                "暴露归因存在前视偏差，仅作参考")
+    return None
+
+
 DISCLAIMER = (
     "\n" + "=" * 64 +
     "\n声明：本次回测使用的数据与结果仅用于验证研究框架，\n"
@@ -191,6 +211,10 @@ def main() -> None:
     # 全量数据质量校验（致命问题直接失败）。引擎启动时还会对回测窗口内的数据
     # 再校验一次（覆盖编程式调用路径），两边告警稍后合并去重打印。
     bars_all = provider.get_bars("1990-01-01", "2099-12-31")
+    bars_have_industry = (
+        "industry" in bars_all.columns and bars_all["industry"].notna().any())
+    industry_static_suspect = bool(
+        bars_have_industry and looks_like_static_snapshot(bars_all))
     warnings = validate_dataset(
         bars=bars_all,
         instruments=provider.get_instruments(),
@@ -212,8 +236,6 @@ def main() -> None:
 
     if args.strategy != "hype_watch" and (args.watchlist or args.themes or args.execution_price):
         raise SystemExit("--watchlist / --themes / --execution-price 只属于 --strategy hype_watch")
-    # hotspot 专用：bars.industry 看着像"静态分类回填"时置 True，进报告留痕。
-    hotspot_static_suspect = False
     if args.strategy == "hype_watch" and args.industry_neutral:
         raise SystemExit("hype_watch 不使用 --industry-neutral")
 
@@ -263,18 +285,17 @@ def main() -> None:
                 "hotspot 没有 --reverse；规则固定为强势行业里的相对强势龙头")
         hd = settings.get("hotspot_dragonhead") or {}
         static_map = static_industry_map(provider.get_instruments())
-        bars_have_industry = (
-            "industry" in bars_all.columns and bars_all["industry"].notna().any())
         if not bars_have_industry and static_map is None:
-            print("[warn] hotspot: bars 与 instruments 都没有 industry，"
-                  "信号日会返回空组合（缺数据，不是看空）。"
-                  "需要 bars.industry 逐日快照；"
-                  "scripts/fetch_industry.py 只能补当前静态分类，分组含前视。")
-        if bars_have_industry and looks_like_static_snapshot(bars_all):
-            hotspot_static_suspect = True
-            print("[warn] hotspot: bars.industry 每只股票只有一个标签——可能是把当前"
-                  "静态分类回填成了假逐日快照（分组含前视）。真快照在多年窗口里总该"
-                  "出现行业变更；确认来源之前，这次回测只算验证机制，收益不进研究结论。")
+            warnings.append(
+                "hotspot: bars 与 instruments 都没有 industry，"
+                "信号日会返回空组合（缺数据，不是看空）。"
+                "需要 bars.industry 逐日快照；"
+                "scripts/fetch_industry.py 只能补当前静态分类，分组含前视。")
+        if industry_static_suspect:
+            warnings.append(
+                "hotspot: bars.industry 每只股票只有一个标签——可能是把当前"
+                "静态分类回填成了假逐日快照（分组含前视）。真快照在多年窗口里总该"
+                "出现行业变更；确认来源之前，这次回测只算验证机制，收益不进研究结论。")
         if hd.get("rebalance", "daily_on_change") != "daily_on_change":
             raise SystemExit(
                 "hotspot_dragonhead.rebalance 只能是 daily_on_change"
@@ -342,19 +363,18 @@ def main() -> None:
         print(f"[warn] {w}")
     summary = summarize(result)
 
-    # 行业分类：优先用 bars 提供的逐日快照（无未来函数风险）；
-    # 无历史快照时才退回 instruments 的静态分类，并明确告警由使用者确认，
-    # 避免"用最新行业分类回溯历史"在暴露归因中引入前视偏差。
+    # 行业分类：优先用 bars 的逐日快照。每只股票只有一个标签时，
+    # 不能把来源写成「无未来函数风险」——那和静态分类回填分不清。
     instruments = provider.get_instruments()
+    instruments_have_industry = (
+        "industry" in instruments.columns and instruments["industry"].notna().any())
     industry_map = None
-    industry_source = None
-    if "industry" in bars_all.columns and bars_all["industry"].notna().any():
+    if bars_have_industry:
         industry_map = bars_all.loc[:, ["trade_date", "symbol", "industry"]]
-        industry_source = "bars 逐日快照（无未来函数风险）"
-    elif "industry" in instruments.columns and instruments["industry"].notna().any():
+    elif instruments_have_industry:
         industry_map = instruments.set_index("symbol")["industry"]
-        industry_source = ("instruments 静态分类 —— 若行业发生过变更，"
-                           "暴露归因存在前视偏差，仅作参考")
+    industry_source = industry_source_label(
+        bars_have_industry, instruments_have_industry, industry_static_suspect)
     if industry_map is not None:
         print(f"[info] industry exposure source: {industry_source}")
 
@@ -391,7 +411,7 @@ def main() -> None:
     if strategy.name == "hotspot_dragonhead":
         # 与上面的归因来源分开：归因可以用静态行业，选股信号的来源要单独留痕。
         report["hotspot_industry_source"] = strategy.industry_source
-        report["hotspot_industry_static_suspect"] = bool(hotspot_static_suspect)
+        report["hotspot_industry_static_suspect"] = bool(industry_static_suspect)
     summary_paper = None
     if isinstance(strategy, HypeWatchStrategy):
         sig = pd.DataFrame(strategy.signal_log)

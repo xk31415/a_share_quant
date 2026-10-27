@@ -2,11 +2,15 @@
 
 这是一条可回测的仿真规则，用来把晨报式「观察池大约 3 只、主线题材 1–3 条」收成可检验的记录。
 
-它**不是买卖建议**，**不接入** `live_signal.py` / `live_auto.py`，也**没有已验证收益**。
+它**不是买卖建议**，也**没有已验证收益**。
+策略类 `paper_only` 必须为 true。回测只产纸面记录。
+仿真账户的下单不走 `live_signal.py`，而走 `scripts/live_signal_hype.py`
+（`live_auto.py` 仅当 `config/live.yaml` 的 `strategy` 为 `hype_watch` 时调用）。
 跑出来的净值、回撤、换手和成本只描述这一次纸面路径，不要写进 `reports/research.md` 或 README 的研究结论。
 
 板块：沪深主板 + 创业板。科创板（688/689）和北交所不进观察池，也不计入涨停家数。
 ST、停牌沿用股票池：策略再按当日 `is_st` / `is_suspended` 剔除一次。`000300` 始终排除。
+`000852` 同时是中证1000 和石化机械，不因为当基准就被剔出股票池。
 
 ---
 
@@ -54,7 +58,7 @@ python scripts/run_baseline_backtest.py --strategy hype_watch \
 一条题材触发，要同时满足：
 
 1. 当日可交易成分（股票池 ∩ 主板/创业板 ∩ 非 ST ∩ 非停牌）里，收盘价达到 `limit_up` 的家数 ≥ `min_limitup_count`（默认 3）。涨停价用行情里的 `limit_up`，不用 `pre_close × 10%`。有成分缺涨停价时，这一天该题材不触发（`missing_limit`），不会把缺数据当成「没涨停」。
-2. 这些成分的后复权等权日收益 − 基准日收益 ≥ `min_theme_excess`（默认 0.01，即 1%）。基准默认沪深 300，从 `benchmark.csv` 读。序列缺失就报错，不把这道门槛静默关掉。写成 `null` 才是明确关闭。
+2. 这些成分的后复权等权日收益 − 基准日收益 ≥ `min_theme_excess`（默认 0.01，即 1%）。基准默认中证1000（`000852`），从 `benchmark.csv` 读。当前数据集里没有沪深300（`000300`）。序列缺失就报错，不把这道门槛静默关掉。写成 `null` 才是明确关闭。
 3. 能算出后复权日收益的成分不少于 `min_theme_members`（默认 3）。缺 `adj_close` 时超额这条直接报错，不改用原始收盘价。
 
 触发的题材按涨停家数、超额、题材名排序，最多留 `max_themes` 条（1–3）。
@@ -165,7 +169,7 @@ symbol,theme,start_date,end_date
 | `fixed_weight` | 0.20 | `fixed` 时每只的权重 |
 | `execution_price` | open | 下一交易日的撮合列，`open` 或 `close` |
 | `rebalance_frequency` | D | 信号频率。冷静期按这个频率的信号日计 |
-| `benchmark` | 000300 | 超额用的指数，读 `benchmark.csv` |
+| `benchmark` | 000852 | 超额用的指数（中证1000），读 `benchmark.csv` |
 | `limitup_abs_tol` | 0.0001 | `close + tol >= limit_up` 视为涨停（元） |
 | `csv_require_trigger` | true | false 时只回放名单 |
 | `circuit_breaker.lookback` | 20 | 滚动交易日 |
