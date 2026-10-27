@@ -18,7 +18,7 @@
   实盘链路按这个方案实现；
 - 三份真实数据集（2020-2024 / 2015-2019 / 2025-01~2026-10）**不入库**，仓库只存内容指纹
   `data/MANIFEST.json`；
-- 354 个测试；当前权威回测结果是 `results/EXP-20261022-*`。
+- 380 个测试；当前权威回测结果是 `results/EXP-20261022-*`。
 
 ## 2. 项目结构
 
@@ -35,7 +35,7 @@ a_share_quant/
 │   ├── data/                # schema、loader、validation、builders、incremental
 │   ├── universe/            # 动态股票池（point-in-time）
 │   ├── factors/             # 因子框架 + 示例因子
-│   ├── strategies/          # 等权 / 动量（含反转）/ 低波 / 观察池仿真（paper）
+│   ├── strategies/          # 等权 / 动量（含反转）/ 低波 / 热点+龙头 / 观察池仿真（paper）
 │   ├── portfolio/           # 目标权重构建
 │   ├── backtest/            # 引擎、撮合、成本、持仓（T+1）
 │   ├── metrics/             # 绩效指标与分解报表
@@ -55,7 +55,7 @@ a_share_quant/
 ```bash
 python -m venv .venv
 pip install -e ".[dev]"
-python -m pytest            # 354 passed；测试不读真实数据
+python -m pytest            # 380 passed；测试不读真实数据
 ```
 
 核心依赖：`pandas / numpy / scipy / matplotlib / pyyaml / pyarrow`。没有 GPU、没有数据库。
@@ -122,7 +122,7 @@ python scripts/data_manifest.py show        # 指纹摘要，不读数据
 | 财务数据（带公告日） | Value / Quality 因子 | ❌ |
 | 估值（PE / PB / 市值）、股息率 | 估值因子、市值中性化、区分低波与红利 | ❌ |
 | 指数成分变更历史 | 成分股池 | ❌ |
-| 逐日行业快照 | 行业归因与行业中性选股 | ❌ 只有当前静态分类 |
+| 逐日行业快照 | 行业归因、行业中性选股、热点+龙头 | ❌ 只有当前静态分类 |
 | 分钟数据 | 开盘可成交量、容量 | ❌ |
 
 ## 5. 配置
@@ -145,8 +145,11 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
 # 期望 annualized_return = 0.0610828468971103
 ```
 
-常用参数：`--strategy equal_weight|momentum|low_vol|hype_watch`、`--window/--skip/--reverse`（动量与反转）、
+常用参数：`--strategy equal_weight|momentum|low_vol|hype_watch|hotspot`、`--window/--skip/--reverse`（动量与反转）、
 `--industry-neutral`、`--liquidity`、`--capital`、`--capacity-aum`、`--freq D|W|M`、`--seed`。
+热点+龙头另有 `--top-k/--top-m/--min-industry-members`，**日频按需调仓**（不沿用上面的月频），
+规则见 [`reports/hotspot_dragonhead.md`](reports/hotspot_dragonhead.md)。
+这是研究规则，没有回测数字，不接入实盘。
 
 产物写入 `results/EXP-<id>/`，元数据（数据指纹、规则、参数、Git commit）写入 `experiments/EXP-<id>.json`：
 
@@ -200,6 +203,7 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
 
 **新策略**：继承 `Strategy`，实现 `generate_target(as_of, bars, universe) -> TargetPortfolio`，
 只输出目标权重，不做 I/O、不算成本、不下单。参考 `strategies/equal_weight.py`。
+热点+龙头见 `strategies/hotspot_dragonhead.py` 与 `reports/hotspot_dragonhead.md`。
 
 **观察池仿真**（`--strategy hype_watch`）是 paper / 观察仿真：题材涨停家数和相对基准的超额
 达到先验门槛才记入观察池，下一交易日按开盘或收盘撮合。不接入 `live_signal.py` /
@@ -340,6 +344,15 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
     脚本所在目录，会优先命中它）。测试被中断时该目录会残留，之后所有 `gm_bridge` 调用都
     import 到假包——表现是"下单成功但账户里没有真单"。跑完测试或部署前确认它不存在：
     `Test-Path live/_tmp/gm`。
+
+**研究规则**
+
+33. **热点+龙头在没有逐日行业快照时不能产出研究结论**。规则见 `reports/hotspot_dragonhead.md`。
+    选股优先读 `bars.industry`（截至 as_of 的最后一条非空记录）。没有这列时退回
+    `instruments.industry`，那是 `scripts/fetch_industry.py` 写入的当前证监会行业：
+    用现在的行业回头定义历史热点，分错组会换掉整个热点，前视比行业中性选股更直接。
+    两处都没有时返回空组合并告警，不用全市场动量顶上。空仓是缺数据。
+    在逐日快照接入之前，这条策略即使跑出收益也不进入研究判定。
 
 ## 13. 纪律
 

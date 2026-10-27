@@ -41,7 +41,8 @@ def generate_orders(target_weights: Mapping[str, float],
                     equity: float,
                     ref_prices: Mapping[str, float],
                     lot_size: int = 100,
-                    cash_buffer: float = 0.0) -> list[Order]:
+                    cash_buffer: float = 0.0,
+                    target_shares: Optional[dict[str, int]] = None) -> list[Order]:
     """把目标权重转换为整手订单（先卖后买，释放现金）。
 
     * 可用于建仓的权益 = equity * (1 - cash_buffer)；缓冲用于覆盖佣金、印花税与
@@ -50,6 +51,9 @@ def generate_orders(target_weights: Mapping[str, float],
     * 持仓不在目标中 -> 全部卖出（零股可一次性卖出，符合 A 股规则）；
     * 无成交日参考价的标的跳过（如停牌），留待下一调仓日再平衡。
     ref_prices 必须是成交日价格（由调用方在成交时点传入）。
+
+    ``target_shares``（可选出参）：把每个目标标的的**目标股数**填进去，
+    供引擎判断"这次到底建满了没有"。不传时行为与旧版逐位一致。
     """
     if lot_size < 1:
         raise ValueError("lot_size must be >= 1")
@@ -83,6 +87,8 @@ def generate_orders(target_weights: Mapping[str, float],
         cur = portfolio.positions.get(sym)
         cur_shares = int(cur.shares) if cur is not None else 0
         desired = int((w * investable) // (price * lot_size)) * lot_size
+        if target_shares is not None and desired > 0:
+            target_shares[sym] = desired
         if desired > cur_shares:
             add = (desired - cur_shares) // lot_size * lot_size
             if add > 0:

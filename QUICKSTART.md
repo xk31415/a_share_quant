@@ -20,7 +20,7 @@
 健康检查：
 
 ```bash
-python -m pytest                        # 354 passed（不读真实数据）
+python -m pytest                        # 380 passed（不读真实数据）
 python scripts/data_manifest.py verify  # 三份数据集各一行 [ok]；2025-2026 每日更新后会显示不一致，属正常
 python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
     --start 2025-01-01 --end 2026-10-20 --benchmark 000852
@@ -41,6 +41,8 @@ python scripts/run_baseline_backtest.py --data-dir data/processed \
 # 60 日反转 / 12-1 动量
 ... --strategy momentum --window 60 --skip 0 --reverse
 ... --strategy momentum --window 252 --skip 21
+# 热点+龙头（日频按需；研究规则，没有收益结论；缺行业则空仓并告警）
+... --strategy hotspot
 
 # 炒作苗头观察池：paper / 观察仿真，不是买卖建议，不进实盘接线。
 # 参数与 CSV 列见 reports/hype_watch.md。没有已验证收益，不要把这次的净值写进研究结论。

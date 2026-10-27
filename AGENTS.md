@@ -9,7 +9,7 @@
 ## 0. 开工前必读（按顺序，不要跳）
 
 1. `HANDOVER.md` §1（交付结论）+ §6（八条约定）+ §7（十个坑）
-2. `README.md` 第 12 节 **32 条已知限制**——你要动的东西，大概率在某一条里
+2. `README.md` 第 12 节 **33 条已知限制**——你要动的东西，大概率在某一条里
 3. `reports/research.md`（研究结论与实盘判定）或 `reports/lookahead_audit.md`（改数据层/因子层之前）
 
 2026-10-23 之前的修复编年史与交叉审查记录（`fix_log.md`、`reports/review/`）只在 git 历史里，
@@ -21,7 +21,7 @@
 
 | # | 规则 | 怎么检查 |
 |---|---|---|
-| 1 | 改代码后跑 `python -m pytest` | 期望 **354 passed**；失败不许说"完成" |
+| 1 | 改代码后跑 `python -m pytest` | 期望 **380 passed**；失败不许说"完成" |
 | 2 | 改口径后 `grep` 全文找旧数字 | `grep -rn "旧值" *.md reports/*.md src scripts tests config`，旧数字直接改成新值，不要并列"新值（旧值）" |
 | 3 | 加默认参数时，默认分支输出逐位不变 | 用旧结果回归一次，写进测试 |
 | 4 | 新发现的坑写进 `README.md` 限制清单 | 编号递增，写清触发条件与后果 |
@@ -105,7 +105,7 @@ R06 把 `critical` 判定前移到写盘之前，以为修完了。R07 指出**�
 
 按这个顺序，缺一步都不算：
 
-1. **跑测试**：`python -m pytest` → 354 passed（新增测试要能失败过——先让它红，再让它绿）；
+1. **跑测试**：`python -m pytest` → 380 passed（新增测试要能失败过——先让它红，再让它绿）；
 2. **复现攻击**：把你的修复当成攻击面，按对方可能绕过的方式再试一遍
    （换格式、换参数、换顺序、换目录）；
 3. **回归旧结果**：如果改了默认分支，用改动前的产物对比，必须逐位一致；
@@ -122,7 +122,7 @@ R06 把 `critical` 判定前移到写盘之前，以为修完了。R07 指出**�
 
 ```bash
 # 测试
-python -m pytest                                  # 全量，354 passed
+python -m pytest                                  # 全量，380 passed
 python -m pytest tests/test_reconcile.py -q       # 单文件
 
 # 回测（三段之一，约 30 秒 ~ 3 分钟）
@@ -134,6 +134,9 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
 
 # 60 日反转（--reverse）
 ... --strategy momentum --window 60 --skip 0 --reverse
+
+# 热点+龙头（日频按需，不沿用月频；缺行业则空仓并告警。定义见 reports/hotspot_dragonhead.md）
+... --strategy hotspot
 
 # 因子研究（IC、十分档、流动性三档内收益、行业中性 IC）
 python scripts/factor_research.py --data-dir data/processed

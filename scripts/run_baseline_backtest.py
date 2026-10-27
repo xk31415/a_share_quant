@@ -39,6 +39,11 @@ from a_share_quant.research.experiments import (
     save_experiment,
 )
 from a_share_quant.strategies.equal_weight import EqualWeightStrategy
+from a_share_quant.strategies.hotspot_dragonhead import (
+    HotspotDragonhead,
+    looks_like_static_snapshot,
+    static_industry_map,
+)
 from a_share_quant.strategies.hype_watch import (
     HypeWatchParams,
     HypeWatchStrategy,
@@ -130,7 +135,8 @@ def main() -> None:
     ap.add_argument("--freq", default=None, choices=["D", "W", "M"])
     ap.add_argument("--out", default="results")
     ap.add_argument("--strategy", default="equal_weight",
-                    choices=["equal_weight", "momentum", "low_vol", "hype_watch"])
+                    choices=["equal_weight", "momentum", "low_vol",
+                             "hype_watch", "hotspot"])
     ap.add_argument("--watchlist", default=None,
                     help="晨报/观察池 CSV（trade_date,symbol,theme[，rank]）。"
                          "只属于 --strategy hype_watch，paper / 观察仿真")
@@ -152,7 +158,14 @@ def main() -> None:
     ap.add_argument("--liquidity", type=float, default=None,
                     help="只保留成交额最高的这个比例的股票（0.33 = 前 1/3）")
     ap.add_argument("--seed", type=int, default=0, help="等权基准的抽样种子（换一批股票）")
-    ap.add_argument("--window", type=int, default=None, help="动量/反转回看窗口")
+    ap.add_argument("--window", type=int, default=None,
+                    help="动量/反转回看窗口；hotspot 时覆盖热点收益窗口")
+    ap.add_argument("--top-k", type=int, default=None,
+                    help="热点行业数（仅 hotspot，默认见 settings.yaml）")
+    ap.add_argument("--top-m", type=int, default=None,
+                    help="每个热点行业的龙头只数（仅 hotspot）")
+    ap.add_argument("--min-industry-members", type=int, default=None,
+                    help="行业有效样本少于此数不参与热点排名（仅 hotspot）")
     ap.add_argument("--skip", type=int, default=None, help="跳过最近 N 个交易日")
     ap.add_argument("--reverse", action="store_true",
                     help="动量策略反向：选动量最弱的一批（反转）")
@@ -199,6 +212,8 @@ def main() -> None:
 
     if args.strategy != "hype_watch" and (args.watchlist or args.themes or args.execution_price):
         raise SystemExit("--watchlist / --themes / --execution-price 只属于 --strategy hype_watch")
+    # hotspot 专用：bars.industry 看着像"静态分类回填"时置 True，进报告留痕。
+    hotspot_static_suspect = False
     if args.strategy == "hype_watch" and args.industry_neutral:
         raise SystemExit("hype_watch 不使用 --industry-neutral")
 
@@ -237,6 +252,49 @@ def main() -> None:
         max_pos = hype_over["max_positions"]
         max_weight = hype_over["max_weight_per_stock"]
         cost_model = hype_params.cost_model()
+    elif args.strategy == "hotspot":
+        # 研究规则，不接入 live_auto。行业优先在策略内部读 bars.industry；
+        # 这里只把 instruments 的静态分类当作退路。
+        if args.industry_neutral:
+            raise SystemExit(
+                "hotspot 本身按行业选热点，不能和 --industry-neutral 一起用")
+        if args.reverse:
+            raise SystemExit(
+                "hotspot 没有 --reverse；规则固定为强势行业里的相对强势龙头")
+        hd = settings.get("hotspot_dragonhead") or {}
+        static_map = static_industry_map(provider.get_instruments())
+        bars_have_industry = (
+            "industry" in bars_all.columns and bars_all["industry"].notna().any())
+        if not bars_have_industry and static_map is None:
+            print("[warn] hotspot: bars 与 instruments 都没有 industry，"
+                  "信号日会返回空组合（缺数据，不是看空）。"
+                  "需要 bars.industry 逐日快照；"
+                  "scripts/fetch_industry.py 只能补当前静态分类，分组含前视。")
+        if bars_have_industry and looks_like_static_snapshot(bars_all):
+            hotspot_static_suspect = True
+            print("[warn] hotspot: bars.industry 每只股票只有一个标签——可能是把当前"
+                  "静态分类回填成了假逐日快照（分组含前视）。真快照在多年窗口里总该"
+                  "出现行业变更；确认来源之前，这次回测只算验证机制，收益不进研究结论。")
+        if hd.get("rebalance", "daily_on_change") != "daily_on_change":
+            raise SystemExit(
+                "hotspot_dragonhead.rebalance 只能是 daily_on_change"
+                "（每个交易日评估，目标相对当前持仓没变则不下单）")
+        if args.freq not in (None, "D"):
+            print(f"[warn] hotspot 固定日频按需调仓，忽略 --freq {args.freq}")
+        if args.liquidity is not None:
+            print("[warn] hotspot 龙头排序已经包含成交额，忽略 --liquidity")
+        if args.capacity_aum is not None:
+            print("[warn] hotspot 首版没有容量约束，忽略 --capacity-aum")
+        strategy = HotspotDragonhead(
+            top_k=int(args.top_k if args.top_k is not None else hd.get("top_k", 5)),
+            top_m=int(args.top_m if args.top_m is not None else hd.get("top_m", 2)),
+            window=int(args.window if args.window is not None else hd.get("window", 20)),
+            amount_window=int(hd.get("amount_window", 20)),
+            min_industry_members=int(
+                args.min_industry_members if args.min_industry_members is not None
+                else hd.get("min_industry_members", 3)),
+            industry_map=static_map,
+            max_positions=max_pos)
     else:
         strategy = EqualWeightStrategy(max_positions=pf.get("max_positions", 20),
                                        seed=int(args.seed),
@@ -250,6 +308,9 @@ def main() -> None:
             commission_min=cost_cfg.get("commission_min", 5.0),
             stamp_duty_rate=cost_cfg.get("stamp_duty_rate", 0.0005),
             slippage_rate=cost_cfg.get("slippage_rate", 0.0005))
+    # 声明「日频按需」的策略不沿用 backtest.rebalance_frequency 的月频。
+    if getattr(strategy, "rebalance_on_change", False):
+        freq = "D"
     config = BacktestConfig(
         start_date=args.start or bt.get("start_date", "2021-01-04"),
         end_date=args.end or bt.get("end_date", "2023-12-29"),
@@ -327,6 +388,10 @@ def main() -> None:
     report["industry_source"] = industry_source or "none"
     report["n_universe_violations"] = int(len(result.universe_violations)) \
         if result.universe_violations is not None else 0
+    if strategy.name == "hotspot_dragonhead":
+        # 与上面的归因来源分开：归因可以用静态行业，选股信号的来源要单独留痕。
+        report["hotspot_industry_source"] = strategy.industry_source
+        report["hotspot_industry_static_suspect"] = bool(hotspot_static_suspect)
     summary_paper = None
     if isinstance(strategy, HypeWatchStrategy):
         sig = pd.DataFrame(strategy.signal_log)
@@ -390,7 +455,20 @@ def main() -> None:
                     "min_limitup_count": None if hype_params is None else hype_params.min_limitup_count,
                     "min_theme_excess": None if hype_params is None else hype_params.min_theme_excess,
                     "position_mode": None if hype_params is None else hype_params.position_mode,
-                    "gross_exposure": None if hype_params is None else hype_params.gross_exposure},
+                    "gross_exposure": None if hype_params is None else hype_params.gross_exposure,
+                    "hotspot_top_k": (strategy.top_k
+                                      if strategy.name == "hotspot_dragonhead" else None),
+                    "hotspot_top_m": (strategy.top_m
+                                      if strategy.name == "hotspot_dragonhead" else None),
+                    "hotspot_amount_window": (strategy.amount_window
+                                              if strategy.name == "hotspot_dragonhead" else None),
+                    "hotspot_min_industry_members": (
+                        strategy.min_industry_members
+                        if strategy.name == "hotspot_dragonhead" else None),
+                    "hotspot_industry_source": (strategy.industry_source
+                                                if strategy.name == "hotspot_dragonhead" else None),
+                    "rebalance_on_change": bool(
+                        getattr(strategy, "rebalance_on_change", False))},
         benchmark=config.benchmark,
         result_path=str(out_dir),
         git_commit=git_commit(root),
