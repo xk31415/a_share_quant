@@ -86,16 +86,30 @@ _account_obj = None
 
 
 def connect():
-    """登录掘金终端。必须先跑通这个，再调任何交易函数。"""
+    """登录掘金终端。必须先跑通这个，再调任何交易函数。
+
+    登录失败必须显式报错退出，**不能静默继续**——
+    登录态过期时 get_cash 会返回 None/0，静默走下去等于"空仓清仓"全错。
+    """
     global _account_obj
     from gmtrade.api import (  # 延迟导入：本文件的 symbol 换算可独立测试
-        account, login, set_endpoint, set_token,
+        account, get_cash, login, set_endpoint, set_token,
     )
     tok, acc = _load_account()
     set_token(tok)
     set_endpoint("127.0.0.1:7001")   # 不能留空，见模块 docstring
     _account_obj = account(account_id=acc, account_alias="live_auto")
     login(_account_obj)
+    # 验证登录态：get_cash 返回 None/空 = 登录失败（gmtrade 不抛异常，只 warn）
+    cash = get_cash(acc)
+    if not cash or _num(cash, "nav") <= 0:
+        raise SystemExit(
+            f"\n掘金账户登录失败（account_id={acc}）。\n"
+            f"get_cash 返回空或 nav<=0：{cash!r}\n"
+            f"请检查：\n"
+            f"  1. 掘金客户端（emgm3）是否已登录账号\n"
+            f"  2. 登录态是否过期（周末/长时间未操作会掉）\n"
+            f"  3. 网络能否连到掘金服务器\n")
     return _account_obj
 
 
@@ -129,9 +143,11 @@ def _num(obj, *keys, default=0.0) -> float:
 def cmd_status(args) -> int:
     acc = connect()
     from gmtrade.api import get_cash, get_positions, get_unfinished_orders
-    cash = get_cash(acc)
-    pos = get_positions(acc)
-    unfin = get_unfinished_orders(acc)
+    # gmtrade 的查询函数要 account_id 字符串，不是 Account 对象
+    aid = acc.account_id
+    cash = get_cash(aid)
+    pos = get_positions(aid)
+    unfin = get_unfinished_orders(aid)
     n_pos = len(pos) if pos else 0
     n_unfin = len(unfin) if unfin else 0
     print(f"账户 {_account_obj.account_id}")
@@ -155,7 +171,7 @@ def cmd_status(args) -> int:
 def cmd_pull_holdings(args) -> int:
     acc = connect()
     from gmtrade.api import get_cash, get_positions
-    pos = get_positions(acc) or []
+    pos = get_positions(acc.account_id) or []
     rows = []
     for p in pos:
         sym = from_gm_symbol(str(_g(p, "symbol", "security_id", default="")))
@@ -169,7 +185,7 @@ def cmd_pull_holdings(args) -> int:
         w = csv.writer(f)
         w.writerow(["symbol", "shares"])
         w.writerows(rows)
-    cash = get_cash(acc)
+    cash = get_cash(acc.account_id)
     avail = _num(cash, "available")
     print(f"持仓 {len(rows)} 只 -> {out}")
     print(f"现金 available = {avail:,.2f}")
@@ -231,7 +247,7 @@ def cmd_place_orders(args) -> int:
                 order_type=otype, position_effect=effect,
                 price=0 if use_market else price,
                 order_duration=OrderDuration_GFD,
-                account=_account_obj,
+                account=_account_obj.account_id,
             )
             # order_volume 成功返回委托编号类对象，失败返回错误码(int)或 dict
             return f"{code} {side_raw} {shares} @ {price:.2f} -> {ret}"
@@ -251,7 +267,7 @@ def cmd_place_orders(args) -> int:
             errors += 1
 
     if not args.dry_run:
-        unfin = get_unfinished_orders(_account_obj) or []
+        unfin = get_unfinished_orders(_account_obj.account_id) or []
         print(f"未完成委托 {len(unfin)} 笔")
 
     if errors:
@@ -264,7 +280,7 @@ def cmd_place_orders(args) -> int:
 def cmd_pull_fills(args) -> int:
     acc = connect()
     from gmtrade.api import get_execution_reports
-    rpts = get_execution_reports(acc) or []
+    rpts = get_execution_reports(acc.account_id) or []
 
     # gmtrade 的成交回报是 protobuf，字段名按实际返回为准，防御式取值
     rows = []
@@ -312,12 +328,12 @@ def cmd_pull_fills(args) -> int:
 def cmd_cancel_all(args) -> int:
     acc = connect()
     from gmtrade.api import get_unfinished_orders, order_cancel_all
-    unfin = get_unfinished_orders(acc) or []
+    unfin = get_unfinished_orders(acc.account_id) or []
     print(f"未完成委托 {len(unfin)} 笔")
     if args.dry_run:
         print("[dry-run] 不撤")
         return 0
-    ret = order_cancel_all(acc)
+    ret = order_cancel_all(acc.account_id)
     print(f"撤单结果：{ret}")
     return 0
 
