@@ -95,7 +95,7 @@ def load_yaml(p: Path) -> dict:
 def config() -> dict:
     c = load_yaml(ROOT / "config" / "live.yaml")
     c.setdefault("python_data", r"C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe")
-    c.setdefault("python_trade", r"C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe")
+    c.setdefault("python_trade", r"C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe")
     c.setdefault("data_dir", "data/processed_2025_2026")
     c.setdefault("holdings", "live/holdings.csv")
     c.setdefault("fills_dir", "fills")
@@ -160,6 +160,29 @@ def run_step(name: str, cmd: list[str], log, timeout: int = 1800,
     return p.returncode
 
 
+def run_step_retry(name: str, cmd: list[str], log, max_retries: int = 3,
+                   wait_seconds: int = 60, timeout: int = 1800,
+                   allow_fail: bool = False) -> int:
+    """带重试的 run_step。掘金终端每天自动重启 1~2 次，连接会掉。
+
+    对 gm 相关步骤（拉持仓/下单/取成交/更新数据）自动重试。
+    gm_bridge 内部已有连接层重试，这里是**进程级**兜底（终端在脚本执行中间挂掉）。
+    """
+    import time
+    rc = run_step(name, cmd, log, timeout=timeout, allow_fail=True)
+    for attempt in range(2, max_retries + 1):
+        if rc == 0 or (allow_fail and rc == 1):
+            break
+        print(f"  {name} 失败（rc={rc}），等 {wait_seconds}s 重试 "
+              f"（第 {attempt}/{max_retries} 次）", flush=True)
+        log.write(f"  [retry] {name} rc={rc}, attempt {attempt}\n")
+        time.sleep(wait_seconds)
+        rc = run_step(name, cmd, log, timeout=timeout, allow_fail=True)
+    if rc != 0 and not allow_fail:
+        print(f"[FAIL] {name} 最终退出码 {rc}（重试 {max_retries} 次后）", flush=True)
+    return rc
+
+
 def today() -> str:
     return dt.date.today().isoformat()
 
@@ -191,7 +214,7 @@ def stage_data(cfg: dict, log, args) -> int:
            "--data-dir", cfg["data_dir"], "--source", "gm"]
     if args.dry_run:
         cmd.append("--dry-run")
-    rc = run_step("update_dataset", cmd, log, timeout=1800)
+    rc = run_step_retry("update_dataset", cmd, log, timeout=1800)
     return rc
 
 
@@ -203,7 +226,7 @@ def stage_trade(cfg: dict, log, args) -> int:
     cash_file = ROOT / cfg["log_dir"] / f"cash_{date}.txt"
 
     # 1) 从掘金取持仓与现金
-    rc = run_step("pull-holdings", [
+    rc = run_step_retry("pull-holdings", [
         py_t, "scripts/gm_bridge.py", "pull-holdings",
         "--out", cfg["holdings"],
         "--cash-out", str(cash_file),
@@ -258,14 +281,14 @@ def stage_trade(cfg: dict, log, args) -> int:
     if args.dry_run or not cfg.get("auto_trade"):
         why = "--dry-run" if args.dry_run else "config live.yaml 的 auto_trade=false"
         print(f"\n{why}：跳过实际下单。委托文件在 {orders}")
-        rc = run_step("place-orders(dry-run)", [
+        rc = run_step_retry("place-orders(dry-run)", [
             py_t, "scripts/gm_bridge.py", "place-orders",
             "--orders", str(orders), "--dry-run",
             "--max-orders", str(cfg["max_orders"]),
         ], log, timeout=120)
         return rc
 
-    return run_step("place-orders", [
+    return run_step_retry("place-orders", [
         py_t, "scripts/gm_bridge.py", "place-orders",
         "--orders", str(orders),
         "--order-type", str(cfg["order_type"]),
@@ -282,7 +305,7 @@ def stage_settle(cfg: dict, log, args) -> int:
     fills = fills_dir / f"{date}.csv"
     orders = find_recent_orders(cfg)
 
-    rc = run_step("pull-fills", [
+    rc = run_step_retry("pull-fills", [
         py_t, "scripts/gm_bridge.py", "pull-fills",
         "--out", str(fills),
     ], log, timeout=120)
