@@ -520,6 +520,8 @@ def test_settings_yaml_keeps_global_costs_and_sets_ten_bps_one_way():
     assert params.circuit_cooldown_days == 5
     assert params.observe_horizons == (1, 3, 5)
     assert params.execution_price == "open"
+    assert params.benchmark == "000852"
+    assert raw["backtest"]["benchmark"] == "000852"
     assert CostModel().slippage_rate == 0.0005
     with pytest.raises(ValueError, match="未知键"):
         HypeWatchParams.from_mapping({**raw["hype_watch"], "optimize_for_return": True})

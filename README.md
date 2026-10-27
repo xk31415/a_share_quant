@@ -55,7 +55,7 @@ a_share_quant/
 ```bash
 python -m venv .venv
 pip install -e ".[dev]"
-python -m pytest            # 380 passed；测试不读真实数据
+python -m pytest            # 388 passed；测试不读真实数据
 ```
 
 核心依赖：`pandas / numpy / scipy / matplotlib / pyyaml / pyarrow`。没有 GPU、没有数据库。
@@ -205,10 +205,12 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
 只输出目标权重，不做 I/O、不算成本、不下单。参考 `strategies/equal_weight.py`。
 热点+龙头见 `strategies/hotspot_dragonhead.py` 与 `reports/hotspot_dragonhead.md`。
 
-**观察池仿真**（`--strategy hype_watch`）是 paper / 观察仿真：题材涨停家数和相对基准的超额
-达到先验门槛才记入观察池，下一交易日按开盘或收盘撮合。不接入 `live_signal.py` /
-`live_auto.py`，没有已验证收益，不进入研究判定。参数、晨报 CSV 和纯规则路径见
-[`reports/hype_watch.md`](reports/hype_watch.md)。
+**观察池仿真**（`--strategy hype_watch`）是 paper / 观察仿真：题材涨停家数和相对中证1000
+（`000852`）的超额达到先验门槛才记入观察池，下一交易日按开盘或收盘撮合。
+没有已验证收益，不进入研究判定。策略类 `paper_only` 必须为 true。
+仿真账户下单不走 `live_signal.py`，而走 `scripts/live_signal_hype.py`
+（`live_auto` 仅当 `config/live.yaml` 的 `strategy` 为 `hype_watch` 时调用）。
+参数、晨报 CSV 和纯规则路径见 [`reports/hype_watch.md`](reports/hype_watch.md)。
 
 **复现实验**：同一 commit + 同一数据指纹 + 同一配置。三段回测已在不同 pandas/pyarrow 版本上
 独立复现到 float64 逐位相同。
@@ -231,6 +233,7 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
 
 `live_signal.py` 不做选股，只把"冻结样本 + 目标仓位"翻译成委托单：季度调仓（1/4/7/10 月）、
 整手买卖、清仓才带零股、停牌与已持有跌停股冻结、数据过期拒绝出单、资金不足拒绝出单。
+`config/live.yaml` 的 `strategy: hype_watch` 改走 `live_signal_hype.py`（观察池仿真，不是研究结论）。
 `reconcile.py` 核对成交与委托、计算滑点与持仓偏离、生成下次要读的持仓表，并防止同一批成交重复入账。
 每日流程、参数、退出码见 `QUICKSTART.md` 第 5 节。
 
@@ -327,16 +330,24 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
     这类票超过目标数的 `--max-unfunded`（默认 10%）时拒绝写委托，并给出买齐所需总资产。
     2026-10-20 冻结样本、100 只、40% 仓位：总资产 80 万通过（1 只买不进），60 万被拒（28 只）。
     "全部买齐所需总资产"由最贵的一只决定（当前约 201 万），会明显高于实际可用的门槛。
-30. **炒作苗头观察池（`hype_watch`）只做 paper / 观察仿真**。不接入 `live_signal.py` /
-    `live_auto.py`，日志和 `paper_summary.json` 不是买卖建议，也没有任何一段被验证的收益
-    可以写进研究判定。纯规则路径要有 `themes.csv`（`start_date` 必填，缺了直接报错，不会把
-    当前成分回填到历史）；只有 `bars` 上的当日 `theme` / `industry` 列时才退回行情里的标签，
-    用 `industry` 会告警，静态分类与限制第 5 条一样有微弱前视。观察窗口 T+1/T+3/T+5
-    的收盘收益是事后指标，信号日不可知，不参与目标权重。断路器用信号日收盘前已实现的权益
-    （含当日，丢掉更晚的点），空仓从下一交易日执行；回撤是近 20 个交易日的滚动峰值，
-    不是从回测起点起的历史高点；冷静期按信号日计数。次日成交价若已封板，按既有规则买不进
-    （`blocked:limit_up`）。单边约 0.1% 是配置里的佣金率+滑点率，不是实测滑点，小单还受
-    5 元最低佣金影响，卖出另计印花税。
+30. **炒作苗头观察池（`hype_watch`）没有已验证收益，不是买卖建议。**
+    策略类 `paper_only` 必须为 true，回测只产纸面记录。仿真账户的下单不走
+    `live_signal.py`（那条仍是等权冻结样本），而走 `scripts/live_signal_hype.py`：
+    `live_auto.py` 在 `config/live.yaml` 的 `strategy: hype_watch` 时调用它。
+    这条仿真不改变 `reports/research.md` 的判定。超额基准是中证1000（`000852`），
+    因为 `benchmark.csv` 里只有这一条。股票池与回测相同：`universe.yaml` 的板块白名单
+    （不含科创板、北交所）、上市满 60 个交易日、剔除 ST / 停牌 / 退市，并始终排除指数代码
+    `000300`。`000852` 同时是石化机械，不因为它当基准就被剔出股票池。数据距今超过 15 天拒绝出单。
+    `--dry-run` 不写委托，也不改 `live/equity_history.csv`。没传 `--position` 时用
+    `live.yaml` 的 `position`，不默认满仓。纯规则回测要有 `themes.csv`（`start_date` 必填，
+    缺了直接报错，不会把当前成分回填到历史）；只有 `bars` 上的当日 `theme` / `industry`
+    列时才退回行情里的标签，用 `industry` 会告警，静态分类与限制第 5 条一样有前视。
+    仿真在不传 `--themes` 时，只用数据最后一个交易日的 `instruments.industry` 当题材代理，
+    更早的 `--as-of` 直接拒绝。观察窗口 T+1/T+3/T+5 的收盘收益是事后指标，信号日不可知，
+    不参与目标权重。断路器在回测里用引擎权益；仿真里用出信号时的账户估值
+    （现金 + 持仓市值），不是成交回报之后的净值。回撤是近 20 个交易日的滚动峰值，
+    不是从回测起点起的历史高点；冷静期按信号日计数。次日成交价若已封板，按执行日闸门买不进。
+    单边约 0.1% 是配置里的佣金率+滑点率，不是实测滑点，小单还受 5 元最低佣金影响，卖出另计印花税。
 31. **`placement.csv` 在逐笔发送之前就写盘**。整体失败（gm 会话没起来、下单接口报错）时文件
     已经存在，`reconcile` 会把这些委托当"已发送未成交"处理。方向是报出差异、不会静默丢单，
     但**别用 `placement.csv` 的存在推断"单子确实发出去了"**。

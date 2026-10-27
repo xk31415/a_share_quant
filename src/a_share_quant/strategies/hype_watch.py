@@ -1,7 +1,9 @@
-"""炒作苗头 + 观察池：只做 paper / 观察仿真。
+"""炒作苗头 + 观察池：paper / 观察仿真，不是买卖建议。
 
-这不是买卖建议，也不接入 ``live_signal`` / ``live_auto``。
-目标权重只表示「若按这条先验规则做仿真，下一交易日的纸面仓位」。
+策略类的 ``paper_only`` 必须为 true。回测只产纸面权重。
+仿真账户下单不在这里做，而在 ``scripts/live_signal_hype.py``
+（``live_auto`` 仅当 ``config/live.yaml`` 的 ``strategy`` 为 ``hype_watch`` 时调用）。
+那条链路不代表规则已通过研究判定。
 
 信号（T0 收盘，只用 ``trade_date <= T0`` 的数据）
 ------------------------------------------------
@@ -12,7 +14,8 @@
    涨停以 ``bars.limit_up`` 为准，不用 ``pre_close * 10%`` 推算。
    任一可交易成分缺涨停价 → 该题材当日不触发（``missing_limit``），
    不会把缺数据当成「没涨停」。
-2. 这些成分用后复权收盘价算出的等权日收益，减去基准（默认沪深 300）
+2. 这些成分用后复权收盘价算出的等权日收益，减去基准（默认中证 1000，
+   ``000852``，与 ``settings.yaml`` 和 ``benchmark.csv`` 一致；数据集里没有沪深 300）
    的日收益，``>= min_theme_excess``。门槛为 ``None`` 时不做这一条。
 3. 能算出收益的成分不少于 ``min_theme_members``。
 
@@ -60,8 +63,9 @@ MAIN_CHINEXT_PREFIXES: tuple[str, ...] = (
 
 PAPER_LABEL = "paper/观察仿真"
 PAPER_DISCLAIMER = (
-    "PAPER / 观察仿真。本输出只记录规则触发与仿真净值，"
-    "不是买卖建议，不接入 live_signal 或 live_auto，禁止据此下单。"
+    "PAPER / 观察仿真。本输出只记录规则触发与仿真净值，不是买卖建议。"
+    "策略类 paper_only 必须为 true。仿真账户若下单，只经 "
+    "scripts/live_signal_hype.py，不代表规则已通过研究判定。"
     "观察窗口收益是事后研究指标，不代表策略有效，未写入研究判定。"
 )
 
@@ -121,7 +125,7 @@ class HypeWatchParams:
     fixed_weight: float = 0.20
     execution_price: str = "open"     # 下一交易日撮合列
     rebalance_frequency: str = "D"
-    benchmark: str = "000300"
+    benchmark: str = "000852"         # 中证1000；与 settings.yaml / benchmark.csv 一致
     limitup_abs_tol: float = 1e-4
     csv_require_trigger: bool = True
     circuit_enabled: bool = True
@@ -225,7 +229,7 @@ class HypeWatchParams:
             fixed_weight=float(raw.get("fixed_weight", 0.20)),
             execution_price=str(raw.get("execution_price", "open")),
             rebalance_frequency=str(raw.get("rebalance_frequency", "D")),
-            benchmark=str(raw.get("benchmark", "000300")),
+            benchmark=str(raw.get("benchmark", "000852")),
             limitup_abs_tol=float(raw.get("limitup_abs_tol", 1e-4)),
             csv_require_trigger=_require_bool(
                 raw.get("csv_require_trigger", True), "csv_require_trigger"),
