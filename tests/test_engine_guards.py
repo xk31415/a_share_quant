@@ -858,3 +858,51 @@ def test_dry_run_writes_signals_to_isolated_dir(tmp_path, monkeypatch):
     assert mod.find_recent_orders({"out_dir": "live"}) == prod / "orders.csv"
     assert mod.find_recent_orders({"out_dir": "live"}, out_dir="live/_dryrun") is None, \
         "隔离目录为空时必须返回 None，不能退回去读生产目录"
+
+
+# ---------------------------------------------------------------- 控制台不能吞告警
+def test_run_step_console_keeps_warn_outside_tail(capsys):
+    """控制台摘要只取尾部 12 行，但 [warn] 不能被截掉。
+
+    2026-10-28 实测：信号脚本把「数据最新只到 X，当日日线尚未生成」打在 stdout
+    第 1 行，后面还有十几行，`tail 12` 把整条告警截了——文案改准了也白改，
+    只看控制台的人依然看不见。缺数据的告警是硬规则 7 的出口，不能被刷屏逻辑吃掉。
+    """
+    import io
+    import sys
+
+    mod = _load_script("live_auto.py")
+    import tempfile
+    from pathlib import Path
+
+    script = Path(tempfile.mkdtemp()) / "noisy.py"
+    script.write_text(
+        "print('[warn] 关键告警在很前面')\n"
+        "for i in range(20):\n"
+        "    print('普通输出 %d' % i)\n", encoding="utf-8")
+
+    rc = mod.run_step("noisy", [sys.executable, str(script)], io.StringIO(), timeout=90)
+    out = capsys.readouterr().out
+    assert rc == 0, rc
+    assert "关键告警在很前面" in out, f"warn 被 tail 截掉了：{out!r}"
+    assert "普通输出 19" in out, f"尾部仍要显示：{out!r}"
+    assert "普通输出 0" not in out, f"中间普通行仍应截断（不刷屏）：{out!r}"
+
+
+def test_run_step_console_still_truncates_without_warn(capsys):
+    """没有告警时行为不变：仍然只显示尾部 12 行。"""
+    import io
+    import sys
+    import tempfile
+    from pathlib import Path
+
+    mod = _load_script("live_auto.py")
+    script = Path(tempfile.mkdtemp()) / "plain.py"
+    script.write_text(
+        "for i in range(20):\n    print('line %d' % i)\n", encoding="utf-8")
+
+    rc = mod.run_step("plain", [sys.executable, str(script)], io.StringIO(), timeout=90)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "line 19" in out and "line 8" in out, out
+    assert "line 7" not in out, f"超过 12 行的普通输出仍要截断：{out!r}"

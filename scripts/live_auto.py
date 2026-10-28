@@ -155,9 +155,15 @@ def run_step(name: str, cmd: list[str], log, timeout: int = 1800,
     log.write(f"[exit {p.returncode}] {name}\n")
     log.flush()
 
-    # 控制台只给摘要，避免计划任务邮件被刷屏
-    tail = (p.stdout or "").strip().splitlines()[-12:] if p.stdout else []
-    for ln in tail:
+    # 控制台只给摘要，避免计划任务邮件被刷屏；但 [warn]/[FAIL] 必须优先带出来——
+    # 它们正是「缺数据要显式告警」的出口，被 tail 截掉等于没有告警。
+    # 2026-10-28 实测：信号脚本把「数据最新只到 X，当日日线尚未生成」打在 stdout
+    # 第 1 行，后面还有十几行，tail 12 把它整条截掉，只看控制台发现不了。
+    lines_out = (p.stdout or "").strip().splitlines()
+    alerts = [ln for ln in lines_out if "[warn]" in ln or "[FAIL]" in ln]
+    tail = lines_out[-12:]
+    shown = alerts + [ln for ln in tail if ln not in alerts]
+    for ln in shown:
         print(_safe(ln), flush=True)
     if p.returncode != 0:
         err_tail = (p.stderr or "").strip().splitlines()[-6:]

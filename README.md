@@ -18,7 +18,7 @@
   实盘链路按这个方案实现；
 - 三份真实数据集（2020-2024 / 2015-2019 / 2025-01~2026-10）**不入库**，仓库只存内容指纹
   `data/MANIFEST.json`；
-- 389 个测试；当前权威回测结果是 `results/EXP-20261022-*`。
+- 393 个测试；当前权威回测结果是 `results/EXP-20261022-*`。
 
 ## 2. 项目结构
 
@@ -55,7 +55,7 @@ a_share_quant/
 ```bash
 python -m venv .venv
 pip install -e ".[dev]"
-python -m pytest            # 389 passed；测试不读真实数据
+python -m pytest            # 393 passed；测试不读真实数据
 ```
 
 核心依赖：`pandas / numpy / scipy / matplotlib / pyyaml / pyarrow`。没有 GPU、没有数据库。
@@ -364,6 +364,16 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
     用现在的行业回头定义历史热点，分错组会换掉整个热点，前视比行业中性选股更直接。
     两处都没有时返回空组合并告警，不用全市场动量顶上。空仓是缺数据。
     在逐日快照接入之前，这条策略即使跑出收益也不进入研究判定。
+
+**实盘：演练的副作用**
+
+34. **`live_auto --stage trade --dry-run` 仍会刷新 `live/holdings.csv` 与
+    `live/logs/cash_<日期>.txt`**。委托、信号摘要、心跳都已隔离到 `live/_dryrun/`
+    （2026-10-27 修），但 `pull-holdings` 写的是生产路径——写进去的是**真实持仓**，
+    不是假数据，生产的 09:15 会重新覆盖，所以不会产生假委托。
+    风险在**盘中演练的时序错位**：持仓是当日的、信号日是前一交易日，
+    `diff_orders` 会算出「目标已达成」→ 0 笔委托，别据此判断策略行为。
+    （2026-10-28 首跑后演练实测：持仓 3 只当场被刷成当日，输出委托 0 笔。）
 
 ## 13. 纪律
 

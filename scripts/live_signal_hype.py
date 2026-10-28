@@ -84,6 +84,15 @@ def _load_holdings(path: str | None) -> dict[str, int]:
 
 
 def _resolve_as_of(cal, requested: str | None) -> pd.Timestamp:
+    """把 --as-of 落到数据集里真实存在的交易日。
+
+    自动化按**执行日**跑（今天），而数据集里当天 bar 还没生成（08:30 当日尚未收盘），
+    所以每个交易日都会回滚到上一交易日——这是设计，不是异常。两种回滚要分开说，
+    否则「不是交易日」会让人以为交易日历坏了（2026-10-28 首跑实测，每天一条）：
+      * ``ts`` 晚于数据最新日 -> 当日日线尚未生成，回滚（常态）
+      * ``ts`` 在数据范围内却不在其中 -> 确实不是交易日（周末/假日/数据缺口）
+    与 scripts/live_signal.py 的同名函数保持一致；测试锁住两处文案。
+    """
     dates = cal.dates
     if requested:
         ts = pd.Timestamp(requested).normalize()
@@ -92,7 +101,13 @@ def _resolve_as_of(cal, requested: str | None) -> pd.Timestamp:
         earlier = dates[dates <= ts]
         if len(earlier) == 0:
             raise SystemExit(f"--as-of {requested} 早于数据起点 {dates[0].date()}")
-        print(f"[warn] {requested} 不是交易日，改用 {earlier[-1].date()}", flush=True)
+        latest = pd.Timestamp(dates[-1]).normalize()
+        if ts > latest:
+            print(f"[warn] 数据最新只到 {latest.date()}（{ts.date()} 的日线尚未生成），"
+                  f"信号日取 {earlier[-1].date()}", flush=True)
+        else:
+            print(f"[warn] {requested} 不在数据集的交易日里（非交易日或数据缺口），"
+                  f"信号日取 {earlier[-1].date()}", flush=True)
         return earlier[-1]
     return dates[-1]
 

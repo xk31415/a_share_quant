@@ -502,3 +502,67 @@ def test_status_missing_in_window_warns(capsys):
         assert "停牌数据" in out and "[warn]" in out, f"status={st!r} 时应告警，实际 {out!r}"
 
 
+
+
+# ---------------------------------------------------------------- 信号日回滚的文案
+class _FakeCalendar:
+    """只提供 _resolve_as_of 用到的两个接口：``.dates`` 与 ``ts in cal``。"""
+
+    def __init__(self, dates: list[str]):
+        self.dates = pd.DatetimeIndex([pd.Timestamp(d) for d in dates])
+
+    def __contains__(self, ts) -> bool:
+        return pd.Timestamp(ts) in self.dates
+
+
+def test_resolve_as_of_distinguishes_missing_bar_from_non_trading_day(capsys):
+    """执行日回滚要分清「今天 bar 还没生成」和「今天真不是交易日」。
+
+    2026-10-28 首跑实测：09:15 打的是「2026-10-28 不是交易日，改用 2026-10-27」，
+    而那天是周三。真实原因只是 08:30 补数据时当天日线还没生成（尚未收盘）。
+    这不是偶发文案——自动化按执行日跑，所以**每个交易日都会出现一次**，
+    措辞错了会让人以为交易日历坏了，久之把真告警也一起忽略。
+    """
+    mod = _load_live_signal_script()
+    cal = _FakeCalendar(["2026-10-23", "2026-10-26", "2026-10-27"])
+
+    # ① 执行日（周三）晚于数据最新日 -> 当日日线尚未生成，回滚属常态
+    got = mod._resolve_as_of(cal, "2026-10-28")
+    out = capsys.readouterr().out
+    assert got == pd.Timestamp("2026-10-27"), got
+    assert "日线尚未生成" in out, f"要说明是数据没到今天，实际 {out!r}"
+    assert "不是交易日" not in out, f"周三不能说成不是交易日：{out!r}"
+
+    # ② 数据范围内的周六 -> 确实不是交易日
+    got = mod._resolve_as_of(cal, "2026-10-24")
+    out = capsys.readouterr().out
+    assert got == pd.Timestamp("2026-10-23"), got
+    assert "不在数据集的交易日里" in out, f"周末要按非交易日说，实际 {out!r}"
+
+    # ③ 早于数据起点仍然硬失败，不许静默回滚
+    with pytest.raises(SystemExit):
+        mod._resolve_as_of(cal, "2026-01-05")
+
+
+def test_both_signal_scripts_word_the_rollback_the_same(capsys):
+    """两个信号脚本各有一份 _resolve_as_of，文案必须逐字一致。
+
+    只改一处的话，切换 --strategy 就会看到同一件事两种说法，
+    下次排查时又要重新判断哪句可信。
+    """
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "scripts"
+    outs = []
+    for name in ("live_signal.py", "live_signal_hype.py"):
+        spec = importlib.util.spec_from_file_location(f"{name}_wording", root / name)
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        cal = _FakeCalendar(["2026-10-26", "2026-10-27"])
+        mod._resolve_as_of(cal, "2026-10-28")
+        outs.append(capsys.readouterr().out)
+
+    assert outs[0] == outs[1], f"两处文案不一致：\n  live_signal      {outs[0]!r}\n  live_signal_hype {outs[1]!r}"
+    assert "日线尚未生成" in outs[0]
