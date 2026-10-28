@@ -45,6 +45,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import math
 import os
 import subprocess
 import sys
@@ -215,6 +216,108 @@ def apply_execution_gate(orders: list[dict], quotes: dict) -> list[dict]:
         else:
             out.append(od)
     return out
+
+
+LOT_SIZE = 100
+
+
+def _ceil_cent(x: float) -> float:
+    """向上取整到 0.01（买入限价宁高勿低，否则挂着买不进）。"""
+    return math.ceil(round(float(x), 6) * 100 - 1e-9) / 100.0
+
+
+def _floor_cent(x: float) -> float:
+    """向下取整到 0.01（卖出限价宁低勿高）。"""
+    return math.floor(round(float(x), 6) * 100 + 1e-9) / 100.0
+
+
+def apply_execution_pricing(rows: list[dict], quotes: dict, *,
+                            slippage_rate: float = 0.0005,
+                            cash: float | None = None,
+                            cash_buffer: float = 0.0) -> tuple[list[dict], dict]:
+    """把委托价换成**执行日实时价 × (1 ± 滑点)**，现金不足时按比例缩减买入股数。
+
+    为什么不能用 orders.csv 里的价：那是**信号日收盘价**。回测
+    `backtest/execution.py` 用 `price_col="open"`（t+1 开盘价 + 滑点），
+    实盘挂信号日收盘价等于假设「任何票都能按昨收价买到」——系统性偏乐观。
+    2026-10-28 实测（三笔全错，方向还不一致）：
+      * 000678 委托 16.01，当日最低 16.66 -> 真实市场整天买不到，仿真凭空 +10%；
+      * 601086 委托 12.62，开盘 12.26 -> 真实买得更便宜，仿真多付 3%；
+      * 001318 委托 13.31，开盘 13.54 -> 真实要等盘中跌破才成交，不是开盘。
+    仿真环境下成交价完全由我们下的限价决定（掘金按限价立即全额成交），
+    所以「挂什么价」就是「成交什么价」，必须让它对齐执行日真实价格。
+
+    规则：
+      * 买入价 = 实时价 × (1 + slippage)，向上取整到分；卖出价 = × (1 - slippage)，
+        向下取整到分——宁可多给一分，也不要挂着不成交；
+      * 挂单价夹在当日涨跌停价之内（真实市场也不允许越界）；
+      * 买入总额超预算时**按比例缩减全部买单**（与 `ExecutionSimulator` 同口径），
+        不按顺序丢弃靠后的标的（那会引入与代码字典序相关的偏差）；
+        缩减后不足 1 手的标的不发单；
+      * 预算 = 可用现金 + 卖出预估所得（回测也是先卖后买、用释放后的资金）。
+
+    返回 ``(新列表, 统计)``；``statistics["scaled"]`` < 1 表示发生了缩减。
+    """
+    out: list[dict] = []
+    repriced = 0
+    slip = max(0.0, float(slippage_rate))
+
+    for od in rows:
+        row = dict(od)
+        side = (row.get("side") or "").lower()
+        if side not in ("buy", "sell"):
+            out.append(row)                     # hold 行原样透传
+            continue
+        q = quotes.get(str(row.get("symbol", "")).strip()) or {}
+        try:
+            px = float(q["price"]) if q.get("price") is not None else None
+        except (TypeError, ValueError):
+            px = None
+        if px is None or px <= 0:
+            out.append(row)                     # 闸门已按 blocked:no_quote 拦下，兜底透传
+            continue
+
+        if side == "buy":
+            limit_px = _ceil_cent(px * (1.0 + slip))
+            up = q.get("limit_up")
+            if up is not None and float(up) > 0:
+                limit_px = min(limit_px, round(float(up), 2))
+        else:
+            limit_px = _floor_cent(px * (1.0 - slip))
+            dn = q.get("limit_down")
+            if dn is not None and float(dn) > 0:
+                limit_px = max(limit_px, round(float(dn), 2))
+
+        try:
+            old_px = float(row.get("price") or 0.0)
+        except (TypeError, ValueError):
+            old_px = 0.0
+        if abs(limit_px - old_px) > 1e-9:
+            repriced += 1
+        row["price"] = limit_px
+        row["amount"] = round(int(float(row.get("shares") or 0)) * limit_px, 2)
+        out.append(row)
+
+    scaled = 1.0
+    dropped = 0
+    buys = [r for r in out
+            if (r.get("side") or "").lower() == "buy" and float(r.get("shares") or 0) > 0]
+    if buys and cash is not None:
+        budget = float(cash) * (1.0 - max(0.0, float(cash_buffer)))
+        budget += sum(int(float(r.get("shares") or 0)) * float(r.get("price") or 0.0)
+                      for r in out if (r.get("side") or "").lower() == "sell")
+        need = sum(int(float(r["shares"])) * float(r["price"]) for r in buys)
+        if need > budget:
+            scaled = budget / need if budget > 0 else 0.0
+            for r in buys:
+                lots = int(int(float(r["shares"])) * scaled) // LOT_SIZE * LOT_SIZE
+                if lots <= 0:
+                    dropped += 1
+                r["shares"] = lots
+                r["amount"] = round(lots * float(r["price"]), 2)
+
+    return out, {"repriced": repriced, "scaled": scaled, "dropped": dropped,
+                 "slippage": slip}
 
 
 def _fetch_execution_quotes(codes: list[str], date: str) -> dict:
@@ -415,6 +518,20 @@ def cmd_place_orders(args) -> int:
         gap_reasons[k] = gap_reasons.get(k, 0) + 1
     gap_desc = "，".join(f"{k} {v}" for k, v in sorted(gap_reasons.items()))
 
+    # ---- 执行日实时价定价（2026-10-28 方案 A，口径见 apply_execution_pricing）----
+    # 委托价从「信号日收盘」换成「执行日实时价 ×(1±滑点)」，与回测的
+    # price_col="open" + 滑点对齐；现金不足按比例缩减股数。
+    sent, pstats = apply_execution_pricing(
+        sent, quotes,
+        slippage_rate=float(getattr(args, "slippage", 0.0005)),
+        cash=None if getattr(args, "cash", None) is None else float(args.cash))
+    if pstats["repriced"]:
+        print(f"执行日定价：{pstats['repriced']}/{len(sent)} 笔改为实时价"
+              f"×(1±{pstats['slippage']:.4%})（orders.csv 的价只是信号日意图）")
+    if pstats["scaled"] < 1.0:
+        print(f"[warn] 现金不足，买入股数按比例缩减到 {pstats['scaled']:.1%}"
+              f"（{pstats['dropped']} 笔不足 1 手，不发单）", flush=True)
+
     if args.dry_run:
         for r in sent:
             code = str(r["symbol"]).strip()
@@ -595,6 +712,10 @@ def main() -> int:
     p.add_argument("--sells-first", action="store_true", default=True)
     p.add_argument("--no-sells-first", dest="sells_first", action="store_false")
     p.add_argument("--max-orders", type=int, default=200)
+    p.add_argument("--slippage", type=float, default=0.0005,
+                   help="执行日定价滑点：买入 ×(1+s)、卖出 ×(1-s)，与回测 cost_model 同义")
+    p.add_argument("--cash", type=float, default=None,
+                   help="账户可用现金；给了就按预算缩减买入股数（比例缩减，与回测同口径）")
 
     p = sub.add_parser("pull-fills", help="导出当日成交回报")
     p.add_argument("--out", required=True)

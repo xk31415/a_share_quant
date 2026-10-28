@@ -844,8 +844,8 @@ def test_dry_run_writes_signals_to_isolated_dir(tmp_path, monkeypatch):
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "scripts" / "live_auto.py").read_text(
         encoding="utf-8")
-    assert 'sig_out = "live/_dryrun" if args.dry_run else cfg["out_dir"]' in src, \
-        "演练必须写到隔离目录"
+    assert '        sig_out = "live/_dryrun"' in src, "演练必须写到隔离目录"
+    assert '        sig_out = cfg["out_dir"]' in src, "正式运行仍写生产目录"
     assert "find_recent_orders(cfg, out_dir=sig_out)" in src, \
         "取委托也要去隔离目录，否则会翻到生产目录的上一轮"
 
@@ -906,3 +906,264 @@ def test_run_step_console_still_truncates_without_warn(capsys):
     assert rc == 0
     assert "line 19" in out and "line 8" in out, out
     assert "line 7" not in out, f"超过 12 行的普通输出仍要截断：{out!r}"
+
+
+# ---------------------------------------------------------------- 演练必须隔离持仓与现金
+def test_stage_trade_dry_run_keeps_holdings_and_cash_off_production(monkeypatch, tmp_path):
+    """演练要连持仓与现金一起隔离，不只是 orders.csv。
+
+    2026-10-28 实测后果：`pull-holdings` 把演练时拉到的真实持仓写进生产
+    `live/holdings.csv`，15:35 的 reconcile 把它当「期初持仓」、当日成交再加一遍
+    —— 000678 从 10400 变成 20800（翻倍）。只隔离 orders.csv 挡不住这个，
+    而且演练本来只想看「会出什么单」，不该动账户账本。
+    """
+    import argparse
+    import os
+    from pathlib import Path
+
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-10-28")
+    monkeypatch.setattr(mod, "find_recent_orders", lambda cfg, out_dir=None: None)
+    seen = {}
+
+    def fake_retry(name, cmd, log, **kw):
+        seen[name] = cmd
+        return 0
+
+    def fake_step(name, cmd, log, **kw):
+        seen[name] = cmd
+        return 0
+
+    monkeypatch.setattr(mod, "run_step_retry", fake_retry)
+    monkeypatch.setattr(mod, "run_step", fake_step)
+
+    cfg = {"python_data": "py", "data_dir": "data/x", "holdings": "live/holdings.csv",
+           "out_dir": "live", "log_dir": "live/logs", "position": 0.5,
+           "strategy": "hype_watch", "themes": None}
+    devnull = open(os.devnull, "w", encoding="utf-8")
+
+    rc = mod.stage_trade(cfg, devnull, argparse.Namespace(dry_run=True))
+    assert rc == 0, rc
+    pull = seen["pull-holdings"]
+    assert pull[pull.index("--out") + 1] == "live/_dryrun/holdings.csv", \
+        f"演练仍写生产持仓：{pull}"
+    assert "_dryrun" in pull[pull.index("--cash-out") + 1], f"现金也要隔离：{pull}"
+    sig = seen["live_signal[hype_watch]"]
+    assert sig[sig.index("--holdings") + 1] == "live/_dryrun/holdings.csv", \
+        f"信号要读隔离持仓，否则与 --out 不一致：{sig}"
+
+    # 正式运行仍然写生产路径（默认分支不变）
+    seen.clear()
+    rc = mod.stage_trade(cfg, devnull, argparse.Namespace(dry_run=False))
+    assert rc == 0
+    pull = seen["pull-holdings"]
+    assert pull[pull.index("--out") + 1] == "live/holdings.csv", pull
+    cash_arg = pull[pull.index("--cash-out") + 1]
+    assert cash_arg.endswith("cash_2026-10-28.txt") and "_dryrun" not in cash_arg, cash_arg
+    sig = seen["live_signal[hype_watch]"]
+    assert sig[sig.index("--holdings") + 1] == "live/holdings.csv", sig
+    devnull.close()
+
+
+# ---------------------------------------------------------------- 执行日实时价定价（方案 A）
+def test_execution_pricing_uses_live_price_not_signal_close():
+    """挂单价必须来自执行日实时价，不是 orders.csv 里的信号日收盘价。
+
+    2026-10-28 实测三笔全错、方向还不一致：000678 挂 16.01（昨收）而当日最低 16.66
+    ——真实市场整天买不到，仿真凭空 +10%；601086 挂 12.62 而开盘 12.26，多付 3%。
+    回测 `backtest/execution.py` 用的是 `price_col="open"`（t+1 开盘价 + 滑点），
+    实盘挂信号日收盘价等于假设「任何票都能按昨收价买到」，系统性偏乐观。
+    """
+    mod = _load_script("gm_bridge.py")
+    quotes = {
+        "AAA": {"price": 16.96, "limit_up": 17.61, "limit_down": 14.41, "suspended": False},
+        "BBB": {"price": 12.26, "limit_up": 13.88, "limit_down": 11.36, "suspended": False},
+    }
+    rows = [
+        {"symbol": "AAA", "side": "buy", "shares": 10400, "price": 16.01, "amount": 166504.0},
+        {"symbol": "BBB", "side": "sell", "shares": 1000, "price": 12.62, "amount": 12620.0},
+        {"symbol": "CCC", "side": "hold", "shares": 0, "price": 1.0, "amount": 0.0},
+    ]
+    out, st = mod.apply_execution_pricing(rows, quotes, slippage_rate=0.0005)
+
+    assert out[0]["price"] == 16.97, out[0]        # 16.96×1.0005=16.9685 -> 向上取整到分
+    assert out[0]["amount"] == round(10400 * 16.97, 2)
+    assert out[1]["price"] == 12.25, out[1]        # 12.26×0.9995=12.2539 -> 向下取整到分
+    assert out[2] == rows[2], "hold 行必须原样透传，不参与定价"
+    assert st["repriced"] == 2 and st["scaled"] == 1.0
+    # 原始 orders 不能被就地改写（对账还要看意图价）
+    assert rows[0]["price"] == 16.01
+
+
+def test_execution_pricing_clamps_to_limit_prices():
+    """挂单价不能越过当日涨跌停价（真实市场也不允许越界报价）。"""
+    mod = _load_script("gm_bridge.py")
+    quotes = {
+        "UP": {"price": 17.60, "limit_up": 17.61, "limit_down": 14.41, "suspended": False},
+        "DN": {"price": 14.42, "limit_up": 17.61, "limit_down": 14.41, "suspended": False},
+    }
+    out, _ = mod.apply_execution_pricing(
+        [{"symbol": "UP", "side": "buy", "shares": 100, "price": 16.01, "amount": 1601.0},
+         {"symbol": "DN", "side": "sell", "shares": 100, "price": 15.00, "amount": 1500.0}],
+        quotes, slippage_rate=0.01)
+    assert out[0]["price"] == 17.61, f"买入价不能超过涨停价：{out[0]}"
+    assert out[1]["price"] == 14.41, f"卖出价不能低于跌停价：{out[1]}"
+
+
+def test_execution_pricing_scales_buys_to_cash_in_lots():
+    """现金不足时按比例缩减全部买单（整手），不是按顺序丢掉靠后的标的。
+
+    与 `ExecutionSimulator` 同口径：按序丢弃会造成与代码字典序相关的偏差。
+    """
+    mod = _load_script("gm_bridge.py")
+    quotes = {s: {"price": 10.0, "limit_up": 11.0, "limit_down": 9.0, "suspended": False}
+              for s in ("A", "B")}
+    rows = [{"symbol": s, "side": "buy", "shares": 10000, "price": 9.0, "amount": 90000.0}
+            for s in ("A", "B")]
+    # 每笔 10000×10.01=100,100，合计 200,200；预算 100,000 -> 需缩到约 45%
+    out, st = mod.apply_execution_pricing(rows, quotes, slippage_rate=0.001, cash=100_000.0)
+
+    assert st["scaled"] < 1.0, st
+    for r in out:
+        assert r["shares"] % mod.LOT_SIZE == 0, f"必须整手：{r}"
+        assert r["shares"] > 0, f"两笔都要保留（比例缩减不是按序丢弃）：{out}"
+    total = sum(r["shares"] * r["price"] for r in out)
+    assert total <= 100_000.0 + 1e-6, f"缩完仍超预算：{total}"
+    # 两笔股数应当一致（标的对称、价相同）
+    assert out[0]["shares"] == out[1]["shares"], out
+
+
+def test_execution_pricing_without_cash_does_not_scale():
+    """没传 --cash 就不约束（手动调 gm_bridge 时的默认行为）。"""
+    mod = _load_script("gm_bridge.py")
+    quotes = {"A": {"price": 10.0, "limit_up": 11.0, "limit_down": 9.0, "suspended": False}}
+    rows = [{"symbol": "A", "side": "buy", "shares": 10000, "price": 9.0, "amount": 90000.0}]
+    out, st = mod.apply_execution_pricing(rows, quotes)
+    assert out[0]["shares"] == 10000 and st["scaled"] == 1.0
+
+
+# ---------------------------------------------------------------- 等到开盘再下单
+def test_wait_until_skips_when_past_or_bad_format(monkeypatch):
+    """已过目标时刻就立即下单（机器晚开机），格式错只告警不等待。"""
+    mod = _load_script("live_auto.py")
+    slept = []
+    monkeypatch.setattr(mod.time, "sleep", lambda s: slept.append(s))
+
+    assert mod._wait_until("00:00:01") == 0.0, "已过的时刻不该等"
+    assert mod._wait_until("bad") == 0.0, "格式错不该等"
+    assert slept == [], f"这两种情况都不该 sleep：{slept}"
+
+
+def test_wait_until_sleeps_to_target(monkeypatch):
+    """未到目标时刻就 sleep 到那一刻（下单时才有开盘价）。"""
+    mod = _load_script("live_auto.py")
+    slept = []
+    monkeypatch.setattr(mod.time, "sleep", lambda s: slept.append(s))
+    wait = mod._wait_until("23:59:59")
+    assert wait > 0, wait
+    assert len(slept) == 1 and slept[0] == wait, slept
+
+
+def test_stage_trade_waits_for_order_time_before_placing(monkeypatch, tmp_path):
+    """真实下单前必须等到 order_time（09:30:05），不能 09:15 拉完信号就挂单。
+
+    计划任务固定在 09:15 启动，而修改任务时间要重新输入注册时那个管理员密码
+    （Windows 对「存储密码」的任务，任何配置变更都要求重输）——所以等待放在脚本里。
+    这条测试锁住「等待确实发生在 place-orders 之前」，与计划任务的时间无关。
+    """
+    import argparse
+    import os
+    from pathlib import Path
+
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-10-28")
+
+    orders_file = Path(tmp_path) / "live" / "2026-10-27" / "orders.csv"
+    orders_file.parent.mkdir(parents=True)
+    orders_file.write_text("symbol,side,shares,price,amount,note\n"
+                           "600000,buy,100,10.0,1000,x\n", encoding="utf-8")
+    monkeypatch.setattr(mod, "find_recent_orders", lambda cfg, out_dir=None: orders_file)
+    monkeypatch.setattr(mod, "run_step_retry", lambda *a, **k: 0)
+    monkeypatch.setattr(mod, "run_step", lambda *a, **k: 0)
+
+    waited = []
+    monkeypatch.setattr(mod, "_wait_until",
+                        lambda t, log=None: (waited.append(t), 0.0)[1])
+
+    cfg = {"python_data": "py", "data_dir": "data/x", "holdings": "live/holdings.csv",
+           "out_dir": "live", "log_dir": "live/logs", "position": 0.5,
+           "strategy": "hype_watch", "themes": None,
+           "order_time": "09:30:05", "auto_trade": True,
+           "order_type": "limit", "max_orders": 200, "slippage_rate": 0.0005}
+    devnull = open(os.devnull, "w", encoding="utf-8")
+
+    rc = mod.stage_trade(cfg, devnull, argparse.Namespace(dry_run=False))
+    assert rc == 0, rc
+    assert waited == ["09:30:05"], f"真实下单前必须等到 order_time：{waited}"
+
+    # 演练随时可跑，不等到点
+    waited.clear()
+    rc = mod.stage_trade(cfg, devnull, argparse.Namespace(dry_run=True))
+    assert rc == 0
+    assert waited == [], f"dry-run 不该等：{waited}"
+
+    # --no-wait 供手动测试绕过
+    waited.clear()
+    rc = mod.stage_trade(cfg, devnull, argparse.Namespace(dry_run=False, no_wait=True))
+    assert rc == 0
+    assert waited == [], f"--no-wait 不该等：{waited}"
+    devnull.close()
+
+
+def test_stage_trade_waits_for_order_time_before_placing(monkeypatch, tmp_path):
+    """真实下单前必须等到 order_time（09:30:05），不能 09:15 拉完信号就挂单。
+
+    计划任务固定在 09:15 启动，而修改任务时间要重新输入注册时那个管理员密码
+    （Windows 对「存储密码」的任务，任何配置变更都要求重输）——所以等待放在脚本里。
+    这条测试锁住「等待确实发生在 place-orders 之前」，与计划任务的时间无关。
+    """
+    import argparse
+    import os
+    from pathlib import Path
+
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-10-28")
+
+    orders_file = Path(tmp_path) / "live" / "2026-10-27" / "orders.csv"
+    orders_file.parent.mkdir(parents=True)
+    orders_file.write_text("symbol,side,shares,price,amount,note\n"
+                           "600000,buy,100,10.0,1000,x\n", encoding="utf-8")
+    monkeypatch.setattr(mod, "find_recent_orders", lambda cfg, out_dir=None: orders_file)
+    monkeypatch.setattr(mod, "run_step_retry", lambda *a, **k: 0)
+    monkeypatch.setattr(mod, "run_step", lambda *a, **k: 0)
+
+    waited = []
+    monkeypatch.setattr(mod, "_wait_until",
+                        lambda t, log=None: (waited.append(t), 0.0)[1])
+
+    cfg = {"python_data": "py", "data_dir": "data/x", "holdings": "live/holdings.csv",
+           "out_dir": "live", "log_dir": "live/logs", "position": 0.5,
+           "strategy": "hype_watch", "themes": None,
+           "order_time": "09:30:05", "auto_trade": True,
+           "order_type": "limit", "max_orders": 200, "slippage_rate": 0.0005}
+    devnull = open(os.devnull, "w", encoding="utf-8")
+
+    rc = mod.stage_trade(cfg, devnull, argparse.Namespace(dry_run=False))
+    assert rc == 0, rc
+    assert waited == ["09:30:05"], f"真实下单前必须等到 order_time：{waited}"
+
+    # 演练随时可跑，不等到点
+    waited.clear()
+    rc = mod.stage_trade(cfg, devnull, argparse.Namespace(dry_run=True))
+    assert rc == 0
+    assert waited == [], f"dry-run 不该等：{waited}"
+
+    # --no-wait 供手动测试绕过
+    waited.clear()
+    rc = mod.stage_trade(cfg, devnull, argparse.Namespace(dry_run=False, no_wait=True))
+    assert rc == 0
+    assert waited == [], f"--no-wait 不该等：{waited}"
+    devnull.close()

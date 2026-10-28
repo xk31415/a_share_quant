@@ -34,6 +34,7 @@ import datetime as dt
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -202,6 +203,44 @@ def today() -> str:
     return dt.date.today().isoformat()
 
 
+def _wait_until(hhmmss: str, log=None) -> float:
+    """等到当天 hh:mm:ss 再往下走；已过就立即返回。返回实际等待秒数。
+
+    为什么需要等：**09:15 只是集合竞价的申报窗口**，09:20-09:25 不可撤单，
+    09:25 才撮合出开盘价，09:30 才连续竞价。在 09:15 下单时没有任何真实成交价，
+    只能拿信号日收盘价挂限价——2026-10-28 实测 3 笔里 2 笔真实买不到
+    （000678 委托 16.01，当日最低 16.66），1 笔多付 3%。
+    回测 `execution.py` 的口径是 t+1 **开盘价**，所以必须等开盘后再挂单。
+
+    实现方式选「脚本内等待」而不是「把计划任务改到 09:30」：
+      * schtasks /change 改时间要重新输入管理员密码，非交互会话里拿不到；
+      * 顺带拿到秒级精度（schtasks 的 /st 只能到分钟）。
+    计划任务仍 09:15 启动，前面几步（拉持仓、算信号）先跑完，只压住下单。
+
+    若启动时已过目标时刻（机器晚开机），立即下单——用当时的价格，不假装还赶得上开盘。
+    """
+    try:
+        h, m, s = (int(x) for x in str(hhmmss).split(":"))
+    except (TypeError, ValueError):
+        print(f"[warn] order_time 格式应为 HH:MM:SS，收到 {hhmmss!r}，不等待", flush=True)
+        return 0.0
+    now = dt.datetime.now()
+    target = now.replace(hour=h, minute=m, second=s, microsecond=0)
+    wait = (target - now).total_seconds()
+    if wait <= 0:
+        print(f"[info] order_time {target:%H:%M:%S} 已过（现在 {now:%H:%M:%S}），直接下单",
+              flush=True)
+        return 0.0
+    msg = (f"等到 {target:%H:%M:%S} 再下单：09:15 是申报窗口，开盘价 09:25 才撮合、"
+           f"09:30 才连续竞价")
+    print(f"\n{msg}，剩余 {wait / 60:.1f} 分钟", flush=True)
+    if log is not None:
+        log.write(f"[wait] {msg} wait={wait:.0f}s\n")
+        log.flush()
+    time.sleep(wait)
+    return wait
+
+
 def find_recent_orders(cfg: dict, max_age_hours: float = 24.0,
                        out_dir: str | None = None) -> Path | None:
     """找最近写入的 orders.csv。
@@ -307,13 +346,23 @@ def stage_trade(cfg: dict, log, args) -> int:
     """导出持仓 -> 算信号 -> 下单。"""
     py = cfg["python_data"]
     date = today()
-    holdings = ROOT / cfg["holdings"]
-    cash_file = ROOT / cfg["log_dir"] / f"cash_{date}.txt"
+    # 演练把持仓与现金也隔离到 live/_dryrun/。只隔离 orders.csv 不够：
+    # pull-holdings 若写生产 holdings.csv，15:35 的 reconcile 会把它当「期初持仓」，
+    # 再把当日成交加一遍 -> 持仓翻倍。2026-10-28 实测：10400 -> 20800。
+    # 演练的目的是看「会出什么单」，不该动账户账本。
+    if args.dry_run:
+        sig_out = "live/_dryrun"
+        holdings_out = "live/_dryrun/holdings.csv"
+        cash_file = ROOT / "live" / "_dryrun" / "cash.txt"
+    else:
+        sig_out = cfg["out_dir"]
+        holdings_out = cfg["holdings"]
+        cash_file = ROOT / cfg["log_dir"] / f"cash_{date}.txt"
 
     # 1) 从掘金取持仓与现金
     rc = run_step_retry("pull-holdings", [
         py, "scripts/gm_bridge.py", "pull-holdings",
-        "--out", cfg["holdings"],
+        "--out", holdings_out,
         "--cash-out", str(cash_file),
     ], log, timeout=120)
     if rc != 0:
@@ -331,12 +380,11 @@ def stage_trade(cfg: dict, log, args) -> int:
     #    演练写到 live/_dryrun/ 而不是 live/<date>/：否则演练产出的 orders.csv
     #    会留在生产目录里，被下一轮的 find_recent_orders 当成真委托（PR #12 让
     #    信号脚本的 --dry-run 不写盘，但演练又要过闸门、需要这份文件，只能隔离）。
-    sig_out = "live/_dryrun" if args.dry_run else cfg["out_dir"]
     strat = str(cfg.get("strategy", "equal_weight")).lower()
     if strat == "hype_watch":
         sig_cmd = [py, "scripts/live_signal_hype.py",
                    "--data-dir", cfg["data_dir"],
-                   "--holdings", cfg["holdings"],
+                   "--holdings", holdings_out,
                    "--out-dir", sig_out,
                    "--as-of", date,
                    "--position", str(cfg["position"])]
@@ -346,7 +394,7 @@ def stage_trade(cfg: dict, log, args) -> int:
     else:
         sig_cmd = [py, "scripts/live_signal.py",
                    "--data-dir", cfg["data_dir"],
-                   "--holdings", cfg["holdings"],
+                   "--holdings", holdings_out,
                    "--out-dir", sig_out,
                    "--sample", cfg["sample"],
                    "--as-of", date,
@@ -366,14 +414,25 @@ def stage_trade(cfg: dict, log, args) -> int:
         return 0
     print(f"\n委托文件：{orders}")
 
+    # 2.5) 等开盘再下单（口径见 _wait_until）。演练与 --no-wait 不等。
+    if not args.dry_run and not getattr(args, "no_wait", False):
+        _wait_until(str(cfg.get("order_time", "09:30:05")), log)
+
     # 3) 下单
+    #    执行日实时价定价（2026-10-28 方案 A）：挂单价由 gm_bridge 用 current() 的实时价
+    #    ×(1±滑点) 重算，与回测 price_col="open" + 滑点对齐；--cash 让它按预算缩减股数。
+    #    09:15 那版用信号日收盘价挂单，实测 3 笔里 2 笔真实买不到、1 笔多付 3%。
+    price_args = ["--slippage", str(cfg.get("slippage_rate", 0.0005))]
+    if cash is not None:
+        price_args += ["--cash", str(cash)]
+
     if args.dry_run or not cfg.get("auto_trade"):
         why = "--dry-run" if args.dry_run else "config live.yaml 的 auto_trade=false"
         print(f"\n{why}：跳过实际下单。委托文件在 {orders}")
         rc = run_step_retry("place-orders(dry-run)", [
             py, "scripts/gm_bridge.py", "place-orders",
             "--orders", str(orders), "--dry-run",
-            "--max-orders", str(cfg["max_orders"]),
+            "--max-orders", str(cfg["max_orders"]), *price_args,
         ], log, timeout=120)
         return rc
 
@@ -385,7 +444,7 @@ def stage_trade(cfg: dict, log, args) -> int:
         py, "scripts/gm_bridge.py", "place-orders",
         "--orders", str(orders),
         "--order-type", str(cfg["order_type"]),
-        "--max-orders", str(cfg["max_orders"]),
+        "--max-orders", str(cfg["max_orders"]), *price_args,
     ], log, timeout=300)
 
 
@@ -537,6 +596,8 @@ def main() -> int:
                     required=True)
     ap.add_argument("--dry-run", action="store_true",
                     help="数据不写盘 / 下单不发送，全链路演练用")
+    ap.add_argument("--no-wait", action="store_true",
+                    help="不等 order_time 直接下单（手动测试用；生产不要加）")
     args = ap.parse_args()
 
     cfg = config()

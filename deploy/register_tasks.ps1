@@ -38,7 +38,12 @@ $Watchdog = Join-Path $Root "scripts\watchdog.py"
 
 $jobs = @(
     @{Name="a_share_quant_data";   Tr=('"'+$PyData+'" "'+$Script+'" --stage data');   At="08:30"},
-    @{Name="a_share_quant_trade";  Tr=('"'+$PyData+'" "'+$Script+'" --stage trade');  At="09:15"},
+    # trade 用 09:29 启动（提前 1 分钟）：stage_trade 跑完「拉持仓 + 算信号」（约 25 秒）
+    # 后会等到 live.yaml 的 order_time（09:30:05）才下单。为什么不能 09:15：那只是集合
+    # 竞价的申报窗口，09:25 才撮合出开盘价、09:30 才连续竞价，在 09:15 下单只能拿信号日
+    # 收盘价挂限价——2026-10-28 实测 3 笔里 2 笔真实买不到。提前 1 分钟是为了让订单时刻
+    # 稳定落在 09:30:05，不被前面步骤的耗时波动推后（若写 09:30，实际下单会是 09:30:25）。
+    @{Name="a_share_quant_trade";  Tr=('"'+$PyData+'" "'+$Script+'" --stage trade');  At="09:29"},
     @{Name="a_share_quant_settle"; Tr=('"'+$PyData+'" "'+$Script+'" --stage settle'); At="15:35"}
 )
 
