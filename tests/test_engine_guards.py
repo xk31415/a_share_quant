@@ -1068,59 +1068,7 @@ def test_wait_until_sleeps_to_target(monkeypatch):
 def test_stage_trade_waits_for_order_time_before_placing(monkeypatch, tmp_path):
     """真实下单前必须等到 order_time（09:30:05），不能 09:15 拉完信号就挂单。
 
-    计划任务固定在 09:15 启动，而修改任务时间要重新输入注册时那个管理员密码
-    （Windows 对「存储密码」的任务，任何配置变更都要求重输）——所以等待放在脚本里。
-    这条测试锁住「等待确实发生在 place-orders 之前」，与计划任务的时间无关。
-    """
-    import argparse
-    import os
-    from pathlib import Path
-
-    mod = _load_script("live_auto.py")
-    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
-    monkeypatch.setattr(mod, "today", lambda: "2026-10-28")
-
-    orders_file = Path(tmp_path) / "live" / "2026-10-27" / "orders.csv"
-    orders_file.parent.mkdir(parents=True)
-    orders_file.write_text("symbol,side,shares,price,amount,note\n"
-                           "600000,buy,100,10.0,1000,x\n", encoding="utf-8")
-    monkeypatch.setattr(mod, "find_recent_orders", lambda cfg, out_dir=None: orders_file)
-    monkeypatch.setattr(mod, "run_step_retry", lambda *a, **k: 0)
-    monkeypatch.setattr(mod, "run_step", lambda *a, **k: 0)
-
-    waited = []
-    monkeypatch.setattr(mod, "_wait_until",
-                        lambda t, log=None: (waited.append(t), 0.0)[1])
-
-    cfg = {"python_data": "py", "data_dir": "data/x", "holdings": "live/holdings.csv",
-           "out_dir": "live", "log_dir": "live/logs", "position": 0.5,
-           "strategy": "hype_watch", "themes": None,
-           "order_time": "09:30:05", "auto_trade": True,
-           "order_type": "limit", "max_orders": 200, "slippage_rate": 0.0005}
-    devnull = open(os.devnull, "w", encoding="utf-8")
-
-    rc = mod.stage_trade(cfg, devnull, argparse.Namespace(dry_run=False))
-    assert rc == 0, rc
-    assert waited == ["09:30:05"], f"真实下单前必须等到 order_time：{waited}"
-
-    # 演练随时可跑，不等到点
-    waited.clear()
-    rc = mod.stage_trade(cfg, devnull, argparse.Namespace(dry_run=True))
-    assert rc == 0
-    assert waited == [], f"dry-run 不该等：{waited}"
-
-    # --no-wait 供手动测试绕过
-    waited.clear()
-    rc = mod.stage_trade(cfg, devnull, argparse.Namespace(dry_run=False, no_wait=True))
-    assert rc == 0
-    assert waited == [], f"--no-wait 不该等：{waited}"
-    devnull.close()
-
-
-def test_stage_trade_waits_for_order_time_before_placing(monkeypatch, tmp_path):
-    """真实下单前必须等到 order_time（09:30:05），不能 09:15 拉完信号就挂单。
-
-    计划任务固定在 09:15 启动，而修改任务时间要重新输入注册时那个管理员密码
+    计划任务固定在 09:29 启动，而修改任务时间要重新输入注册时那个管理员密码
     （Windows 对「存储密码」的任务，任何配置变更都要求重输）——所以等待放在脚本里。
     这条测试锁住「等待确实发生在 place-orders 之前」，与计划任务的时间无关。
     """

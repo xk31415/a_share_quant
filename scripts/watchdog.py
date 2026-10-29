@@ -90,7 +90,7 @@ def _load_live_auto():
 # stage -> (计划时刻, 宽限分钟)。与 deploy/register_tasks.ps1 保持一致。
 SCHEDULE: dict[str, tuple[str, int]] = {
     "data": ("08:30", 30),
-    "trade": ("09:15", 30),
+    "trade": ("09:30", 10),          # 09:29 启动、等 09:30:05 下单，约 09:30:10 结束
     "settle": ("15:35", 30),
 }
 SUMMARY_AFTER = "16:00"          # 每日汇总的最早发出时间

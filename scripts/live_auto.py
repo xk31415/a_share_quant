@@ -13,7 +13,7 @@
 三个 stage
 ----------
     data    （建议 08:30）更新行情数据到 T-1
-    trade   （建议 09:15）导出持仓 -> 算信号 -> 下单
+    trade   （建议 09:29）导出持仓 -> 算信号 -> 等开盘 -> 下单
     settle  （建议 15:35）取成交回报 -> 对账 -> 更新持仓
 
 用法
@@ -215,7 +215,7 @@ def _wait_until(hhmmss: str, log=None) -> float:
     实现方式选「脚本内等待」而不是「把计划任务改到 09:30」：
       * schtasks /change 改时间要重新输入管理员密码，非交互会话里拿不到；
       * 顺带拿到秒级精度（schtasks 的 /st 只能到分钟）。
-    计划任务仍 09:15 启动，前面几步（拉持仓、算信号）先跑完，只压住下单。
+    计划任务 09:29 启动，前面几步（拉持仓、算信号）先跑完，只压住下单。
 
     若启动时已过目标时刻（机器晚开机），立即下单——用当时的价格，不假装还赶得上开盘。
     """
@@ -231,8 +231,8 @@ def _wait_until(hhmmss: str, log=None) -> float:
         print(f"[info] order_time {target:%H:%M:%S} 已过（现在 {now:%H:%M:%S}），直接下单",
               flush=True)
         return 0.0
-    msg = (f"等到 {target:%H:%M:%S} 再下单：09:15 是申报窗口，开盘价 09:25 才撮合、"
-           f"09:30 才连续竞价")
+    msg = (f"等到 {target:%H:%M:%S} 再下单：09:15-09:25 是集合竞价的申报与撮合阶段"
+           f"（09:25 才出开盘价），09:30 起连续竞价")
     print(f"\n{msg}，剩余 {wait / 60:.1f} 分钟", flush=True)
     if log is not None:
         log.write(f"[wait] {msg} wait={wait:.0f}s\n")
