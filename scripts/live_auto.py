@@ -352,24 +352,119 @@ def symbol_names(cfg: dict) -> dict[str, str]:
     return out
 
 
+def prev_bars(cfg: dict, date: str | None = None) -> tuple[str, dict[str, dict]]:
+    """返回 `(基准日, {代码: {close, limit_up, limit_down}})`，用来算"当日涨跌幅"。
+
+    基准取 `bars.parquet` 里**严格早于 date 的最后一个交易日**。为什么不用
+    "最新一行"：行情每天 08:30 才补到前一交易日，T 日运行时最新一行正好是 T-1；
+    但哪天更新漏了，最新一行会变成 T-2，拿它当"昨日"就把两天涨跌算成一天，
+    而且从数字上看不出来。按 date 过滤 + 标题写明基准日，滞后时能当场看见。
+
+    **任何失败返回 `("", {})`** —— 与 `symbol_names` 同理，涨跌幅只是让消息好读，
+    不能因为它让推送发不出去。
+    """
+    data_dir = cfg.get("data_dir")
+    if not data_dir:
+        return "", {}
+    try:
+        import pandas as pd
+        df = pd.read_parquet(ROOT / data_dir / "bars.parquet",
+                             columns=["trade_date", "symbol", "close",
+                                      "limit_up", "limit_down"])
+    except Exception:                # noqa: BLE001
+        return "", {}
+    if date:
+        try:
+            df = df[df["trade_date"] < pd.Timestamp(str(date))]
+        except (TypeError, ValueError):
+            return "", {}
+    if df.empty:
+        return "", {}
+    last = df["trade_date"].max()
+    day = df[df["trade_date"] == last]
+    num = lambda v: float(v) if pd.notna(v) else 0.0  # noqa: E731（NaN 是 truthy，`or 0` 拦不住）
+    out = {str(s): {"close": num(c), "limit_up": num(lu), "limit_down": num(ld)}
+           for s, c, lu, ld in zip(day["symbol"], day["close"],
+                                   day["limit_up"], day["limit_down"])}
+    return str(last)[:10], out
+
+
+def trading_days(cfg: dict) -> list[str]:
+    """`calendar.csv` 里的交易日（字符串，可逐个比较大小）。读不到返回空列表。"""
+    data_dir = cfg.get("data_dir")
+    if not data_dir:
+        return []
+    try:
+        with (ROOT / data_dir / "calendar.csv").open(encoding="utf-8-sig", newline="") as f:
+            return [r["trade_date"].strip() for r in csv.DictReader(f)
+                    if (r.get("trade_date") or "").strip()]
+    except (OSError, csv.Error, KeyError):
+        return []
+
+
+def basis_for(cfg: dict, date: str | None = None) -> tuple[dict[str, dict], str]:
+    """涨跌幅基准 + 标题后缀：`({代码: bar}, "；涨跌幅 vs 10-29 收盘")`。
+
+    这里多做一道校验：`bars` 的最新日必须正好是 `date` 的前一交易日。若行情停在
+    更早的某天（data 段漏更新），`prev_bars` 给出的"基准"其实是好几天前——
+    差额会被当成"当日涨跌幅"报出去（实测把 9 个月的 +45% 标成当天涨幅）。
+    宁可少一个数字，也不能给一个看不出错的数字：这种情况下不返回基准，
+    改在标题上写明行情停在哪天，那本身就是该告警的事。
+    """
+    day, bars = prev_bars(cfg, date or dt.date.today().isoformat())
+    if not day:
+        return {}, ""
+    days = [d for d in trading_days(cfg) if d < (date or dt.date.today().isoformat())]
+    if days and days[-1] != day:
+        return {}, f"；涨跌幅未算（行情最新 {_md(day)}）"
+    return bars, f"；涨跌幅 vs {_md(day)} 收盘"
+
+
+def _md(day: str) -> str:
+    """"2026-10-29" -> "10-29"：推送里省掉年份（当日的消息，跨年才需要年）。"""
+    return day[5:] if len(day) == 10 else day
+
+
+def _chg(px: float, bar: dict | None) -> str:
+    """涨跌幅文本，如 `-4.39%`；封板时补 `涨停`/`跌停`。没有基准返回空串——不编造。"""
+    if not bar:
+        return ""
+    base = float(bar.get("close") or 0)
+    if base <= 0 or px <= 0:
+        return ""
+    s = f"{(px - base) / base:+.2%}"
+    for key, tag in (("limit_up", "涨停"), ("limit_down", "跌停")):
+        lim = float(bar.get(key) or 0)
+        if lim > 0 and abs(px - lim) < 0.005:      # 浮点半分钱内算封板
+            s += f" {tag}"
+            break
+    return s
+
+
 def _label(sym: str, names: dict[str, str] | None) -> str:
     name = (names or {}).get(sym, "")
     return f"{sym} {name}".strip() if name else sym
 
 
-def _order_line(r: dict, names: dict[str, str] | None = None) -> str:
+def _order_line(r: dict, names: dict[str, str] | None = None,
+                basis: dict[str, dict] | None = None) -> str:
     side = "卖" if (r.get("side") or "").lower() == "sell" else "买"
     shares = int(float(r.get("shares") or 0))
     price = float(r.get("price") or 0)
-    return f"- {side} {_label(r['symbol'], names)} {shares:,} 股 @ {price:.2f}"
+    line = f"- {side} {_label(r['symbol'], names)} {shares:,} 股 @ {price:.2f}"
+    chg = _chg(price, (basis or {}).get(str(r["symbol"])))
+    # 全角空格分隔：钉钉/markdown 会把连续半角空格折叠掉，字段就串在一起了。
+    return f"{line}　{chg}" if chg else line
 
 
-def trade_lines(cfg: dict, dry_run: bool = False) -> list[str]:
+def trade_lines(cfg: dict, dry_run: bool = False, date: str | None = None) -> list[str]:
     """「今日委托」块。取 placement.csv（**实际挂单价**），不是 orders.csv 的信号日意图价。
 
     为什么推送要带这个：光看「✅ trade 成功」不知道今天买了什么、挂的什么价。
     而挂单价和信号日价往往差好几个点（2026-10-29 的 000678：意图 17.61、实挂 18.86），
     这正是人要知道的那层信息。
+
+    涨跌幅 = 挂单价 vs 前一交易日收盘（`date` 缺省为今天，即执行日）。
     """
     orders = find_recent_orders(cfg, out_dir="live/_dryrun" if dry_run else None)
     if orders is None:
@@ -378,11 +473,12 @@ def trade_lines(cfg: dict, dry_run: bool = False) -> list[str]:
     if not rows:
         return []
     names = symbol_names(cfg)
+    basis, vs = basis_for(cfg, date)
     buys = [r for r in rows if (r.get("side") or "").lower() == "buy"]
     sells = [r for r in rows if (r.get("side") or "").lower() == "sell"]
     amt = lambda rs: sum(int(float(r["shares"])) * float(r["price"]) for r in rs)  # noqa: E731
-    out = [f"\n**今日委托 {len(rows)} 笔**（挂单价 = 执行日实时价 ×(1±滑点)）"]
-    out += [_order_line(r, names) for r in sells + buys]
+    out = [f"\n**今日委托 {len(rows)} 笔**（挂单价 = 执行日实时价 ×(1±滑点){vs}）"]
+    out += [_order_line(r, names, basis) for r in sells + buys]
     out.append(f"买入 {len(buys)} 笔 {_money(amt(buys))} ｜ 卖出 {len(sells)} 笔 {_money(amt(sells))}")
     return out
 
@@ -434,38 +530,55 @@ def settle_lines(cfg: dict, date: str) -> list[str]:
     """「今日成交 + 持仓 + 账户」块。收盘后这几个数字才是当天的定论。"""
     out: list[str] = []
     names = symbol_names(cfg)
+    basis, vs = basis_for(cfg, date)
     fills = _read_rows(ROOT / cfg["fills_dir"] / f"{date}.csv")
     if fills:
         buys = [r for r in fills if (r.get("side") or "").lower() == "buy"]
         sells = [r for r in fills if (r.get("side") or "").lower() == "sell"]
-        out.append(f"\n**今日成交 {len(fills)} 笔**")
-        out += [_order_line(r, names) for r in sells + buys]
+        amt = lambda rs: sum(int(float(r["shares"])) * float(r["price"]) for r in rs)  # noqa: E731
+        out.append(f"\n**今日成交 {len(fills)} 笔**（买 {_money(amt(buys))}"
+                   f" ｜ 卖 {_money(amt(sells))}{vs}）")
+        out += [_order_line(r, names, basis) for r in sells + buys]
 
     acct = account_snapshot(cfg)
     if not acct:
         return out
     pos = acct.get("positions") or []
+    nav = float(acct.get("nav", 0) or 0)
     mv = sum(int(p.get("volume", 0)) * float(p.get("price", 0) or 0) for p in pos)
     if pos:
-        out.append(f"\n**持仓 {len(pos)} 只**（市值 {_money(mv)}）")
-        for p in pos[:10]:
-            vol = int(p.get("volume", 0))
-            px = float(p.get("price", 0) or 0)
-            out.append(f"- {_label(p['symbol'], names)} {vol:,} 股 @ {px:.2f}  "
-                       f"市值 {_money(vol * px)}")
+        # 按市值降序：持仓多了以后，自己算哪个是重仓太费劲。
+        ranked = sorted(
+            ((int(p.get("volume", 0)) * float(p.get("price", 0) or 0),
+              int(p.get("volume", 0)), float(p.get("price", 0) or 0), p) for p in pos),
+            key=lambda t: -t[0])
+        head = f"\n**持仓 {len(pos)} 只**（市值 {_money(mv)}"
+        if nav > 0:
+            head += f"　占净值 {mv / nav:.0%}"
+        out.append(head + vs + "）")
+        for mvv, vol, px, p in ranked[:10]:
+            line = f"- {_label(p['symbol'], names)} {vol:,} 股 @ {px:.2f}"
+            chg = _chg(px, basis.get(str(p["symbol"])))
+            if chg:
+                line += f"　{chg}"
+            out.append(line + f"　市值 {_money(mvv)}")
+        if len(pos) > 10:
+            out.append(f"- …还有 {len(pos) - 10} 只")
+
     out.append("\n**账户**")
-    nav = float(acct.get("nav", 0) or 0)
     line = f"净值 {nav:,.2f}"
     series = equity_series(cfg)
     if series:
         prev = series[-1]
         if prev > 0:
-            d = nav - prev
-            line += f"（较上日 {d:+,.2f} / {d / prev:+.2%}）"
+            line += f"　较上日 {nav - prev:+,.2f}（{(nav - prev) / prev:+.2%}）"
         if len(series) >= 2 and series[0] > 0:
             line += f"　累计 {(nav - series[0]) / series[0]:+.2%}"
     out.append(line)
-    out.append(f"可用 {float(acct.get('available', 0) or 0):,.2f} ｜ 持仓市值 {_money(mv)}")
+    tail = f"可用 {float(acct.get('available', 0) or 0):,.2f} ｜ 持仓 {_money(mv)}"
+    if nav > 0:
+        tail += f"（仓位 {mv / nav:.0%}）"
+    out.append(tail)
     return out
 
 

@@ -20,7 +20,7 @@
 健康检查：
 
 ```bash
-python -m pytest                        # 410 passed（不读真实数据）
+python -m pytest                        # 417 passed（不读真实数据）
 python scripts/data_manifest.py verify  # 三份数据集各一行 [ok]；2025-2026 每日更新后会显示不一致，属正常
 python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
     --start 2025-01-01 --end 2026-10-20 --benchmark 000852

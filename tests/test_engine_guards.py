@@ -1372,3 +1372,89 @@ def test_settle_lines_add_position_names(tmp_path, monkeypatch):
     text = "\n".join(mod.settle_lines({"out_dir": "live", "fills_dir": "fills"}, "2026-10-30"))
     assert "000530 示例股份" in text, text
     assert "市值 164,736" in text, text
+
+# ---------------------------------------------------------------- 推送带涨跌幅
+def test_prev_bars_takes_last_trading_day_before_date():
+    """基准必须取 **严格早于 date** 的最后一个交易日，不是"最新一行"。"""
+    mod = _load_script("live_auto.py")
+    day, bars = mod.prev_bars({"data_dir": "data/processed_2025_2026"}, "2026-10-21")
+    assert day == "2026-10-20", day
+    assert bars["605179"]["close"] == 21.16 and bars["605179"]["limit_up"] == 22.36
+    # 再往前挪一天，基准就退到 10-19，不能被"最新一行"带跑
+    day2, _ = mod.prev_bars({"data_dir": "data/processed_2025_2026"}, "2026-10-20")
+    assert day2 == "2026-10-19", day2
+
+
+def test_basis_for_refuses_pct_when_bars_lag_calendar(monkeypatch):
+    """行情落后于交易日历时不出涨跌幅。
+
+    否则 bars 停在哪天，"那天到现在"的累计涨幅就被当成"当日涨跌幅"报出去
+    （实测能把跨 9 个月的 +45% 标成当天）。宁可少一行数字。
+    """
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "prev_bars", lambda cfg, date=None: (
+        "2026-10-20", {"000530": {"close": 8.17, "limit_up": 8.58, "limit_down": 7.02}}))
+    monkeypatch.setattr(mod, "trading_days",
+                        lambda cfg: ["2026-10-19", "2026-10-20", "2026-10-21"])
+    assert mod.basis_for({"data_dir": "x"}, "2026-10-22") == ({}, "；涨跌幅未算（行情最新 10-20）")
+
+
+def test_basis_for_keeps_pct_when_aligned():
+    """行情对齐（bars 最新 == calendar 的前一交易日）时才给基准。"""
+    mod = _load_script("live_auto.py")
+    bars, vs = mod.basis_for({"data_dir": "data/processed_2025_2026"}, "2026-10-21")
+    assert vs == "；涨跌幅 vs 10-20 收盘", vs
+    assert bars["605179"]["close"] == 21.16
+
+
+def test_basis_for_degrades_to_empty():
+    """没有 data_dir / 目录不存在时返回空，不抛。"""
+    mod = _load_script("live_auto.py")
+    assert mod.basis_for({}, "2026-10-21") == ({}, "")
+    assert mod.basis_for({"data_dir": "data/does_not_exist"}, "2026-10-21") == ({}, "")
+
+
+def test_chg_text_and_limit_marks():
+    mod = _load_script("live_auto.py")
+    bar = {"close": 9.0, "limit_up": 0.0, "limit_down": 0.0}
+    assert mod._chg(10.0, bar) == "+11.11%"
+    assert mod._chg(9.0, bar) == "+0.00%"
+    assert mod._chg(8.0, bar) == "-11.11%"
+    assert mod._chg(10.0, {"close": 9.0, "limit_up": 10.0, "limit_down": 8.1}) == "+11.11% 涨停"
+    assert mod._chg(8.1, {"close": 9.0, "limit_up": 10.0, "limit_down": 8.1}) == "-10.00% 跌停"
+    assert mod._chg(10.0, None) == "", "没有基准就不给数字"
+    assert mod._chg(10.0, {"close": 0.0, "limit_up": 0.0, "limit_down": 0.0}) == ""
+
+
+def test_order_line_appends_change_only_when_basis():
+    """有基准才追加涨跌幅；没基准保持原格式（老测试断言的就是这个）。"""
+    mod = _load_script("live_auto.py")
+    row = {"symbol": "600000", "side": "buy", "shares": 100, "price": 10.0}
+    assert mod._order_line(row) == "- 买 600000 100 股 @ 10.00"
+    assert (mod._order_line(row, None, {"600000": {"close": 10.0, "limit_up": 0,
+                                                   "limit_down": 0}})
+            == "- 买 600000 100 股 @ 10.00　+0.00%")
+
+
+def test_settle_lines_have_pct_and_sorted_by_market_value(tmp_path, monkeypatch):
+    """持仓行带涨跌幅，且按市值从大到小排（重仓一眼可见）。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "symbol_names", lambda cfg: {})
+    monkeypatch.setattr(mod, "account_snapshot", lambda cfg: {
+        "nav": 990495.83, "available": 505675.82,
+        "positions": [
+            {"symbol": "002943", "volume": 6200, "cost_price": 0.0, "price": 25.66},
+            {"symbol": "000530", "volume": 20800, "cost_price": 0.0, "price": 7.92}]})
+    text = "\n".join(mod.settle_lines(
+        {"out_dir": "live", "fills_dir": "fills",
+         # ROOT 被指到 tmp，行情只能用绝对路径指回去
+         "data_dir": str(Path("data/processed_2025_2026").resolve())},
+        "2026-10-21"))
+    lines = [ln for ln in text.splitlines() if ln.startswith("- ")]
+    assert lines[0].startswith("- 000530"), f"000530 市值更大，应排第一：{lines}"
+    assert "-3.06%" in text, f"000530：7.92 vs 10-20 收盘 8.17：{text}"
+    assert "+8.68%" in text, f"002943：25.66 vs 23.61：{text}"
+    assert "涨跌幅 vs 10-20 收盘" in text, text
+    assert "占净值 33%" in text and "仓位 33%" in text, text
