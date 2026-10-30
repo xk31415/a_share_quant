@@ -314,6 +314,129 @@ def skipped_summary(cfg: dict) -> str:
     return f"\n**闸门拦下** {len(rows)} 笔（{'；'.join(parts)}）"
 
 
+# ---------- 推送用的交易内容 ----------
+def _read_rows(path: Path) -> list[dict]:
+    """读 CSV，读不到返回空列表——推送不能因为读文件失败而整条不发。"""
+    try:
+        with path.open(encoding="utf-8-sig", newline="") as f:
+            return [r for r in csv.DictReader(f) if (r.get("symbol") or "").strip()]
+    except (OSError, csv.Error):
+        return []
+
+
+def _money(x: float) -> str:
+    return f"{float(x):,.0f}"
+
+
+def _order_line(r: dict) -> str:
+    side = "卖" if (r.get("side") or "").lower() == "sell" else "买"
+    shares = int(float(r.get("shares") or 0))
+    price = float(r.get("price") or 0)
+    return f"- {side} {r['symbol']} {shares:,} 股 @ {price:.2f}"
+
+
+def trade_lines(cfg: dict, dry_run: bool = False) -> list[str]:
+    """「今日委托」块。取 placement.csv（**实际挂单价**），不是 orders.csv 的信号日意图价。
+
+    为什么推送要带这个：光看「✅ trade 成功」不知道今天买了什么、挂的什么价。
+    而挂单价和信号日价往往差好几个点（2026-10-29 的 000678：意图 17.61、实挂 18.86），
+    这正是人要知道的那层信息。
+    """
+    orders = find_recent_orders(cfg, out_dir="live/_dryrun" if dry_run else None)
+    if orders is None:
+        return []
+    rows = _read_rows(orders.parent / "placement.csv")
+    if not rows:
+        return []
+    buys = [r for r in rows if (r.get("side") or "").lower() == "buy"]
+    sells = [r for r in rows if (r.get("side") or "").lower() == "sell"]
+    amt = lambda rs: sum(int(float(r["shares"])) * float(r["price"]) for r in rs)  # noqa: E731
+    out = [f"\n**今日委托 {len(rows)} 笔**（挂单价 = 执行日实时价 ×(1±滑点)）"]
+    out += [_order_line(r) for r in sells + buys]
+    out.append(f"买入 {len(buys)} 笔 {_money(amt(buys))} ｜ 卖出 {len(sells)} 笔 {_money(amt(sells))}")
+    return out
+
+
+def account_snapshot(cfg: dict) -> dict | None:
+    """调 `gm_bridge.py status --json` 拿净值与持仓现价。任何失败都返回 None。
+
+    推送是"锦上添花"，**绝不能因为它失败而让已经跑完的交易报错**。
+    """
+    import json as _json
+    try:
+        p = subprocess.run(
+            [cfg["python_data"], "scripts/gm_bridge.py", "status", "--json"],
+            cwd=str(ROOT), timeout=180, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    for ln in reversed((p.stdout or "").strip().splitlines()):
+        s = ln.strip()
+        if s.startswith("{"):
+            try:
+                return _json.loads(s)
+            except ValueError:
+                continue
+    return None
+
+
+def equity_series(cfg: dict) -> list[float]:
+    """equity_history.csv 里的净值序列（signal 每天 09:29 写前一日收盘值）。"""
+    path = ROOT / cfg["out_dir"] / "equity_history.csv"
+    try:
+        with path.open(encoding="utf-8-sig", newline="") as f:
+            raws = [r.get("equity") for r in csv.DictReader(f) if r.get("equity")]
+    except (OSError, csv.Error):
+        return []
+    vals = []
+    for v in raws:
+        try:
+            vals.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    return vals
+
+
+def settle_lines(cfg: dict, date: str) -> list[str]:
+    """「今日成交 + 持仓 + 账户」块。收盘后这几个数字才是当天的定论。"""
+    out: list[str] = []
+    fills = _read_rows(ROOT / cfg["fills_dir"] / f"{date}.csv")
+    if fills:
+        buys = [r for r in fills if (r.get("side") or "").lower() == "buy"]
+        sells = [r for r in fills if (r.get("side") or "").lower() == "sell"]
+        out.append(f"\n**今日成交 {len(fills)} 笔**")
+        out += [_order_line(r) for r in sells + buys]
+
+    acct = account_snapshot(cfg)
+    if not acct:
+        return out
+    pos = acct.get("positions") or []
+    mv = sum(int(p.get("volume", 0)) * float(p.get("price", 0) or 0) for p in pos)
+    if pos:
+        out.append(f"\n**持仓 {len(pos)} 只**（市值 {_money(mv)}）")
+        for p in pos[:10]:
+            vol = int(p.get("volume", 0))
+            px = float(p.get("price", 0) or 0)
+            out.append(f"- {p['symbol']} {vol:,} 股 @ {px:.2f}  市值 {_money(vol * px)}")
+    out.append("\n**账户**")
+    nav = float(acct.get("nav", 0) or 0)
+    line = f"净值 {nav:,.2f}"
+    series = equity_series(cfg)
+    if series:
+        prev = series[-1]
+        if prev > 0:
+            d = nav - prev
+            line += f"（较上日 {d:+,.2f} / {d / prev:+.2%}）"
+        if len(series) >= 2 and series[0] > 0:
+            line += f"　累计 {(nav - series[0]) / series[0]:+.2%}"
+    out.append(line)
+    out.append(f"可用 {float(acct.get('available', 0) or 0):,.2f} ｜ 持仓市值 {_money(mv)}")
+    return out
+
+
 # ---------- 各 stage ----------
 def gm_token() -> str:
     """数据源（gm history 接口）只认 GM_TOKEN 环境变量，不认终端登录态。
@@ -637,11 +760,15 @@ def main() -> int:
         for s, rc in results:
             lines.append(f"- {s}: {'✓' if rc == 0 else '✗ rc=' + str(rc)}")
         if args.stage in ("trade", "all"):
-            # 退出码之外把"拦下了哪几笔、其中几笔是数据缺失"带出来，
-            # 否则 rc=2 只看到"失败"，还得翻日志才知道是没取到行情还是封板。
+            # 退出码之外把「今天下了什么单、拦下了哪几笔」带出来：
+            # rc=2 只看到"失败"，还得翻日志才知道是没取到行情还是封板；
+            # 而挂单价与信号日价往往差好几个点，那是人真正要看的信息。
             summary = skipped_summary(cfg)
             if summary:
                 lines.append(summary)
+            lines += trade_lines(cfg)
+        if args.stage in ("settle", "all"):
+            lines += settle_lines(cfg, today())
         lines.append(f"\n日志 `{log_path.name}`")
         if not ok:
             lines.append("\n**请尽快查看日志**")

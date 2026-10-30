@@ -1115,3 +1115,219 @@ def test_stage_trade_waits_for_order_time_before_placing(monkeypatch, tmp_path):
     assert rc == 0
     assert waited == [], f"--no-wait 不该等：{waited}"
     devnull.close()
+
+
+# ---------------------------------------------------------------- 推送要带交易内容
+def _seed_live(tmp_path):
+    """造一套 live/ 目录：委托、成交、净值历史。"""
+    from pathlib import Path
+    d = Path(tmp_path) / "live" / "2026-10-29"
+    d.mkdir(parents=True)
+    (d / "orders.csv").write_text(
+        "symbol,side,shares,price,amount,note\n000530,buy,20800,8.23,171184,x\n",
+        encoding="utf-8")
+    (d / "placement.csv").write_text(
+        "symbol,side,shares,price,amount,note\n"
+        "002164,sell,10000,17.2,172000,clear\n"
+        "000530,buy,20800,8.41,174928,rebalance\n"
+        "002943,buy,6200,26.63,165106,rebalance\n", encoding="utf-8")
+    fills = Path(tmp_path) / "fills"
+    fills.mkdir()
+    (fills / "2026-10-30.csv").write_text(
+        "symbol,side,shares,price,fee\n"
+        "000530,buy,20800,8.4100,0.00\n002164,sell,10000,17.2000,0.00\n", encoding="utf-8")
+    (Path(tmp_path) / "live" / "equity_history.csv").write_text(
+        "trade_date,equity\n2026-10-20,1000000.0\n2026-10-29,1030831.82\n", encoding="utf-8")
+
+
+def test_trade_lines_use_placement_not_signal_price(tmp_path, monkeypatch):
+    """推送里的委托要念**实际挂单价**（placement.csv），不是信号日意图价。
+
+    两者常差好几个点（10-29 的 000678：意图 17.61、实挂 18.86）。念 orders.csv 等于
+    告诉人一个当天根本没挂过的价格。卖出要排在买入前面（与下单顺序一致）。
+    """
+    from pathlib import Path
+    _seed_live(tmp_path)
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+
+    lines = mod.trade_lines({"out_dir": "live"})
+    text = "\n".join(lines)
+    assert "今日委托 3 笔" in text, text
+    assert "8.41" in text and "8.23" not in text, f"应为实挂价而非意图价：{text}"
+    assert text.index("卖 002164") < text.index("买 000530"), "先卖后买"
+    assert "买入 2 笔 340,034" in text and "卖出 1 笔 172,000" in text, text
+
+
+def test_settle_lines_include_fills_positions_and_pnl(tmp_path, monkeypatch):
+    """收盘推送要有成交、持仓、净值、日盈亏、累计。"""
+    from pathlib import Path
+    _seed_live(tmp_path)
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "account_snapshot", lambda cfg: {
+        "account_id": "A1", "nav": 990495.83, "available": 505675.82,
+        "positions": [{"symbol": "000530", "volume": 20800, "cost_price": 0.0,
+                       "price": 7.92}]})
+
+    text = "\n".join(mod.settle_lines({"out_dir": "live", "fills_dir": "fills"}, "2026-10-30"))
+    assert "今日成交 2 笔" in text, text
+    assert "持仓 1 只" in text and "164,736" in text, text
+    assert "净值 990,495.83" in text, text
+    assert "-40,335.99" in text and "-3.91%" in text, f"日盈亏要算出来：{text}"
+    assert "-0.95%" in text, f"累计要用 equity_history 首行作基数：{text}"
+
+
+def test_settle_lines_skip_pnl_when_no_history(tmp_path, monkeypatch):
+    """没有净值历史时不硬编日盈亏（宁可少一行，也不要编一个错的）。"""
+    from pathlib import Path
+    d = Path(tmp_path) / "fills"
+    d.mkdir()
+    (d / "2026-10-30.csv").write_text(
+        "symbol,side,shares,price,fee\n000530,buy,100,8.41,0.00\n", encoding="utf-8")
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "account_snapshot", lambda cfg: {
+        "nav": 990495.83, "available": 500000.0, "positions": []})
+
+    text = "\n".join(mod.settle_lines({"out_dir": "live", "fills_dir": "fills"}, "2026-10-30"))
+    assert "净值 990,495.83" in text, text
+    assert "较上日" not in text, f"没有历史就不该编日盈亏：{text}"
+
+
+def test_account_snapshot_returns_none_instead_of_raising(tmp_path, monkeypatch):
+    """账户拉不到只返回 None——推送不能因为拿不到净值就让跑完的交易报错。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    assert mod.account_snapshot({"python_data": "definitely-not-a-python"}) is None
+
+
+def test_status_json_is_parseable_and_text_mode_unchanged(monkeypatch, capsys):
+    """`status --json` 给推送用；不带 --json 时仍是原来那份文本。"""
+    import argparse
+    import json
+    mod = _load_script("gm_bridge.py")
+    monkeypatch.setattr(mod, "_load_account", lambda: ("tok", "acc"))
+    monkeypatch.setattr(mod, "_run_in_context", lambda body, timeout=120: {
+        "ok": True, "account_id": "A1",
+        "cash": {"nav": 990495.83, "available": 505675.82},
+        "positions": [{"symbol": "000530", "volume": 20800,
+                       "cost_price": 0.0, "price": 7.92}]})
+
+    assert mod.cmd_status(argparse.Namespace(as_json=True)) == 0
+    data = json.loads(capsys.readouterr().out.strip())
+    assert data["nav"] == 990495.83 and data["available"] == 505675.82
+    assert data["positions"][0]["symbol"] == "000530"
+
+    assert mod.cmd_status(argparse.Namespace()) == 0
+    out = capsys.readouterr().out
+    assert "净值 nav" in out and "990,495.83" in out and "000530" in out, out
+
+
+# ---------------------------------------------------------------- 推送要带交易内容
+def _seed_live(tmp_path):
+    """造一套 live/ 目录：委托、成交、净值历史。"""
+    from pathlib import Path
+    d = Path(tmp_path) / "live" / "2026-10-29"
+    d.mkdir(parents=True)
+    (d / "orders.csv").write_text(
+        "symbol,side,shares,price,amount,note\n000530,buy,20800,8.23,171184,x\n",
+        encoding="utf-8")
+    (d / "placement.csv").write_text(
+        "symbol,side,shares,price,amount,note\n"
+        "002164,sell,10000,17.2,172000,clear\n"
+        "000530,buy,20800,8.41,174928,rebalance\n"
+        "002943,buy,6200,26.63,165106,rebalance\n", encoding="utf-8")
+    fills = Path(tmp_path) / "fills"
+    fills.mkdir()
+    (fills / "2026-10-30.csv").write_text(
+        "symbol,side,shares,price,fee\n"
+        "000530,buy,20800,8.4100,0.00\n002164,sell,10000,17.2000,0.00\n", encoding="utf-8")
+    (Path(tmp_path) / "live" / "equity_history.csv").write_text(
+        "trade_date,equity\n2026-10-20,1000000.0\n2026-10-29,1030831.82\n", encoding="utf-8")
+
+
+def test_trade_lines_use_placement_not_signal_price(tmp_path, monkeypatch):
+    """推送里的委托要念**实际挂单价**（placement.csv），不是信号日意图价。
+
+    两者常差好几个点（10-29 的 000678：意图 17.61、实挂 18.86）。念 orders.csv 等于
+    告诉人一个当天根本没挂过的价格。卖出要排在买入前面（与下单顺序一致）。
+    """
+    from pathlib import Path
+    _seed_live(tmp_path)
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+
+    lines = mod.trade_lines({"out_dir": "live"})
+    text = "\n".join(lines)
+    assert "今日委托 3 笔" in text, text
+    assert "8.41" in text and "8.23" not in text, f"应为实挂价而非意图价：{text}"
+    assert text.index("卖 002164") < text.index("买 000530"), "先卖后买"
+    assert "买入 2 笔 340,034" in text and "卖出 1 笔 172,000" in text, text
+
+
+def test_settle_lines_include_fills_positions_and_pnl(tmp_path, monkeypatch):
+    """收盘推送要有成交、持仓、净值、日盈亏、累计。"""
+    from pathlib import Path
+    _seed_live(tmp_path)
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "account_snapshot", lambda cfg: {
+        "account_id": "A1", "nav": 990495.83, "available": 505675.82,
+        "positions": [{"symbol": "000530", "volume": 20800, "cost_price": 0.0,
+                       "price": 7.92}]})
+
+    text = "\n".join(mod.settle_lines({"out_dir": "live", "fills_dir": "fills"}, "2026-10-30"))
+    assert "今日成交 2 笔" in text, text
+    assert "持仓 1 只" in text and "164,736" in text, text
+    assert "净值 990,495.83" in text, text
+    assert "-40,335.99" in text and "-3.91%" in text, f"日盈亏要算出来：{text}"
+    assert "-0.95%" in text, f"累计要用 equity_history 首行作基数：{text}"
+
+
+def test_settle_lines_skip_pnl_when_no_history(tmp_path, monkeypatch):
+    """没有净值历史时不硬编日盈亏（宁可少一行，也不要编一个错的）。"""
+    from pathlib import Path
+    d = Path(tmp_path) / "fills"
+    d.mkdir()
+    (d / "2026-10-30.csv").write_text(
+        "symbol,side,shares,price,fee\n000530,buy,100,8.41,0.00\n", encoding="utf-8")
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "account_snapshot", lambda cfg: {
+        "nav": 990495.83, "available": 500000.0, "positions": []})
+
+    text = "\n".join(mod.settle_lines({"out_dir": "live", "fills_dir": "fills"}, "2026-10-30"))
+    assert "净值 990,495.83" in text, text
+    assert "较上日" not in text, f"没有历史就不该编日盈亏：{text}"
+
+
+def test_account_snapshot_returns_none_instead_of_raising(tmp_path, monkeypatch):
+    """账户拉不到只返回 None——推送不能因为拿不到净值就让跑完的交易报错。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    assert mod.account_snapshot({"python_data": "definitely-not-a-python"}) is None
+
+
+def test_status_json_is_parseable_and_text_mode_unchanged(monkeypatch, capsys):
+    """`status --json` 给推送用；不带 --json 时仍是原来那份文本。"""
+    import argparse
+    import json
+    mod = _load_script("gm_bridge.py")
+    monkeypatch.setattr(mod, "_load_account", lambda: ("tok", "acc"))
+    monkeypatch.setattr(mod, "_run_in_context", lambda body, timeout=120: {
+        "ok": True, "account_id": "A1",
+        "cash": {"nav": 990495.83, "available": 505675.82},
+        "positions": [{"symbol": "000530", "volume": 20800,
+                       "cost_price": 0.0, "price": 7.92}]})
+
+    assert mod.cmd_status(argparse.Namespace(as_json=True)) == 0
+    data = json.loads(capsys.readouterr().out.strip())
+    assert data["nav"] == 990495.83 and data["available"] == 505675.82
+    assert data["positions"][0]["symbol"] == "000530"
+
+    assert mod.cmd_status(argparse.Namespace()) == 0
+    out = capsys.readouterr().out
+    assert "净值 nav" in out and "990,495.83" in out and "000530" in out, out

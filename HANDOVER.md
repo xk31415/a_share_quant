@@ -22,8 +22,8 @@
 | 策略 | `hype_watch` 观察池（3 只 / 半仓 / 日频）；`config/live.yaml` 的 `strategy` 可切 `equal_weight`。另有 `hotspot`（热点+龙头）只是研究规则，没有三段回测、不接实盘 |
 | 下单 | `gm` SDK 策略模式（`scripts/gm_bridge.py`）；执行日涨跌停闸门与回测 `execution.py` 同口径 |
 | 账户 | 掘金仿真 100 万；token 在服务器 `config/gm_account.yaml`（不入库） |
-| 通知 | 钉钉机器人（`config/notify.yaml`，不入库），阶段成败都推 |
-| 测试 | `python -m pytest` → **401 passed**，全绿才算改完 |
+| 通知 | 钉钉机器人（`config/notify.yaml`，不入库）。trade 推「今日委托 N 笔 + 挂单价」，settle 推「成交明细 + 持仓市值 + 净值/日盈亏/累计」——**挂单价来自 `placement.csv`，不是 `orders.csv` 的信号日意图价** |
+| 测试 | `python -m pytest` → **406 passed**，全绿才算改完 |
 | 数字口径 | 唯一来源 `results/<EXP>/metrics.json`；引用任何数字前自己跑一遍核对 |
 
 **红线速记**（详见 `AGENTS.md`）：不用未来数据；不暴力调参；缺数据显式报错不放行；
@@ -76,7 +76,7 @@
 
 ### 2.1 前置检查（每次开始前）
 
-- [ ] `python -m pytest` → **401 passed**
+- [ ] `python -m pytest` → **406 passed**
 - [ ] `python scripts/data_manifest.py verify`：2020-2024 与 2015-2019 两份 `[ok]`
       （2025-2026 每日更新后不一致属正常）
 - [ ] 基线回测 `annualized_return = 0.0610828468971103`（命令见 `QUICKSTART.md` §1）

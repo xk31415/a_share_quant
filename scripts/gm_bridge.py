@@ -399,10 +399,19 @@ def cmd_status(args) -> int:
     if not data.get("ok"):
         raise SystemExit(f"查询失败：{data.get('error')}")
     c = data.get("cash", {})
+    positions = data.get("positions", [])
+    if getattr(args, "as_json", False):
+        # 给 live_auto 拼推送用：净值 + 持仓现价，一次拿全。
+        print(json.dumps({
+            "account_id": data.get("account_id"),
+            "nav": float(c.get("nav", 0) or 0),
+            "available": float(c.get("available", 0) or 0),
+            "positions": positions,
+        }, ensure_ascii=False))
+        return 0
     print(f"账户 {data.get('account_id', '?')}")
     print(f"  净值 nav        {c.get('nav', 0):>16,.2f}")
     print(f"  可用 available  {c.get('available', 0):>16,.2f}")
-    positions = data.get("positions", [])
     print(f"  持仓 {len(positions)} 只")
     for p in positions[:10]:
         print(f"    {p['symbol']}  {p['volume']:>8d} 股  "
@@ -698,7 +707,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="掘金仿真交易桥接（gm 策略模式）")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("status", help="看资金与持仓")
+    p_status = sub.add_parser("status", help="看资金与持仓")
+    p_status.add_argument("--json", dest="as_json", action="store_true",
+                          help="输出机器可读的单行 JSON（供 live_auto 拼推送）")
 
     p = sub.add_parser("pull-holdings", help="导出当前持仓为 holdings.csv")
     p.add_argument("--out", default="live/holdings.csv")
