@@ -1331,3 +1331,44 @@ def test_status_json_is_parseable_and_text_mode_unchanged(monkeypatch, capsys):
     assert mod.cmd_status(argparse.Namespace()) == 0
     out = capsys.readouterr().out
     assert "净值 nav" in out and "990,495.83" in out and "000530" in out, out
+
+
+# ---------------------------------------------------------------- 推送带股票名称
+def test_symbol_names_reads_real_instruments():
+    """名字来自 instruments.parquet 的 name 列（推送里只显示代码看不出是哪只票）。"""
+    mod = _load_script("live_auto.py")
+    names = mod.symbol_names({"data_dir": "data/processed_2025_2026"})
+    assert len(names) > 4000, f"只读到 {len(names)} 只"
+    assert names.get("600000") == "浦发银行", names.get("600000")
+
+
+def test_symbol_names_degrades_to_empty(tmp_path, monkeypatch):
+    """读不到就返回空字典——名字只是好看，不能因此让推送发不出去。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    assert mod.symbol_names({"data_dir": "data/nonexistent"}) == {}
+    assert mod.symbol_names({}) == {}, "没配 data_dir 也不该抛"
+
+
+def test_order_line_includes_name_when_available():
+    mod = _load_script("live_auto.py")
+    row = {"symbol": "600000", "side": "buy", "shares": 100, "price": 10.0}
+    assert mod._order_line(row, {"600000": "浦发银行"}) == "- 买 600000 浦发银行 100 股 @ 10.00"
+    assert mod._order_line(row, None) == "- 买 600000 100 股 @ 10.00", "没有名字就只显示代码"
+    assert mod._order_line(row, {}) == "- 买 600000 100 股 @ 10.00"
+
+
+def test_settle_lines_add_position_names(tmp_path, monkeypatch):
+    """持仓行也要名字。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "symbol_names", lambda cfg: {"000530": "示例股份"})
+    monkeypatch.setattr(mod, "account_snapshot", lambda cfg: {
+        "nav": 990495.83, "available": 505675.82,
+        "positions": [{"symbol": "000530", "volume": 20800,
+                       "cost_price": 0.0, "price": 7.92}]})
+    text = "\n".join(mod.settle_lines({"out_dir": "live", "fills_dir": "fills"}, "2026-10-30"))
+    assert "000530 示例股份" in text, text
+    assert "市值 164,736" in text, text

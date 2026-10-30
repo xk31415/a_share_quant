@@ -328,11 +328,40 @@ def _money(x: float) -> str:
     return f"{float(x):,.0f}"
 
 
-def _order_line(r: dict) -> str:
+def symbol_names(cfg: dict) -> dict[str, str]:
+    """代码 -> 中文名，来自 `data/<dir>/instruments.parquet` 的 name 列。
+
+    只在拼推送时用。**任何失败都返回空字典**——名字只是让消息好读，
+    不该因为它让推送发不出去（pandas/pyarrow 缺失、文件正被写、列改名，都算）。
+    拿不到名字就退回只显示代码。
+    """
+    data_dir = cfg.get("data_dir")
+    if not data_dir:
+        return {}
+    try:
+        import pandas as pd          # 只有这里用到，不放到模块顶部（保持主流程轻量）
+        df = pd.read_parquet(ROOT / data_dir / "instruments.parquet",
+                             columns=["symbol", "name"])
+    except Exception:                # noqa: BLE001
+        return {}
+    out: dict[str, str] = {}
+    for s, n in zip(df["symbol"], df["name"]):
+        name = str(n).strip()
+        if name and name.lower() != "nan":
+            out[str(s)] = name
+    return out
+
+
+def _label(sym: str, names: dict[str, str] | None) -> str:
+    name = (names or {}).get(sym, "")
+    return f"{sym} {name}".strip() if name else sym
+
+
+def _order_line(r: dict, names: dict[str, str] | None = None) -> str:
     side = "卖" if (r.get("side") or "").lower() == "sell" else "买"
     shares = int(float(r.get("shares") or 0))
     price = float(r.get("price") or 0)
-    return f"- {side} {r['symbol']} {shares:,} 股 @ {price:.2f}"
+    return f"- {side} {_label(r['symbol'], names)} {shares:,} 股 @ {price:.2f}"
 
 
 def trade_lines(cfg: dict, dry_run: bool = False) -> list[str]:
@@ -348,11 +377,12 @@ def trade_lines(cfg: dict, dry_run: bool = False) -> list[str]:
     rows = _read_rows(orders.parent / "placement.csv")
     if not rows:
         return []
+    names = symbol_names(cfg)
     buys = [r for r in rows if (r.get("side") or "").lower() == "buy"]
     sells = [r for r in rows if (r.get("side") or "").lower() == "sell"]
     amt = lambda rs: sum(int(float(r["shares"])) * float(r["price"]) for r in rs)  # noqa: E731
     out = [f"\n**今日委托 {len(rows)} 笔**（挂单价 = 执行日实时价 ×(1±滑点)）"]
-    out += [_order_line(r) for r in sells + buys]
+    out += [_order_line(r, names) for r in sells + buys]
     out.append(f"买入 {len(buys)} 笔 {_money(amt(buys))} ｜ 卖出 {len(sells)} 笔 {_money(amt(sells))}")
     return out
 
@@ -403,12 +433,13 @@ def equity_series(cfg: dict) -> list[float]:
 def settle_lines(cfg: dict, date: str) -> list[str]:
     """「今日成交 + 持仓 + 账户」块。收盘后这几个数字才是当天的定论。"""
     out: list[str] = []
+    names = symbol_names(cfg)
     fills = _read_rows(ROOT / cfg["fills_dir"] / f"{date}.csv")
     if fills:
         buys = [r for r in fills if (r.get("side") or "").lower() == "buy"]
         sells = [r for r in fills if (r.get("side") or "").lower() == "sell"]
         out.append(f"\n**今日成交 {len(fills)} 笔**")
-        out += [_order_line(r) for r in sells + buys]
+        out += [_order_line(r, names) for r in sells + buys]
 
     acct = account_snapshot(cfg)
     if not acct:
@@ -420,7 +451,8 @@ def settle_lines(cfg: dict, date: str) -> list[str]:
         for p in pos[:10]:
             vol = int(p.get("volume", 0))
             px = float(p.get("price", 0) or 0)
-            out.append(f"- {p['symbol']} {vol:,} 股 @ {px:.2f}  市值 {_money(vol * px)}")
+            out.append(f"- {_label(p['symbol'], names)} {vol:,} 股 @ {px:.2f}  "
+                       f"市值 {_money(vol * px)}")
     out.append("\n**账户**")
     nav = float(acct.get("nav", 0) or 0)
     line = f"净值 {nav:,.2f}"
