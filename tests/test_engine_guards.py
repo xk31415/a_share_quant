@@ -1458,3 +1458,247 @@ def test_settle_lines_have_pct_and_sorted_by_market_value(tmp_path, monkeypatch)
     assert "+8.68%" in text, f"002943：25.66 vs 23.61：{text}"
     assert "涨跌幅 vs 10-20 收盘" in text, text
     assert "占净值 33%" in text and "仓位 33%" in text, text
+
+# ---------------------------------------------------------------- 失败要说明白
+def _seed_fail_log(tmp_path, body: str, day: str = "2026-11-02"):
+    from pathlib import Path
+    d = Path(tmp_path) / "live" / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{day}.log").write_text(body, encoding="utf-8")
+
+
+GM_DOWN_LOG = """\n######################################################################
+# live_auto stage=trade dry_run=False at 2026-11-02 09:29:03
+######################################################################
+
+======================================================================
+[09:29:03] pull-holdings
+$ python.exe scripts/gm_bridge.py pull-holdings --out live/holdings.csv
+gm.api._errors.GmError: {"status": 1010, "message": "无法获取掘金服务器地址列表", "function": "run"}
+[exit 1] pull-holdings
+  [retry] pull-holdings rc=1, attempt 2
+[exit 1] pull-holdings
+
+[live_auto] done rc=1
+"""
+
+
+def test_failure_hint_says_no_order_was_sent(tmp_path, monkeypatch):
+    """gm 掉线时必须写明「一笔委托都没发出去」。
+
+    2026-11-02：推送只有「❌ trade 失败 rc=1」，人看不出今天到底下没下单，
+    还得 ssh 翻日志。失败消息要把这句最要紧的结论直接给出来。
+    """
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    _seed_fail_log(tmp_path, GM_DOWN_LOG)
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-11-02")
+
+    lines, gm_down = mod.failure_hint({"log_dir": "live/logs"})
+    text = "\n".join(lines)
+    assert gm_down is True, "1010 要判成 gm 掉线"
+    assert "无法获取掘金服务器地址列表" in text, text
+    assert "gm 1010" in text and "SDK 版本被终端拒绝" in text, text
+    assert "卡在: pull-holdings" in text or "**卡在**: pull-holdings" in text, text
+    assert "一笔委托都没发出去" in text, text
+
+
+def test_failure_hint_warns_partial_orders_on_place_orders(tmp_path, monkeypatch):
+    """下单环节出错不能说"没下单"——可能已经发出了一部分。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    _seed_fail_log(tmp_path, "\n# live_auto stage=trade dry_run=False at x\n"
+                             "[exit 1] live_signal\n[exit 2] place-orders\n")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-11-02")
+
+    lines, gm_down = mod.failure_hint({"log_dir": "live/logs"})
+    text = "\n".join(lines)
+    assert gm_down is False
+    assert "可能有部分委托已发出" in text, text
+    assert "一笔委托都没发出去" not in text, "这里不能给「没下单」的结论"
+
+
+def test_failure_hint_only_looks_at_last_run(tmp_path, monkeypatch):
+    """同一天重跑过，只看最后一次——早上失败、下午修好后成功，不该再报早上的错。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    body = (GM_DOWN_LOG
+            + "\n# live_auto stage=trade dry_run=False at 2026-11-02 14:00:00\n"
+              "[exit 0] pull-holdings\n[exit 0] live_signal\n[exit 0] place-orders\n")
+    _seed_fail_log(tmp_path, body)
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-11-02")
+
+    lines, gm_down = mod.failure_hint({"log_dir": "live/logs"})
+    assert lines == [] and gm_down is False, f"最后一次是成功的，不该报旧错：{lines}"
+
+
+def test_failure_hint_degrades_when_log_missing(tmp_path, monkeypatch):
+    """没有日志就返回空，不抛——推送不能因为诊断逻辑再挂一次。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-11-02")
+    assert mod.failure_hint({"log_dir": "live/logs"}) == ([], False)
+
+# ---------------------------------------------------------------- 数据过期要自愈
+def _fake_bars(tmp_path, days):
+    """造一个只有 trade_date 列的 bars.parquet（本地 data/ 与服务器不同源，不能依赖）。"""
+    from pathlib import Path
+    import pandas as pd
+    d = Path(tmp_path) / "data"
+    d.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"trade_date": pd.to_datetime(days),
+                  "symbol": ['000001'] * len(days)}).to_parquet(d / "bars.parquet")
+
+
+def test_data_freshness_detects_stale(tmp_path, monkeypatch):
+    """数据最新日 < 交易日历的前一交易日 = 过期。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    _fake_bars(tmp_path, ["2026-10-28", "2026-10-29"])        # bars 停在 10-29
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-11-02")
+    monkeypatch.setattr(mod, "trading_days",
+                        lambda cfg: ["2026-10-29", "2026-10-30", "2026-11-02"])
+    stale, latest, expected = mod.data_freshness({"data_dir": "data"})
+    assert (stale, latest, expected) == (True, "2026-10-29", "2026-10-30")
+
+
+def test_data_freshness_ok_when_caught_up(tmp_path, monkeypatch):
+    """bars 到前一交易日就不算过期。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    _fake_bars(tmp_path, ["2026-10-29", "2026-10-30"])
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-11-02")
+    monkeypatch.setattr(mod, "trading_days",
+                        lambda cfg: ["2026-10-29", "2026-10-30", "2026-11-02"])
+    stale, latest, expected = mod.data_freshness({"data_dir": "data"})
+    assert stale is False and latest == expected == "2026-10-30", (stale, latest, expected)
+
+
+def test_data_freshness_treats_unreadable_as_stale(tmp_path, monkeypatch):
+    """读不到数据必须当作过期——当作"够新"就等于放行旧数据。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-11-02")
+    monkeypatch.setattr(mod, "trading_days",
+                        lambda cfg: ["2026-10-30", "2026-11-02"])
+    stale, latest, expected = mod.data_freshness({"data_dir": "data/nope"})
+    assert stale is True and latest == "" and expected == "2026-10-30"
+
+
+def test_update_dataset_failure_counts_as_no_order():
+    """补数据失败也是"没下单"，推送不能含糊。"""
+    mod = _load_script("live_auto.py")
+    assert "update_dataset" in mod.NO_ORDER_STEPS
+
+
+# ---------------------------------------------------------------- 前一段没跑要喊
+def test_patrol_runs_watchdog_before_trading(tmp_path, monkeypatch):
+    """trade 开跑前要先巡检——否则 08:30 的 data 没跑就没人知道。"""
+    import types
+    mod = _load_script("live_auto.py")
+    calls = []
+
+    class FakeRun:
+        returncode = 0
+        stdout = "巡检正常"
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return FakeRun()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    log = (tmp_path / "x.log").open("w", encoding="utf-8")
+    mod.patrol({"python_data": "py"}, log, types.SimpleNamespace(dry_run=False))
+    log.close()
+
+    assert calls and calls[0][1:] == ["scripts/watchdog.py"] or "watchdog.py" in calls[0]
+    assert "巡检正常" in (tmp_path / "x.log").read_text(encoding="utf-8")
+
+
+def test_patrol_skipped_in_dry_run(tmp_path, monkeypatch):
+    """演练不触发真告警。"""
+    import types
+    mod = _load_script("live_auto.py")
+    calls = []
+    monkeypatch.setattr(mod.subprocess, "run",
+                        lambda cmd, **kw: calls.append(cmd))
+    log = (tmp_path / "y.log").open("w", encoding="utf-8")
+    mod.patrol({"python_data": "py"}, log, types.SimpleNamespace(dry_run=True))
+    log.close()
+    assert calls == [], "演练不该跑看门狗"
+
+
+def test_patrol_never_raises(tmp_path, monkeypatch):
+    """看门狗跑不起来也不能拖累本段交易。"""
+    import types
+    mod = _load_script("live_auto.py")
+
+    def boom(cmd, **kw):
+        raise OSError("没有这个解释器")
+
+    monkeypatch.setattr(mod.subprocess, "run", boom)
+    log = (tmp_path / "z.log").open("w", encoding="utf-8")
+    mod.patrol({"python_data": "nope"}, log, types.SimpleNamespace(dry_run=False))
+    log.close()
+    assert "看门狗跑不起来" in (tmp_path / "z.log").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- 前一段没跑要喊
+def test_patrol_runs_watchdog_before_trading(tmp_path, monkeypatch):
+    """trade 开跑前要先巡检——否则 08:30 的 data 没跑就没人知道。"""
+    import types
+    mod = _load_script("live_auto.py")
+    calls = []
+
+    class FakeRun:
+        returncode = 0
+        stdout = "巡检正常"
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return FakeRun()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    log = (tmp_path / "x.log").open("w", encoding="utf-8")
+    mod.patrol({"python_data": "py"}, log, types.SimpleNamespace(dry_run=False))
+    log.close()
+
+    assert calls and calls[0][1:] == ["scripts/watchdog.py"] or "watchdog.py" in calls[0]
+    assert "巡检正常" in (tmp_path / "x.log").read_text(encoding="utf-8")
+
+
+def test_patrol_skipped_in_dry_run(tmp_path, monkeypatch):
+    """演练不触发真告警。"""
+    import types
+    mod = _load_script("live_auto.py")
+    calls = []
+    monkeypatch.setattr(mod.subprocess, "run",
+                        lambda cmd, **kw: calls.append(cmd))
+    log = (tmp_path / "y.log").open("w", encoding="utf-8")
+    mod.patrol({"python_data": "py"}, log, types.SimpleNamespace(dry_run=True))
+    log.close()
+    assert calls == [], "演练不该跑看门狗"
+
+
+def test_patrol_never_raises(tmp_path, monkeypatch):
+    """看门狗跑不起来也不能拖累本段交易。"""
+    import types
+    mod = _load_script("live_auto.py")
+
+    def boom(cmd, **kw):
+        raise OSError("没有这个解释器")
+
+    monkeypatch.setattr(mod.subprocess, "run", boom)
+    log = (tmp_path / "z.log").open("w", encoding="utf-8")
+    mod.patrol({"python_data": "nope"}, log, types.SimpleNamespace(dry_run=False))
+    log.close()
+    assert "看门狗跑不起来" in (tmp_path / "z.log").read_text(encoding="utf-8")

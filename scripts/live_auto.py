@@ -32,6 +32,7 @@ import argparse
 import csv
 import datetime as dt
 import os
+import re
 import subprocess
 import sys
 import time
@@ -582,6 +583,66 @@ def settle_lines(cfg: dict, date: str) -> list[str]:
     return out
 
 
+# ---------- 失败诊断（推送用） ----------
+# gm 错误码 -> 人话。对照 https://myquant.cn/docs2/sdk/cpp/错误码.html，只留会遇上的。
+GM_HINTS = {
+    "1000": "token 无效",
+    "1001": "终端服务连不上（掘金终端没开）",
+    "1010": "终端没登录，或 SDK 版本被终端拒绝（重启终端 / 升级 SDK）",
+    "1013": "交易服务调用错误（终端异常，需重启终端）",
+    "1014": "历史行情服务调用错误",
+    "1015": "策略服务调用错误",
+    "1019": "交易网关服务调用错误",
+    "1020": "ACCOUNT_ID 无效",
+    "1025": "认证服务连不上",
+    "1100": "交易消息服务连接失败",
+}
+
+# 走到这些步骤为止就失败 = 一笔委托都没发出去
+NO_ORDER_STEPS = ("pull-holdings", "live_signal", "update_dataset")
+
+
+def failure_hint(cfg: dict) -> tuple[list[str], bool]:
+    """失败时回答两个问题：**为什么**、**有没有下单**。返回 (文本行, 是否 gm 掉线)。
+
+    2026-11-02 的教训：掘金终端拒了老 SDK（1010），trade 第一步 pull-holdings 就挂，
+    推送只有「❌ trade 失败 rc=1」。人从这条消息里看不出「今天一笔委托都没发出去」，
+    还得 ssh 上去翻日志——而那正是失败当天最该知道的一句话。
+    """
+    path = log_dir(cfg) / f"{today()}.log"
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return [], False
+    start = 0
+    for i, ln in enumerate(raw):
+        if ln.startswith("# live_auto stage="):
+            start = i                     # 同一天可能重跑多次，只看最后一次
+    tail = "\n".join(raw[start:][-150:])
+
+    out: list[str] = []
+    gm_down = False
+    m = re.search(r'"status":\s*(\d+),\s*"message":\s*"([^"]+)"', tail)
+    if m:
+        code, msg = m.group(1), m.group(2)
+        hint = GM_HINTS.get(code)
+        gm_down = code in GM_HINTS
+        out.append(f"**失败原因**: {msg}"
+                   + (f" —— gm {code}：{hint}" if hint else f"（gm {code}）"))
+
+    steps = [(c, s) for c, s in re.findall(r"\[exit (\d+)\] (\S+)", tail) if c != "0"]
+    if steps:
+        step = steps[-1][1]
+        out.append(f"**卡在**: {step}")
+        if step in NO_ORDER_STEPS:
+            out.append("**影响**: 一笔委托都没发出去（不是没成交，是没下单）")
+        elif step == "place-orders":
+            out.append("**影响**: 下单环节出错，**可能有部分委托已发出**，请人工核对成交")
+        elif step in ("pull-fills", "reconcile"):
+            out.append("**影响**: 当天成交未入账，`live/holdings.csv` 还是旧的，先别信")
+    return out, gm_down
+
+
 # ---------- 各 stage ----------
 def gm_token() -> str:
     """数据源（gm history 接口）只认 GM_TOKEN 环境变量，不认终端登录态。
@@ -610,6 +671,56 @@ def stage_data(cfg: dict, log, args) -> int:
     return rc
 
 
+def patrol(cfg: dict, log, args) -> None:
+    """先让看门狗巡检一次，把「前一段没跑」暴露出来。
+
+    为什么必须放在 trade / settle 开头：进程内告警有个死区——**脚本没启动就一条
+    消息都没有**。2026-11-02 的 08:30 data 压根没被触发，钉钉全程静默，人是靠自己
+    「感觉不对」才发现的。而 09:29 的 trade、15:35 的 settle 当天几乎一定会启动，
+    让它们先把前一段的缺失喊出来。
+
+    看门狗自己的判定：data 过 09:00 判、trade 过 09:40 判、settle 过 16:05 判，
+    同一 (日期, stage, 类型) 只报一次。跑不起来也不影响本段——它是第二只眼，
+    不是前置条件。
+    """
+    if args.dry_run:
+        return
+    try:
+        p = subprocess.run([cfg["python_data"], "scripts/watchdog.py"],
+                           cwd=str(ROOT), timeout=180, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
+        log.write(f"[patrol] watchdog rc={p.returncode}\n")
+        for ln in (p.stdout or "").strip().splitlines():
+            log.write(f"  {ln}\n")
+    except (OSError, subprocess.SubprocessError) as e:       # noqa: BLE001
+        log.write(f"[patrol] 看门狗跑不起来（不影响本段）：{e}\n")
+
+
+def data_freshness(cfg: dict) -> tuple[bool, str, str]:
+    """数据是否落后于交易日历：返回 `(是否过期, 数据最新日, 应有最新日)`。
+
+    读不到数据一律当作过期——静默当作"够新"比缺数据更危险。
+
+    为什么 trade 要自己判断：08:30 的 data 段可能压根没被触发（README 第 37 条，
+    2026-11-02 就是这样），而 09:29 的 trade 当天一定启动。少了这层判断，
+    trade 会拿几天前的数据算信号、照常下单——你不知道自己按哪天的市场状态在买。
+    """
+    data_dir = cfg.get("data_dir")
+    if not data_dir:
+        return False, "", ""
+    days = [d for d in trading_days(cfg) if d < today()]
+    if not days:
+        return False, "", ""                 # 没有日历就无从判断，交给消费端
+    expected = days[-1]
+    try:
+        import pandas as pd
+        df = pd.read_parquet(ROOT / data_dir / "bars.parquet", columns=["trade_date"])
+        latest = str(df["trade_date"].max())[:10]
+    except Exception:                        # noqa: BLE001
+        return True, "", expected
+    return latest < expected, latest, expected
+
+
 def stage_trade(cfg: dict, log, args) -> int:
     """导出持仓 -> 算信号 -> 下单。"""
     py = cfg["python_data"]
@@ -626,6 +737,31 @@ def stage_trade(cfg: dict, log, args) -> int:
         sig_out = cfg["out_dir"]
         holdings_out = cfg["holdings"]
         cash_file = ROOT / cfg["log_dir"] / f"cash_{date}.txt"
+
+    # 0) 让看门狗先巡检一次：08:30 的 data 可能压根没跑（README 第 37 条）
+    patrol(cfg, log, args)
+
+    # 数据兜底：08:30 的 data 段可能压根没被触发（README 第 37 条），
+    #    而 09:29 的 trade 当天一定启动——这里补一次再交易。
+    #    演练不补：演练不该改 data/。
+    if not args.dry_run:
+        stale, latest, expected = data_freshness(cfg)
+        if stale:
+            log.write(f"\n[warn] 数据过期：最新 {latest or '?'}，应为 {expected}，"
+                      f"trade 前补一次\n")
+            print(f"[warn] 数据过期（最新 {latest or '?'}，应为 {expected}），先补数据",
+                  flush=True)
+            rc = stage_data(cfg, log, args)
+            if rc != 0:
+                log.write(f"[error] 补数据失败 rc={rc}，拒绝交易——"
+                          f"不用旧数据算信号下单\n")
+                return rc
+            stale, latest, expected = data_freshness(cfg)
+            if stale:
+                log.write(f"[error] 补完仍过期（最新 {latest}，应为 {expected}），"
+                          f"拒绝交易\n")
+                return 1
+            log.write(f"[ok] 数据已补到 {latest}\n")
 
     # 1) 从掘金取持仓与现金
     rc = run_step_retry("pull-holdings", [
@@ -720,6 +856,7 @@ def stage_settle(cfg: dict, log, args) -> int:
     """取成交回报 -> 对账 -> 更新持仓。"""
     py = cfg["python_data"]
     date = today()
+    patrol(cfg, log, args)          # 先把「data / trade 有没有跑」喊出来
     fills_dir = ROOT / cfg["fills_dir"]
     fills_dir.mkdir(parents=True, exist_ok=True)
     fills = fills_dir / f"{date}.csv"
@@ -897,13 +1034,21 @@ def main() -> int:
     # ---- 推送结果（失败不阻断）----
     if not args.dry_run:
         ok = worst == 0
-        title = ("[量化] " + ("✅ " if ok else "❌ ")
-                 + f"{args.stage} {'成功' if ok else '失败 rc=' + str(worst)}")
+        hint, gm_down = ([], False) if ok else failure_hint(cfg)
+        if gm_down:
+            # 失败当天最要紧的一句：终端没了，不是"下了单没成交"
+            title = f"[量化] ⚠️ {args.stage} 中止：掘金终端不可用"
+        else:
+            title = ("[量化] " + ("✅ " if ok else "❌ ")
+                     + f"{args.stage} {'成功' if ok else '失败 rc=' + str(worst)}")
         lines = [f"**stage**: {args.stage}",
                  f"**时间**: {dt.datetime.now():%Y-%m-%d %H:%M:%S}",
                  f"**结果**: {'成功' if ok else '失败 rc=' + str(worst)}"]
         for s, rc in results:
             lines.append(f"- {s}: {'✓' if rc == 0 else '✗ rc=' + str(rc)}")
+        if hint:
+            lines.append("")
+            lines += hint
         if args.stage in ("trade", "all"):
             # 退出码之外把「今天下了什么单、拦下了哪几笔」带出来：
             # rc=2 只看到"失败"，还得翻日志才知道是没取到行情还是封板；
