@@ -631,7 +631,9 @@ def failure_hint(cfg: dict) -> tuple[list[str], bool]:
                    + (f" —— gm {code}：{hint}" if hint else f"（gm {code}）"))
 
     steps = [(c, s) for c, s in re.findall(r"\[exit (\d+)\] (\S+)", tail) if c != "0"]
-    if steps:
+    if "已过下单窗口" in tail:
+        out.append("**影响**: 今天不下单——错过 09:30 的窗口，延后成交的价格不可信")
+    elif steps:
         step = steps[-1][1]
         out.append(f"**卡在**: {step}")
         if step in NO_ORDER_STEPS:
@@ -639,7 +641,7 @@ def failure_hint(cfg: dict) -> tuple[list[str], bool]:
         elif step == "place-orders":
             out.append("**影响**: 下单环节出错，**可能有部分委托已发出**，请人工核对成交")
         elif step in ("pull-fills", "reconcile"):
-            out.append("**影响**: 当天成交未入账，`live/holdings.csv` 还是旧的，先别信")
+            out.append("**影响**: 当天成交未入账，live/holdings.csv 还是旧的，先别信")
     return out, gm_down
 
 
@@ -818,6 +820,16 @@ def stage_trade(cfg: dict, log, args) -> int:
         return 0
     print(f"\n委托文件：{orders}")
 
+    # 2.4) 下单窗口闸门：StartWhenAvailable 的补跑可能拖到下午，
+    #      那时 09:30 的信号价已经不作数。--no-wait 视为人工显式放行。
+    if not args.dry_run and not getattr(args, "no_wait", False):
+        ok, deadline = trade_window_ok(cfg)
+        if not ok:
+            now_hhmm = dt.datetime.now().strftime("%H:%M:%S")
+            log.write(f"[abort] 现在 {now_hhmm}，已过下单窗口 {deadline}，放弃下单\n")
+            print(f"[abort] 已过下单窗口 {deadline}（现在 {now_hhmm}），不下单", flush=True)
+            return 3
+
     # 2.5) 等开盘再下单（口径见 _wait_until）。演练与 --no-wait 不等。
     if not args.dry_run and not getattr(args, "no_wait", False):
         _wait_until(str(cfg.get("order_time", "09:30:05")), log)
@@ -850,6 +862,22 @@ def stage_trade(cfg: dict, log, args) -> int:
         "--order-type", str(cfg["order_type"]),
         "--max-orders", str(cfg["max_orders"]), *price_args,
     ], log, timeout=300)
+
+
+def trade_window_ok(cfg: dict, now: dt.datetime | None = None) -> tuple[bool, str]:
+    """当前是否还在当天的下单窗口内。返回 `(是否可下单, 截止时刻)`。
+
+    为什么需要这道闸门：计划任务一旦开了 `StartWhenAvailable`，**错过触发会补跑**。
+    补跑可能拖到 11 点甚至下午——而 `_wait_until` 在 order_time 已过时是"直接下单"。
+    策略是追涨停苗头，挂单价 = 执行日实时价，9:30 的信号到 11:00 早已不作数，
+    按那时的价格成交等于换了个策略。宁可当天不做，也不能按错的价格做。
+
+    2026-11-03 实测：trade 在 9:29 被"错过"（`NumberOfMissedRuns=1`），当天一笔没交易。
+    开补跑是为了这个；但补跑必须带时间上限，否则把"漏一次"换成"做错一笔"。
+    """
+    deadline = str(cfg.get("trade_deadline", "09:50"))
+    hhmm = (now or dt.datetime.now()).strftime("%H:%M")
+    return hhmm <= deadline, deadline
 
 
 def stage_settle(cfg: dict, log, args) -> int:
@@ -948,6 +976,21 @@ def write_heartbeat(cfg: dict, results: list[tuple[str, int]], dry_run: bool) ->
     p.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def md_hard_break(text: str) -> str:
+    """把单换行换成 markdown 硬换行（行尾两个空格）。
+
+    钉钉 markdown **会把单个 `\\n` 当空格吃掉**——2026-11-03 用户在桌面端截图实测：
+    「**stage**: data 时间: 2026-11-03 08:30:43 结果: 成功」三行挤成一行，
+    看门狗那条「到点没有心跳… 现在: 15:35 查 live/logs/…」也一样。
+    行尾两个空格是 markdown 的硬换行语法，钉钉认这个；空行保持原样（段落分隔）。
+    放在 `dingtalk_push` 里统一处理，`watchdog.py` 走同一个出口，不用各改一遍。
+    """
+    lines = text.split("\n")
+    last = len(lines) - 1
+    return "\n".join(f"{ln}  " if (ln.strip() and i < last) else ln
+                     for i, ln in enumerate(lines))
+
+
 def dingtalk_push(title: str, text: str, timeout: int = 10) -> bool:
     """钉钉自定义机器人（加签）。返回是否发送成功。
 
@@ -960,6 +1003,8 @@ def dingtalk_push(title: str, text: str, timeout: int = 10) -> bool:
     import time
     import urllib.parse
     import urllib.request
+
+    text = md_hard_break(text)
 
     cfg = _load_notify()
     if not cfg:
@@ -1059,7 +1104,7 @@ def main() -> int:
             lines += trade_lines(cfg)
         if args.stage in ("settle", "all"):
             lines += settle_lines(cfg, today())
-        lines.append(f"\n日志 `{log_path.name}`")
+        lines.append(f"\n日志 {log_path.name}")
         if not ok:
             lines.append("\n**请尽快查看日志**")
         dingtalk_push(title, "\n".join(lines))

@@ -1091,6 +1091,9 @@ def test_stage_trade_waits_for_order_time_before_placing(monkeypatch, tmp_path):
     waited = []
     monkeypatch.setattr(mod, "_wait_until",
                         lambda t, log=None: (waited.append(t), 0.0)[1])
+    # 下单窗口闸门与本研究无关（这条锁的是"等待发生在 place-orders 之前"），
+    # 何况测试是在晚上跑的，真实时间早就过了 09:50。
+    monkeypatch.setattr(mod, "trade_window_ok", lambda cfg, now=None: (True, "09:50"))
 
     cfg = {"python_data": "py", "data_dir": "data/x", "holdings": "live/holdings.csv",
            "out_dir": "live", "log_dir": "live/logs", "position": 0.5,
@@ -1702,3 +1705,88 @@ def test_patrol_never_raises(tmp_path, monkeypatch):
     mod.patrol({"python_data": "nope"}, log, types.SimpleNamespace(dry_run=False))
     log.close()
     assert "看门狗跑不起来" in (tmp_path / "z.log").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- 钉钉换行
+def test_md_hard_break_adds_two_spaces():
+    """钉钉会把单个 \\n 当空格吃掉，必须转成行尾两个空格的硬换行。"""
+    mod = _load_script("live_auto.py")
+    assert mod.md_hard_break("第一行\n第二行") == "第一行  \n第二行"
+    # 空行是段落分隔，保持原样（不能变成"两个空格的行"）
+    assert mod.md_hard_break("a\n\nb") == "a  \n\nb"
+    # 已经有硬换行的不叠加成四个（多两个无害，但要可预期）
+    assert mod.md_hard_break("a  \nb") == "a    \nb"
+
+
+def test_dingtalk_push_converts_newlines(monkeypatch):
+    """真正发出去的 payload 里必须已经是硬换行。"""
+    import json as _json
+    import urllib.request
+    mod = _load_script("live_auto.py")
+    sent = {}
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"errcode":0,"errmsg":"ok"}'
+
+    def fake_urlopen(req, timeout=10):
+        sent["payload"] = _json.loads(req.data.decode("utf-8"))
+        return Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mod, "_load_notify",
+                        lambda: {"webhook_url": "http://example.invalid/x", "secret": ""})
+
+    assert mod.dingtalk_push("标题", "stage: data\n时间: 08:30\n结果: 成功") is True
+    body = sent["payload"]["markdown"]["text"]
+    assert "stage: data  \n时间: 08:30  \n结果: 成功" in body, repr(body)
+
+
+# ---------------------------------------------------------------- 补跑不能乱下单
+def test_trade_window_allows_on_time():
+    """09:29 启动、09:30 下单，窗口内。"""
+    import datetime as dt
+    mod = _load_script("live_auto.py")
+    ok, deadline = mod.trade_window_ok({}, dt.datetime(2026, 11, 3, 9, 29, 0))
+    assert ok is True and deadline == "09:50"
+
+
+def test_trade_window_blocks_late_rerun():
+    """StartWhenAvailable 补跑拖到 11:00，必须挡住——那不是 9:30 的信号价了。"""
+    import datetime as dt
+    mod = _load_script("live_auto.py")
+    ok, deadline = mod.trade_window_ok({}, dt.datetime(2026, 11, 3, 11, 0, 0))
+    assert ok is False and deadline == "09:50"
+    # 边界：09:50 整还算窗口内，09:51 就不算
+    assert mod.trade_window_ok({}, dt.datetime(2026, 11, 3, 9, 50, 0))[0] is True
+    assert mod.trade_window_ok({}, dt.datetime(2026, 11, 3, 9, 51, 0))[0] is False
+
+
+def test_trade_window_is_configurable():
+    import datetime as dt
+    mod = _load_script("live_auto.py")
+    ok, deadline = mod.trade_window_ok({"trade_deadline": "10:10"},
+                                       dt.datetime(2026, 11, 3, 10, 5, 0))
+    assert ok is True and deadline == "10:10"
+
+
+def test_failure_hint_explains_missed_window(tmp_path, monkeypatch):
+    """被窗口闸门拦下时，推送要说清"今天不交易"及其原因。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    _seed_fail_log(tmp_path, "\n# live_auto stage=trade dry_run=False at x\n"
+                             "[abort] 现在 11:03:12，已过下单窗口 09:50，放弃下单\n",
+                   day="2026-11-03")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-11-03")
+
+    lines, gm_down = mod.failure_hint({"log_dir": "live/logs"})
+    text = "\n".join(lines)
+    assert "今天不下单" in text, text
+    assert gm_down is False

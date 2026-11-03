@@ -135,7 +135,7 @@ def check(now: dt.datetime, heartbeats: dict, alerted: dict,
             "stage": stage, "kind": kind,
             "text": (f"**{stage}**（计划 {hhmm}，宽限 {grace} 分钟）：{detail}\n"
                      f"**现在**: {now:%Y-%m-%d %H:%M}\n"
-                     f"查 `live/logs/{day}.log` 与计划任务「a_share_quant_{stage}」"),
+                     f"查 live/logs/{day}.log 与计划任务「a_share_quant_{stage}」"),
         })
 
     # ---- 每日汇总（16:00 后发一次）：既是当日体检，也是看门狗的存活证明 ----
