@@ -18,7 +18,7 @@
   实盘链路按这个方案实现；
 - 三份真实数据集（2020-2024 / 2015-2019 / 2025-01~2026-10）**不入库**，仓库只存内容指纹
   `data/MANIFEST.json`；
-- 434 个测试；当前权威回测结果是 `results/EXP-20261022-*`。
+- 431 个测试；当前权威回测结果是 `results/EXP-20261022-*`。
 
 ## 2. 项目结构
 
@@ -55,7 +55,7 @@ a_share_quant/
 ```bash
 python -m venv .venv
 pip install -e ".[dev]"
-python -m pytest            # 434 passed；测试不读真实数据
+python -m pytest            # 431 passed；测试不读真实数据
 ```
 
 核心依赖：`pandas / numpy / scipy / matplotlib / pyyaml / pyarrow`。没有 GPU、没有数据库。
@@ -413,6 +413,15 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
     可加的防护：任务设置 `StartWhenAvailable`（错过则补跑）、启用
     `Microsoft-Windows-TaskScheduler/Operational` 日志；后者改了会影响 `LogonType=Password`
     的任务，需要重输账户密码，必须有人在现场。
+
+38. **流水线内巡检已停用（2026-11-10 起）**。`live_auto` 不再调用
+    `scripts/watchdog.py`，`deploy/register_tasks.ps1` 也不再注册
+    `a_share_quant_watchdog` 任务；判定脚本与单测保留，可手动 `--dry-run --now` 回放，
+    但没有人定时叫它。后果：**三段任务没启动、或单个 stage 漏跑，钉钉不再有看门狗告警**；
+    进程内推送在"进程根本没起来"时本来就沉默，NightWatch 的文件心跳只看
+    `live/heartbeat.json` 的 mtime，抓不到 09:30→15:35 之间的单段漏跑。
+    与第 37 条叠加：静默故障现在只能靠人每天核对 `live/logs/<日期>.log`、
+    计划任务的「上次运行时间 / 上次结果」和 `fills/<日期>.csv`。
 
 ## 13. 纪律
 

@@ -1,4 +1,4 @@
-# 注册 Windows 计划任务：三个 stage 在交易日自动跑 + 看门狗每 30 分钟巡检。
+# 注册 Windows 计划任务：三个 stage 在交易日自动跑。
 # 用法（服务器上，管理员 PowerShell）：
 #   powershell -ExecutionPolicy Bypass -File C:\AppData\a_share_quant\deploy\register_tasks.ps1
 # 卸载：
@@ -21,6 +21,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ($Remove) {
+    # watchdog 只删不建：巡检已停用，但旧机器可能还留着那个任务，卸载时顺手清掉。
     foreach ($n in @("a_share_quant_data","a_share_quant_trade","a_share_quant_settle","a_share_quant_watchdog")) {
         schtasks /delete /tn $n /f | Out-Null
         Write-Output "removed $n"
@@ -34,7 +35,6 @@ $BSTR = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw)
 $Plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
 
 $Script = Join-Path $Root "scripts\live_auto.py"     # 绝对路径，别用相对
-$Watchdog = Join-Path $Root "scripts\watchdog.py"
 
 $jobs = @(
     @{Name="a_share_quant_data";   Tr=('"'+$PyData+'" "'+$Script+'" --stage data');   At="08:30"},
@@ -54,15 +54,11 @@ foreach ($j in $jobs) {
     Write-Output ("registered " + $j.Name + "  " + $j.At)
 }
 
-# 看门狗：每 30 分钟巡检一次心跳（周末逻辑里自己跳过）。
-# 它是"任务没跑起来"时唯一的告警来源——进程内推送那时是沉默的。
-$wd = '"' + $PyData + '" "' + $Watchdog + '"'
-schtasks /create /tn a_share_quant_watchdog /tr $wd `
-    /sc minute /mo 30 /ru Administrator /rp $Plain /rl HIGHEST /f | Out-Null
-Write-Output "registered a_share_quant_watchdog  every 30min"
+# 流水线内巡检（scripts/watchdog.py）已停用：不注册计划任务，也不由 live_auto 调用。
+# 后果：计划任务没启动时脚本一行没跑，钉钉全程静默，只能靠人自己发现。
 
 Write-Output ""
-Write-Output "已注册 4 个任务（无论是否登录都运行，脚本均为绝对路径）。"
+Write-Output "已注册 3 个任务（无论是否登录都运行，脚本均为绝对路径）。"
 Write-Output "查看：schtasks /query /tn a_share_quant_trade /fo LIST /v"
 Write-Output "手动触发：schtasks /run /tn a_share_quant_trade"
 Write-Output "验证任务真的会跑：触发后看 live\logs\<今天>.log 是否更新、上次结果是否为 0"

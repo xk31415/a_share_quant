@@ -673,31 +673,6 @@ def stage_data(cfg: dict, log, args) -> int:
     return rc
 
 
-def patrol(cfg: dict, log, args) -> None:
-    """先让看门狗巡检一次，把「前一段没跑」暴露出来。
-
-    为什么必须放在 trade / settle 开头：进程内告警有个死区——**脚本没启动就一条
-    消息都没有**。2026-11-02 的 08:30 data 压根没被触发，钉钉全程静默，人是靠自己
-    「感觉不对」才发现的。而 09:29 的 trade、15:35 的 settle 当天几乎一定会启动，
-    让它们先把前一段的缺失喊出来。
-
-    看门狗自己的判定：data 过 09:00 判、trade 过 09:40 判、settle 过 16:05 判，
-    同一 (日期, stage, 类型) 只报一次。跑不起来也不影响本段——它是第二只眼，
-    不是前置条件。
-    """
-    if args.dry_run:
-        return
-    try:
-        p = subprocess.run([cfg["python_data"], "scripts/watchdog.py"],
-                           cwd=str(ROOT), timeout=180, capture_output=True,
-                           text=True, encoding="utf-8", errors="replace")
-        log.write(f"[patrol] watchdog rc={p.returncode}\n")
-        for ln in (p.stdout or "").strip().splitlines():
-            log.write(f"  {ln}\n")
-    except (OSError, subprocess.SubprocessError) as e:       # noqa: BLE001
-        log.write(f"[patrol] 看门狗跑不起来（不影响本段）：{e}\n")
-
-
 def data_freshness(cfg: dict) -> tuple[bool, str, str]:
     """数据是否落后于交易日历：返回 `(是否过期, 数据最新日, 应有最新日)`。
 
@@ -740,11 +715,9 @@ def stage_trade(cfg: dict, log, args) -> int:
         holdings_out = cfg["holdings"]
         cash_file = ROOT / cfg["log_dir"] / f"cash_{date}.txt"
 
-    # 0) 让看门狗先巡检一次：08:30 的 data 可能压根没跑（README 第 37 条）
-    patrol(cfg, log, args)
-
     # 数据兜底：08:30 的 data 段可能压根没被触发（README 第 37 条），
-    #    而 09:29 的 trade 当天一定启动——这里补一次再交易。
+    #    只要 09:29 的 trade 起来了，这里就补一次再交易。trade 自己没启动时
+    #    这层兜底同样失效（限制第 37、38 条：巡检已停，只能靠人查日志）。
     #    演练不补：演练不该改 data/。
     if not args.dry_run:
         stale, latest, expected = data_freshness(cfg)
@@ -884,7 +857,6 @@ def stage_settle(cfg: dict, log, args) -> int:
     """取成交回报 -> 对账 -> 更新持仓。"""
     py = cfg["python_data"]
     date = today()
-    patrol(cfg, log, args)          # 先把「data / trade 有没有跑」喊出来
     fills_dir = ROOT / cfg["fills_dir"]
     fills_dir.mkdir(parents=True, exist_ok=True)
     fills = fills_dir / f"{date}.csv"
@@ -944,16 +916,15 @@ def _load_notify() -> dict:
 
 
 def write_heartbeat(cfg: dict, results: list[tuple[str, int]], dry_run: bool) -> None:
-    """每次 stage 结束写心跳，供独立看门狗（watchdog.py）核对"该跑的跑了没有"。
+    """每次 stage 结束写运行留痕（日期 / stage / rc / 时刻）。
 
-    进程内推送有个致命盲区：进程没起来就什么都不会发（2026-10-26/27 三天
-    计划任务脚本路径错、Python 退出码 2、一条告警都没有）。心跳是给流水线
-    **外面**的看门狗看的。
+    这也是服务器上 NightWatch「文件心跳」监控的 `live/heartbeat.json`。流水线内的
+    `watchdog.py` 巡检已停用，但外部服务看的是文件 mtime，这行不能删。
 
     ``dry_run`` 的心跳写到 ``live/_dryrun/heartbeat.json``，不碰生产心跳：
-    外部看门狗（NightWatch 之类）只看文件 mtime，分不出演练与真跑——
-    一次手动演练就会把「今天根本没跑」这件事掩盖掉（2026-10-28 实测：
-    前一晚演练把心跳续到 22:37，本该 09:35 报的故障要拖到 16:37，已出监控时段）。
+    外部文件心跳只看 mtime，分不出演练与真跑——一次手动演练就会把
+    「今天根本没跑」这件事掩盖掉（2026-10-28 实测：前一晚演练把心跳续到
+    22:37，本该 09:35 报的故障要拖到 16:37，已出监控时段）。
     """
     import json
     out_dir = "live/_dryrun" if dry_run else cfg["out_dir"]
@@ -981,9 +952,9 @@ def md_hard_break(text: str) -> str:
 
     钉钉 markdown **会把单个 `\\n` 当空格吃掉**——2026-11-03 用户在桌面端截图实测：
     「**stage**: data 时间: 2026-11-03 08:30:43 结果: 成功」三行挤成一行，
-    看门狗那条「到点没有心跳… 现在: 15:35 查 live/logs/…」也一样。
-    行尾两个空格是 markdown 的硬换行语法，钉钉认这个；空行保持原样（段落分隔）。
-    放在 `dingtalk_push` 里统一处理，`watchdog.py` 走同一个出口，不用各改一遍。
+    多行告警同样会被折叠。行尾两个空格是 markdown 的硬换行语法，钉钉认这个；
+    空行保持原样（段落分隔）。放在 `dingtalk_push` 里统一处理，所有调用方
+    都走同一个出口，不用各改一遍。
     """
     lines = text.split("\n")
     last = len(lines) - 1
@@ -1073,7 +1044,7 @@ def main() -> int:
     log.write(f"\n[live_auto] done rc={worst}\n")
     log.close()
 
-    # ---- 心跳（给 watchdog 看，必须先于推送写：推送挂了心跳也要在）----
+    # ---- 运行留痕（外部文件心跳看 mtime；必须先于推送写：推送挂了留痕也要在）----
     write_heartbeat(cfg, results, args.dry_run)
 
     # ---- 推送结果（失败不阻断）----

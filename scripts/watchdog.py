@@ -1,4 +1,15 @@
-"""独立看门狗：站在流水线外面，核对「该跑的任务真的跑了」。
+"""独立看门狗判定器 —— **已停用**，保留供手动回放与单测。
+
+状态（2026-11-10）：按项目主人要求停掉流水线巡检。
+* `live_auto` 不再调用本脚本；`deploy/register_tasks.ps1` 不再注册
+  `a_share_quant_watchdog` 计划任务；服务器上也没有这个任务。
+* `live/heartbeat.json` 仍在写（运行留痕，也是外部 NightWatch 文件心跳的来源），
+  只是流水线内不再有消费者。
+* 不要重新接回流水线，除非主人明确要求。
+
+原设计
+------
+独立看门狗：站在流水线外面，核对「该跑的任务真的跑了」。
 
 为什么必须独立于 live_auto
 --------------------------
@@ -20,9 +31,8 @@
 
 用法
 ----
-    python scripts/watchdog.py                    # 巡检一次
-    python scripts/watchdog.py --dry-run          # 只看判定，不推送
-    python scripts/watchdog.py --now "2026-10-28 10:00"   # 回放判定（测试用）
+    python scripts/watchdog.py --dry-run --now "2026-10-28 10:00"   # 回放判定（不推送）
+    python scripts/watchdog.py                    # 手动巡检一次（会发钉钉，一般不跑）
 """
 from __future__ import annotations
 
