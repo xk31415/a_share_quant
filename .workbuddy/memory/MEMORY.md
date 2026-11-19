@@ -104,6 +104,15 @@
   （Git Bash 后台任务要写 payload 脚本，`mkdir -p /tmp` 后重试即可），别主动带
   「绕过沙箱」参数（会向主人弹授权）；前台命令超时会被 SIGTERM 杀，不能用来常驻。
   真要临时降级，只限**单条连接跑完所有查询**、用完立刻恢复 daemon，并在日志标注是降级。
+- **实盘三个计划任务以 `SYSTEM` 运行**（2026-11-19 起）：`a_share_quant_data/trade/settle`，
+  `Run As User: SYSTEM`。原因：Administrator 被 RDP 爆破长期锁定（4740 每 12 分钟一次），
+  任务用 `LogonType=Password` 卡在登录阶段（Event 101/104、错误值 2147944309=1335），
+  11-18 三阶段全灭。**改 SYSTEM 是单向操作**（没有密码改不回 Administrator），
+  必须先建一次性探针任务以 SYSTEM 跑 `gm_bridge.py pull-holdings` 验证凭据/网络/写盘，
+  再改生产任务。RDP 未收敛，账户仍会被锁，但已不影响任务。
+- **远端 cmd 会吃掉反斜杠**：经 ssh 执行 `dir C:\AppData\NightWatch` 时 `\A` 消失
+  （报「命令行格式不正确 - ppData」）。本地用 `chr(92)` 拼路径、heredoc 传命令绕开，
+  不要试图用正斜杠（cmd 把 `/` 当开关）。
 - **代理软件会干扰到服务器的 SSH**：2026-10-27 晚 `Connection reset by peer`（ping 通、22 开、
   握手完成后在认证阶段被切），退掉代理立即恢复。同类现象先怀疑代理，别急着查 sshd。
 - NightWatch 看门狗：源码 `D:\StudyDemo\csharp\NightWatch`，服务器 `C:\AppData\NightWatch`

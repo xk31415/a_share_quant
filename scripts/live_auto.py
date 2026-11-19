@@ -673,6 +673,25 @@ def stage_data(cfg: dict, log, args) -> int:
     return rc
 
 
+def _data_ran_today(cfg: dict) -> bool:
+    """今天有没有 `data` 段的**成功**记录（读 `live/heartbeat.json`）。
+
+    用于区分"数据段根本没启动"与"启动了但源没有新交易日"：两者都会让行情/
+    日历停在旧日，光看文件分不出来。
+    """
+    import json
+    p = ROOT / str(cfg.get("out_dir") or "live") / "heartbeat.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    rec = (data or {}).get(today()) or {}
+    try:
+        return int(((rec or {}).get("data") or {}).get("rc", 1)) == 0
+    except (TypeError, ValueError):          # 心跳被改坏：当作没跑，宁可多补一次
+        return False
+
+
 def data_freshness(cfg: dict) -> tuple[bool, str, str]:
     """数据是否落后于交易日历：返回 `(是否过期, 数据最新日, 应有最新日)`。
 
@@ -681,6 +700,15 @@ def data_freshness(cfg: dict) -> tuple[bool, str, str]:
     为什么 trade 要自己判断：08:30 的 data 段可能压根没被触发（README 第 37 条，
     2026-11-02 就是这样），而 09:29 的 trade 当天一定启动。少了这层判断，
     trade 会拿几天前的数据算信号、照常下单——你不知道自己按哪天的市场状态在买。
+
+    **第二层判定（2026-11-19 补）**：`trading_days()` 读的 `calendar.csv` 与
+    `bars.parquet` 同一个 data 目录、同一套更新流程，data 段停摆时两者一起停在
+    旧日，`expected` 就被算成停更那天，上面那条 `latest < expected` 恒不成立——
+    兜底会在最需要它的时候自我失效。实测：11-18 全天与 11-19 的 08:30 都因
+    Administrator 账户被锁而没启动，行情停在 11-16，trade 照常拿 11-16 的信号
+    下单。所以日历说"够新"之后还要看两个独立信号：距今天 ≥2 个自然日、且今天
+    没有 data 成功留痕。周一距上周五本来就是 3 天，靠 heartbeat 那一层兜住误报；
+    长假后首日同理（跑过就没新交易日，不该补）。
     """
     data_dir = cfg.get("data_dir")
     if not data_dir:
@@ -695,7 +723,19 @@ def data_freshness(cfg: dict) -> tuple[bool, str, str]:
         latest = str(df["trade_date"].max())[:10]
     except Exception:                        # noqa: BLE001
         return True, "", expected
-    return latest < expected, latest, expected
+    if latest < expected:
+        return True, latest, expected
+
+    try:
+        day = dt.date.fromisoformat(today())
+        last_day = dt.date.fromisoformat(latest)
+    except ValueError:                       # 日期解析不了：按过期处理（fail-safe）
+        return True, latest, expected
+    if (day.weekday() < 5
+            and (day - last_day).days >= 2
+            and not _data_ran_today(cfg)):
+        return True, latest, f"{expected}（日历与行情同源停更）"
+    return False, latest, expected
 
 
 def stage_trade(cfg: dict, log, args) -> int:

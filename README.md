@@ -18,7 +18,7 @@
   实盘链路按这个方案实现；
 - 三份真实数据集（2020-2024 / 2015-2019 / 2025-01~2026-10）**不入库**，仓库只存内容指纹
   `data/MANIFEST.json`；
-- 431 个测试；当前权威回测结果是 `results/EXP-20261022-*`。
+- 435 个测试；当前权威回测结果是 `results/EXP-20261022-*`。
 
 ## 2. 项目结构
 
@@ -55,7 +55,7 @@ a_share_quant/
 ```bash
 python -m venv .venv
 pip install -e ".[dev]"
-python -m pytest            # 431 passed；测试不读真实数据
+python -m pytest            # 435 passed；测试不读真实数据
 ```
 
 核心依赖：`pandas / numpy / scipy / matplotlib / pyyaml / pyarrow`。没有 GPU、没有数据库。
@@ -401,18 +401,30 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
     升级 `pip install -U gm`（3.0.191 → 3.0.192 恢复；阿里云源会在同一字节截断，清华源可用），
     升级前把 `site-packages\gm` 整包备份一份。
 
-37. **计划任务的触发会被任务之外的原因吃掉，而且不留任何痕迹**。2026-11-02 的 08:30 data
-    与 15:35 settle 整天没触发（`schtasks` 的"上次运行时间"还停在 10-30），而同一天 09:29
-    的 trade 正常启动。已排除：未重启（无 6005/6006）、不支持任何睡眠（`powercfg /a` 显示
-    S1/S2/S3/休眠全部不可用）、任务计划服务无启停（7036）、任务已启用且星期含周一到周五、
-    没有僵尸进程。唯一异常是 08:00-09:11 系统在跑 Windows 更新维护（Software Protection /
-    AppXSVC / WaaSMedicSvc 反复启停），而 08:20:23-08:52:03 之间一条事件都没有。
-    **原因未确认，标存疑**。
+37. **计划任务的触发会被任务之外的原因吃掉，而且不留任何痕迹**。已知两种成因：
+
+    (a) **账户被锁**（2026-11-18/19 确认）。Administrator 被 RDP 爆破，安全日志 4740 从
+    11-18 02:46 起每约 12 分钟一条、`net user Administrator` 直接显示 `Locked`。三个任务
+    都是 `LogonType=Password`，卡在登录阶段：TaskScheduler 日志 Event 101/104、错误值
+    `2147944309`（1335）。11-18 三阶段全灭；11-19 只有 09:29 的 trade 落在两次锁定之间的
+    解锁空窗里跑成，08:30 data 与 15:35 settle 仍失败。处置：三任务改 `/ru SYSTEM`
+    （`Run As User: SYSTEM`），实盘不再依赖被爆破的账户。**网络侧未收敛，RDP 仍开在
+    公网、账户仍会被锁——现在只影响人的 SSH/RDP 登录，不再影响任务。**
+    改 SYSTEM 是单向操作（没有密码就改不回 Administrator），必须先建一次性探针任务
+    以 SYSTEM 跑一遍 `gm_bridge.py pull-holdings`，确认能读 `config/gm_account.yaml`、
+    能连 gm、写盘正常，再改生产任务。
+
+    (b) **原因未确认，标存疑**（2026-11-02）。08:30 data 与 15:35 settle 整天没触发
+    （"上次运行时间"停在 10-30），同日 09:29 的 trade 正常启动。已排除：未重启（无
+    6005/6006）、不支持任何睡眠（`powercfg /a` 显示 S1/S2/S3/休眠全部不可用）、任务计划
+    服务无启停（7036）、任务已启用且星期含周一到周五、没有僵尸进程。唯一异常是 08:00-09:11
+    系统在跑 Windows 更新维护（Software Protection / AppXSVC / WaaSMedicSvc 反复启停），
+    而 08:20:23-08:52:03 之间一条事件都没有。
+
     后果比故障本身更严重：脚本没启动，日志和推送都是空白，**"没有消息"不等于"没事"**。
     判断标准：**连续一个交易日该有的推送没来，就是故障，不能等它自己恢复**。
-    可加的防护：任务设置 `StartWhenAvailable`（错过则补跑）、启用
-    `Microsoft-Windows-TaskScheduler/Operational` 日志；后者改了会影响 `LogonType=Password`
-    的任务，需要重输账户密码，必须有人在现场。
+    排查入口：`wevtutil qe Microsoft-Windows-TaskScheduler/Operational`（该日志现已启用）。
+    若要改回 `LogonType=Password`，需要有人在现场重输账户密码。
 
 38. **流水线内巡检已停用（2026-11-10 起）**。`live_auto` 不再调用
     `scripts/watchdog.py`，`deploy/register_tasks.ps1` 也不再注册
@@ -422,6 +434,17 @@ python scripts/run_baseline_backtest.py --data-dir data/processed_2025_2026 \
     `live/heartbeat.json` 的 mtime，抓不到 09:30→15:35 之间的单段漏跑。
     与第 37 条叠加：静默故障现在只能靠人每天核对 `live/logs/<日期>.log`、
     计划任务的「上次运行时间 / 上次结果」和 `fills/<日期>.csv`。
+
+39. **数据过期的兜底会因「日历与行情同源」自我失效**。`data_freshness()` 拿
+    `calendar.csv` 算 `expected`，而 calendar 与 `bars.parquet` 由同一个
+    `update_dataset.py` 一起更新：data 段停摆时两者一起停在旧日，`latest < expected`
+    恒不成立，trade 会拿几天前的信号照常下单（2026-11-19 实测：行情停在 11-16，
+    09:29 的 trade 按 11-16 的信号发了 3 笔委托）。已加第二层判定——日历说"够新"
+    之后还要满足「距今天 ≥2 个自然日」且「heartbeat 里今天没有 data 段成功记录」
+    才判过期：周一距上周五本来就是 3 天，靠 heartbeat 那一层兜住误报；长假后首日
+    data 段跑过（成功）就放行，不会误杀。**代价：`live/heartbeat.json` 被删或损坏时，
+    每天 trade 前会多补一次数据**（幂等，约 80 秒），这是有意的取舍——补数据便宜，
+    用旧数据下单不便宜。
 
 ## 13. 纪律
 

@@ -1570,11 +1570,24 @@ def test_data_freshness_detects_stale(tmp_path, monkeypatch):
     assert (stale, latest, expected) == (True, "2026-10-29", "2026-10-30")
 
 
+def _fake_heartbeat(tmp_path, day, rc=0):
+    """造 live/heartbeat.json：`day` 当天 data 段留痕（rc=0 成功 / 非 0 失败）。"""
+    import json
+    from pathlib import Path
+    d = Path(tmp_path) / "live"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "heartbeat.json").write_text(
+        json.dumps({day: {"data": {"rc": rc, "at": day + "T08:31:11",
+                                   "dry_run": False}}}),
+        encoding="utf-8")
+
+
 def test_data_freshness_ok_when_caught_up(tmp_path, monkeypatch):
     """bars 到前一交易日就不算过期。"""
     from pathlib import Path
     mod = _load_script("live_auto.py")
     _fake_bars(tmp_path, ["2026-10-29", "2026-10-30"])
+    _fake_heartbeat(tmp_path, "2026-11-02")       # 周一：08:30 的 data 已经跑过
     monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
     monkeypatch.setattr(mod, "today", lambda: "2026-11-02")
     monkeypatch.setattr(mod, "trading_days",
@@ -1593,6 +1606,72 @@ def test_data_freshness_treats_unreadable_as_stale(tmp_path, monkeypatch):
                         lambda cfg: ["2026-10-30", "2026-11-02"])
     stale, latest, expected = mod.data_freshness({"data_dir": "data/nope"})
     assert stale is True and latest == "" and expected == "2026-10-30"
+
+
+def test_data_freshness_catches_calendar_stall(tmp_path, monkeypatch):
+    """日历与行情同源停更时，expected 会被算成停更日——兜底必须自己发现。
+
+    2026-11-19 实测：Administrator 被暴力破解锁死，08:30 的 data 段没起来，
+    行情停在 11-16，`calendar.csv` 也停在 11-16，于是 `latest < expected`
+    恒不成立，trade 拿着 11-16 的信号照常下单。
+    """
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    _fake_bars(tmp_path, ["2026-11-13", "2026-11-16"])
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-11-19")       # 周四
+    monkeypatch.setattr(mod, "trading_days",
+                        lambda cfg: ["2026-11-13", "2026-11-16"])  # 日历同源停更
+    stale, latest, expected = mod.data_freshness({"data_dir": "data"})
+    assert stale is True, (stale, latest, expected)
+    assert latest == "2026-11-16" and expected.startswith("2026-11-16"), \
+        (latest, expected)
+
+
+def test_data_freshness_trusts_heartbeat_when_calendar_stalled(tmp_path,
+                                                              monkeypatch):
+    """今天 data 段确实跑成功过，就不重复补。
+
+    长假后首个交易日同样会出现"日历最新日距今天 ≥2 天"，靠 heartbeat 区分
+    "真没跑"与"跑了但没新交易日"。
+    """
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    _fake_bars(tmp_path, ["2026-11-13", "2026-11-16"])
+    _fake_heartbeat(tmp_path, "2026-11-19")
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-11-19")
+    monkeypatch.setattr(mod, "trading_days",
+                        lambda cfg: ["2026-11-13", "2026-11-16"])
+    stale, latest, expected = mod.data_freshness({"data_dir": "data"})
+    assert stale is False, (stale, latest, expected)
+
+
+def test_data_freshness_stale_when_today_data_failed(tmp_path, monkeypatch):
+    """心跳里今天 data 段 rc≠0（跑了但失败）仍要补，不能当"跑过"放行。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    _fake_bars(tmp_path, ["2026-11-13", "2026-11-16"])
+    _fake_heartbeat(tmp_path, "2026-11-19", rc=3)
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-11-19")
+    monkeypatch.setattr(mod, "trading_days",
+                        lambda cfg: ["2026-11-13", "2026-11-16"])
+    stale, latest, expected = mod.data_freshness({"data_dir": "data"})
+    assert stale is True, (stale, latest, expected)
+
+
+def test_data_freshness_quiet_on_weekend(tmp_path, monkeypatch):
+    """非工作日不因为"差 2 天"去补数据。"""
+    from pathlib import Path
+    mod = _load_script("live_auto.py")
+    _fake_bars(tmp_path, ["2026-11-13", "2026-11-16"])
+    monkeypatch.setattr(mod, "ROOT", Path(tmp_path))
+    monkeypatch.setattr(mod, "today", lambda: "2026-11-21")       # 周六
+    monkeypatch.setattr(mod, "trading_days",
+                        lambda cfg: ["2026-11-13", "2026-11-16"])
+    stale, latest, expected = mod.data_freshness({"data_dir": "data"})
+    assert stale is False, (stale, latest, expected)
 
 
 def test_update_dataset_failure_counts_as_no_order():

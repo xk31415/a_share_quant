@@ -1,13 +1,15 @@
-# 注册 Windows 计划任务：三个 stage 在交易日自动跑。
+﻿# 注册 Windows 计划任务：三个 stage 在交易日自动跑。
 # 用法（服务器上，管理员 PowerShell）：
 #   powershell -ExecutionPolicy Bypass -File C:\AppData\a_share_quant\deploy\register_tasks.ps1
 # 卸载：
 #   powershell -ExecutionPolicy Bypass -File ...register_tasks.ps1 -Remove
 #
-# 两个踩过的坑，改这个文件前先读：
-# 1. 必须用 schtasks /ru /rp 存密码，任务才是「无论是否登录都运行」。
-#    Register-ScheduledTask + ServiceAccount 会退化成「只使用交互方式」，
-#    RDP 一注销就不跑了。
+# 三个坑，改这个文件前先读：
+# 1. 用 /ru SYSTEM，不要用 /ru Administrator /rp <密码>。Password 登录在
+#    Administrator 被爆破锁定时会整段失败（2026-11-18 三阶段全灭，TaskScheduler
+#    Event 101/104、错误值 2147944309）；SYSTEM 不需要密码，也不受账户锁定影响。
+#    反过来，Register-ScheduledTask + ServiceAccount 会退化成「只使用交互方式」，
+#    RDP 一注销就不跑了——所以仍然走 schtasks /ru SYSTEM。
 # 2. schtasks **没有工作目录参数**，/tr 里的脚本必须写绝对路径。
 #    2026-10-26/27 三天相对路径 + 默认 cwd=System32，Python 报
 #    can't open file 退出码 2，脚本一行没跑、一条告警都没有。
@@ -29,11 +31,6 @@ if ($Remove) {
     exit 0
 }
 
-# 交互式运行时提示输入一次密码，用于「无论是否登录都运行」
-$pw = Read-Host -AsSecureString "Administrator 密码（用于计划任务后台运行）"
-$BSTR = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw)
-$Plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-
 $Script = Join-Path $Root "scripts\live_auto.py"     # 绝对路径，别用相对
 
 $jobs = @(
@@ -50,7 +47,7 @@ $jobs = @(
 foreach ($j in $jobs) {
     schtasks /create /tn $j.Name /tr $j.Tr `
         /sc weekly /d MON,TUE,WED,THU,FRI /st $j.At `
-        /ru Administrator /rp $Plain /rl HIGHEST /f | Out-Null
+        /ru SYSTEM /rl HIGHEST /f | Out-Null
     Write-Output ("registered " + $j.Name + "  " + $j.At)
 }
 
@@ -58,7 +55,7 @@ foreach ($j in $jobs) {
 # 后果：计划任务没启动时脚本一行没跑，钉钉全程静默，只能靠人自己发现。
 
 Write-Output ""
-Write-Output "已注册 3 个任务（无论是否登录都运行，脚本均为绝对路径）。"
+Write-Output "已注册 3 个任务（SYSTEM 身份，不需要密码；脚本均为绝对路径）。"
 Write-Output "查看：schtasks /query /tn a_share_quant_trade /fo LIST /v"
 Write-Output "手动触发：schtasks /run /tn a_share_quant_trade"
 Write-Output "验证任务真的会跑：触发后看 live\logs\<今天>.log 是否更新、上次结果是否为 0"
