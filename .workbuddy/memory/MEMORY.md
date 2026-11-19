@@ -76,7 +76,8 @@
   `C:\ProgramData\ssh\administrators_authorized_keys`（Windows 特殊路径，ACL 必须是
   Administrators+SYSTEM 完全控制，否则 sshd 忽略整个文件）。**标准运维 key：
   `~/.nightwatch/ops_ed25519`**（指纹 `SHA256:3WShXTvNpbx6INscfeh3wsJC2FyaROcplWqNWkzyaiU`，
-  别名 nightwatch-ops），用法：
+  别名 nightwatch-ops）。下面这条**直连写法只限单次应急**（daemon 起不来且只需跑一条命令），
+  常规查服务器一律走常驻 daemon，见下一条：
   ```
   ssh -i C:/Users/67478/.nightwatch/ops_ed25519 -o BatchMode=yes Administrator@8.134.172.15 "<cmd>"
   ```
@@ -88,6 +89,21 @@
   但 `findstr` / `icacls` 这类把 `/` 当开关的会炸（报「无法打开 C:xxx」）——要么用
   `%ProgramData%\...` 变量，要么这类文件操作用 paramiko/SFTP 做。
   paramiko 连法：`connect(..., key_filename=~/.nightwatch/ops_ed25519, look_for_keys=False)`。
+- **服务器 SSH 一律走常驻 daemon，禁止退回短连接**（2026-11-12 固化）：
+  2026-10-27 前后 40+ 次短连接把服务器认证打回 `Connection reset by peer`，主人明确
+  要求「连上后一直保持连接，不要断开」。机制是 `C:\Users\67478\.nightwatch\ssh_daemon.py`：
+  后台 `serve`（本地 `127.0.0.1:19555`），之后所有命令用 `ask "<cmd>" [timeout]`、
+  传文件用 `put`，30s keepalive + 90s 心跳 + 断线退避，**全程复用一条 SSH 连接**。
+  每次开会话先 `netstat -ano | grep 19555` 确认在；跨会话常被回收，重启即可
+  （Git Bash 后台失败先 `mkdir -p /tmp`，2026-11-13 又一次验证）。
+  **客户端 socket 超时已修**（2026-11-13）：原来 `_send()` 固定 30s，`ask ... 420`
+  只作用于服务端 `run_cmd`，扫安全日志这类长命令客户端会先 `TimeoutError` 断线、
+  服务端还在跑结果却拿不回；现在按 `timeout+60` 设 `settimeout`，传的 timeout 才真生效。
+  **不要因为后台进程一时起不来就改成「每条命令一条 paramiko 连接」，更别把这种降级
+  写进结论当成方案**——那是把已修好的问题放回来。后台启动失败先查 `/tmp`
+  （Git Bash 后台任务要写 payload 脚本，`mkdir -p /tmp` 后重试即可），别主动带
+  「绕过沙箱」参数（会向主人弹授权）；前台命令超时会被 SIGTERM 杀，不能用来常驻。
+  真要临时降级，只限**单条连接跑完所有查询**、用完立刻恢复 daemon，并在日志标注是降级。
 - **代理软件会干扰到服务器的 SSH**：2026-10-27 晚 `Connection reset by peer`（ping 通、22 开、
   握手完成后在认证阶段被切），退掉代理立即恢复。同类现象先怀疑代理，别急着查 sshd。
 - NightWatch 看门狗：源码 `D:\StudyDemo\csharp\NightWatch`，服务器 `C:\AppData\NightWatch`
